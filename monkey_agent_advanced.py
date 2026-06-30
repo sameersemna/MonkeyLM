@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import base64
 import hashlib
 import importlib
 import json
@@ -45,10 +46,21 @@ _load_dotenv()
 
 Faker = _optional_import("faker", "Faker")
 Image = _optional_import("PIL", "Image")
+ImageDraw = _optional_import("PIL", "ImageDraw")
 pil_pixelmatch = _optional_import("pixelmatch.contrib.PIL", "pixelmatch")
 asyncpg = _optional_import("asyncpg")
 redis_asyncio = _optional_import("redis.asyncio")
 httpx = _optional_import("httpx")
+
+try:
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image as RLImage, Table, TableStyle, PageBreak
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.lib.units import inch
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import letter
+    _REPORTLAB_AVAILABLE = True
+except Exception:
+    _REPORTLAB_AVAILABLE = False
 
 # CONFIGURATION
 DEFAULT_TARGET_URL = "https://noblequran-85hu2yge.manus.space/"
@@ -83,6 +95,10 @@ DEFAULT_QDRANT_EMBEDDING_MODEL = "nomic-embed-text"
 DEFAULT_QDRANT_RERANK_ENABLED = False
 DEFAULT_QDRANT_RERANK_MODEL = "qwen2.5:3b"
 DEFAULT_QDRANT_CANDIDATE_LIMIT = 20
+
+DEFAULT_PDF_GENERATE = False
+DEFAULT_PDF_VISION_MODEL = "llama3.2-vision"
+DEFAULT_PDF_VISION_TIMEOUT_SECONDS = 30.0
 
 AXE_CDN_URL = "https://cdnjs.cloudflare.com/ajax/libs/axe-core/4.9.1/axe.min.js"
 VISUAL_DIFF_THRESHOLD_RATIO = 0.01
@@ -193,6 +209,10 @@ QDRANT_ADMIN_ACTION = _env_str("QDRANT_ADMIN_ACTION", "").lower()
 QDRANT_RERANK_ENABLED = _env_bool("QDRANT_RERANK_ENABLED", default=DEFAULT_QDRANT_RERANK_ENABLED)
 QDRANT_RERANK_MODEL = _env_str("QDRANT_RERANK_MODEL", DEFAULT_QDRANT_RERANK_MODEL)
 QDRANT_CANDIDATE_LIMIT = max(3, _env_int("QDRANT_CANDIDATE_LIMIT", DEFAULT_QDRANT_CANDIDATE_LIMIT))
+
+PDF_GENERATE = _env_bool("PDF_GENERATE", default=DEFAULT_PDF_GENERATE)
+PDF_VISION_MODEL = _env_str("PDF_VISION_MODEL", DEFAULT_PDF_VISION_MODEL)
+PDF_VISION_TIMEOUT_SECONDS = max(1.0, _env_float("PDF_VISION_TIMEOUT_SECONDS", DEFAULT_PDF_VISION_TIMEOUT_SECONDS))
 
 
 STRICT_SANDBOX = _env_bool("STRICT_SANDBOX", default=False)
@@ -2687,6 +2707,136 @@ def _compute_action_path_hash(
     return hashlib.sha256(raw).hexdigest()
 
 
+def _step_defects_summary(step_num: int, defects: DefectTracker) -> List[str]:
+    """Collect short human-readable reasons why a step is considered annotation-worthy."""
+    reasons: List[str] = []
+    for item in defects.security_risks:
+        if int(item.get("step", -1)) == step_num:
+            reasons.append(f"security_risk:{item.get('type', 'unknown')}")
+    for item in defects.visual_regressions:
+        if int(item.get("step", -1)) == step_num:
+            reasons.append(f"visual_regression:{item.get('type', 'unknown')}")
+    for item in defects.layout_instability:
+        if int(item.get("step", -1)) == step_num:
+            reasons.append(f"layout_instability:{item.get('type', 'unknown')}")
+    return reasons
+
+
+def _draw_red_box_arrow(
+    image_path: str,
+    box_pct: List[float],
+    context_issue: str,
+    output_path: str,
+) -> bool:
+    """Draw a red bounding box + pointer arrow on a screenshot. Returns True on success."""
+    if Image is None or ImageDraw is None:
+        return False
+    try:
+        with Image.open(image_path) as img:
+            img = img.convert("RGBA")
+            width, height = img.size
+            ymin, xmin, ymax, xmax = box_pct
+            x0 = int(max(0.0, min(1.0, xmin)) * width)
+            y0 = int(max(0.0, min(1.0, ymin)) * height)
+            x1 = int(max(0.0, min(1.0, xmax)) * width)
+            y1 = int(max(0.0, min(1.0, ymax)) * height)
+            if x1 <= x0 or y1 <= y0:
+                return False
+
+            draw = ImageDraw.Draw(img)
+            # Prominent red bounding box
+            draw.rectangle([x0, y0, x1, y1], outline="red", width=4)
+
+            # Red pointer arrow from top-right area toward box center
+            arrow_start = (min(width - 20, x1 + 40), max(20, y0 - 40))
+            arrow_end = ((x0 + x1) // 2, (y0 + y1) // 2)
+            draw.line([arrow_start, arrow_end], fill="red", width=4)
+            # Arrowhead
+            dx = arrow_end[0] - arrow_start[0]
+            dy = arrow_end[1] - arrow_start[1]
+            length = max(1.0, (dx * dx + dy * dy) ** 0.5)
+            ux, uy = dx / length, dy / length
+            px, py = -uy, ux
+            head_len = 12
+            p1 = (arrow_end[0] + int(head_len * (-ux + 0.5 * px)), arrow_end[1] + int(head_len * (-uy + 0.5 * py)))
+            p2 = (arrow_end[0] + int(head_len * (-ux - 0.5 * px)), arrow_end[1] + int(head_len * (-uy - 0.5 * py)))
+            draw.line([p1, arrow_end, p2], fill="red", width=4)
+
+            # Label above the box if space allows
+            label = context_issue[:80]
+            try:
+                label_y = max(12, y0 - 18)
+                draw.text((x0, label_y), label, fill="red")
+            except Exception:
+                pass
+
+            img.save(output_path)
+            return True
+    except Exception as exc:
+        _local_service_log(f"Failed to draw annotation box for {image_path}: {exc}")
+        return False
+
+
+async def annotate_relevant_screenshot(image_path: str, context_issue: str) -> str:
+    """
+    Send a screenshot to a local Ollama vision model, ask it to locate the anomaly,
+    draw a red bounding box + arrow, and return the annotated image path.
+    Falls back to the original image path on any failure.
+    """
+    if not PDF_GENERATE or not image_path or not os.path.exists(image_path):
+        return image_path
+
+    base, ext = os.path.splitext(image_path)
+    annotated_path = f"{base}_annotated{ext}"
+
+    try:
+        with open(image_path, "rb") as f:
+            image_bytes = f.read()
+        b64_image = base64.b64encode(image_bytes).decode("utf-8")
+
+        prompt = (
+            "You are a QA vision assistant. A browser test step failed or produced a defect. "
+            f"Issue context: {context_issue}\n\n"
+            "Look at the screenshot and locate the region that best represents the issue. "
+            "Return ONLY a JSON object with this exact schema:\n"
+            '{"box": [ymin, xmin, ymax, xmax], "description": "short sentence"}\n'
+            "All coordinates are normalized percentages between 0.0 and 1.0. "
+            "If you cannot locate the issue, return an empty box: [0.0, 0.0, 0.0, 0.0]."
+        )
+
+        response = await asyncio.wait_for(
+            asyncio.to_thread(
+                ollama.chat,
+                model=PDF_VISION_MODEL,
+                messages=[
+                    {"role": "user", "content": prompt, "images": [b64_image]},
+                ],
+                format="json",
+                options={"temperature": 0.1, "num_ctx": 4096},
+            ),
+            timeout=PDF_VISION_TIMEOUT_SECONDS,
+        )
+
+        content = response.get("message", {}).get("content", "")
+        parsed = json.loads(content)
+        box = parsed.get("box", [0.0, 0.0, 0.0, 0.0])
+        if not isinstance(box, (list, tuple)) or len(box) != 4:
+            return image_path
+
+        if all(float(v) == 0.0 for v in box):
+            return image_path
+
+        if _draw_red_box_arrow(image_path, box, context_issue, annotated_path):
+            return annotated_path
+        return image_path
+    except asyncio.TimeoutError:
+        _local_service_log(f"Vision annotation timed out for {image_path} after {PDF_VISION_TIMEOUT_SECONDS}s")
+        return image_path
+    except Exception as exc:
+        _local_service_log(f"Vision annotation failed for {image_path}: {exc}")
+        return image_path
+
+
 async def execute_action(
     page: Page,
     action_plan: Dict[str, Any],
@@ -2917,6 +3067,26 @@ async def execute_action(
             log_entry["screenshot"] = screenshot_name
         except:
             pass
+
+    # Selective vision annotation: only for FAILED/CRASH steps or steps with
+    # security/visual/layout defects. Benign/successful steps are skipped.
+    if log_entry.get("screenshot") and PDF_GENERATE:
+        status = log_entry.get("status", "")
+        defect_reasons = _step_defects_summary(step_num, defects)
+        if status in {"FAILED", "CRASH"} or defect_reasons:
+            context_issue = f"status={status}"
+            if defect_reasons:
+                context_issue += "; " + "; ".join(defect_reasons)
+            if log_entry.get("error"):
+                context_issue += f"; error={log_entry['error'][:120]}"
+            try:
+                original_path = os.path.join(OUTPUT_DIR, log_entry["screenshot"])
+                annotated_path = await annotate_relevant_screenshot(original_path, context_issue)
+                if annotated_path != original_path:
+                    log_entry["screenshot"] = os.path.basename(annotated_path)
+                    log_entry["screenshot_annotated"] = True
+            except Exception as exc:
+                _local_service_log(f"Annotation hook failed at step {step_num}: {exc}")
 
     if log_sink is None:
         test_logs.append(log_entry)
@@ -3255,6 +3425,148 @@ def generate_json_summary(start_time: datetime, end_time: datetime) -> None:
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
     print(f"📦 JSON summary generated: {output_path}")
+
+
+def generate_pdf_report(start_time: datetime, end_time: datetime) -> None:
+    """
+    Build a sleek executive PDF audit report using ReportLab.
+    Only runs when the environment variable PDF_GENERATE is exactly "true".
+    Any ReportLab formatting errors are caught and printed without interrupting cleanup.
+    """
+    if os.environ.get("PDF_GENERATE") != "true":
+        return
+    if not _REPORTLAB_AVAILABLE:
+        print("⚠️ PDF_GENERATE=true but reportlab is not installed; skipping PDF audit report.")
+        return
+
+    try:
+        pdf_path = os.path.join(OUTPUT_DIR, "test_execution_audit.pdf")
+        doc = SimpleDocTemplate(pdf_path, pagesize=letter,
+                                rightMargin=0.6 * inch, leftMargin=0.6 * inch,
+                                topMargin=0.8 * inch, bottomMargin=0.8 * inch)
+        styles = getSampleStyleSheet()
+        story: List[Any] = []
+
+        accountability = summarize_vibe_coding_accountability()
+        duration_seconds = (end_time - start_time).total_seconds()
+        total_steps = len(test_logs)
+        failed_steps = [log for log in test_logs if log["status"] in ["FAILED", "CRASH"]]
+        success_rate = ((total_steps - len(failed_steps)) / total_steps * 100) if total_steps > 0 else 0.0
+
+        # Header Block
+        story.append(Paragraph("MonkeyLM Executive Quality Audit", styles["Title"]))
+        story.append(Spacer(1, 0.15 * inch))
+        story.append(Paragraph(f"<b>Target URL:</b> {TARGET_URL}", styles["Normal"]))
+        story.append(Paragraph(f"<b>Execution Seed:</b> {ACTIVE_SEED or 'none'}", styles["Normal"]))
+        story.append(Paragraph(f"<b>Run Date:</b> {start_time.strftime('%Y-%m-%d %H:%M:%S')}", styles["Normal"]))
+        story.append(Paragraph(f"<b>Duration:</b> {duration_seconds:.2f} seconds", styles["Normal"]))
+        story.append(Spacer(1, 0.2 * inch))
+
+        # Summary metric table
+        summary_data = [
+            ["Metric", "Value"],
+            ["Total Steps", str(total_steps)],
+            ["Failed / Crashed Steps", str(len(failed_steps))],
+            ["Success Rate", f"{success_rate:.2f}%"],
+            ["Workers", str(WORKERS)],
+            ["Regression Drift Index", f"{accountability.get('regression_drift_index', 0.0)}%"],
+            ["Run Summary Status", str(accountability.get('run_summary_status', 'UNKNOWN'))],
+        ]
+        summary_table = Table(summary_data, colWidths=[3.0 * inch, 3.0 * inch])
+        summary_table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2c3e50")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
+            ("ALIGN", (0, 0), (-1, -1), "LEFT"),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, 0), 11),
+            ("BOTTOMPADDING", (0, 0), (-1, 0), 8),
+            ("BACKGROUND", (0, 1), (-1, -1), colors.HexColor("#f8f9fa")),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ]))
+        story.append(summary_table)
+        story.append(Spacer(1, 0.3 * inch))
+
+        # Defect Logs
+        story.append(Paragraph("Defect Logs", styles["Heading2"]))
+        story.append(Spacer(1, 0.1 * inch))
+
+        defect_sections = [
+            ("Security Risks", DEFECTS.security_risks),
+            ("Performance Bottlenecks", DEFECTS.performance_bottlenecks),
+            ("Baseline Regressions", DEFECTS.regression_findings),
+            ("Visual Regressions", DEFECTS.visual_regressions),
+            ("Layout Instability", DEFECTS.layout_instability),
+            ("Accessibility Violations", DEFECTS.accessibility_violations),
+            ("Race Findings", DEFECTS.race_findings),
+            ("Console Findings", DEFECTS.console_findings),
+            ("Boundary Drift", DEFECTS.boundary_drift),
+        ]
+
+        for title, items in defect_sections:
+            if not items:
+                continue
+            story.append(Paragraph(title, styles["Heading3"]))
+            for item in items[:50]:  # cap to keep PDF size reasonable
+                step = item.get("step", "n/a")
+                item_type = item.get("type", item.get("severity", "unknown"))
+                url = item.get("url", "")
+                detail = item.get("error", "")
+                if not detail:
+                    detail = item.get("message", "")
+                line = f"Step {step}: {item_type}"
+                if url:
+                    line += f" at {url}"
+                if detail:
+                    line += f" — {str(detail)[:120]}"
+                story.append(Paragraph(line, styles["BodyText"]))
+            story.append(Spacer(1, 0.1 * inch))
+
+        # Visual Proof Plates
+        annotated_logs = [
+            log for log in test_logs
+            if log.get("screenshot_annotated") or str(log.get("screenshot", "")).endswith("_annotated.png")
+        ]
+        if annotated_logs:
+            story.append(PageBreak())
+            story.append(Paragraph("Visual Proof Plates", styles["Heading2"]))
+            story.append(Spacer(1, 0.1 * inch))
+
+            for log in annotated_logs:
+                screenshot_name = log.get("screenshot", "")
+                if not screenshot_name:
+                    continue
+                image_path = os.path.join(OUTPUT_DIR, screenshot_name)
+                if not os.path.exists(image_path):
+                    continue
+
+                step = log.get("step", "n/a")
+                status = log.get("status", "UNKNOWN")
+                action = log.get("action", "")
+                target = log.get("target", "")
+                error = log.get("error", "")
+                story.append(Paragraph(f"Step {step}: {action} on '{target}' — status {status}", styles["Heading3"]))
+                if error:
+                    story.append(Paragraph(f"<font color='red'>Error:</font> {error[:200]}", styles["BodyText"]))
+
+                # Scale image to fit page width while preserving aspect ratio
+                img_width = 6.5 * inch
+                img_height = 4.0 * inch
+                if Image is not None:
+                    try:
+                        with Image.open(image_path) as img:
+                            orig_w, orig_h = img.size
+                            aspect = orig_h / max(1, orig_w)
+                            img_height = img_width * aspect
+                    except Exception:
+                        pass
+                story.append(RLImage(image_path, width=img_width, height=img_height))
+                story.append(Spacer(1, 0.15 * inch))
+
+        doc.build(story)
+        print(f"📄 PDF audit report generated: {pdf_path}")
+    except Exception as exc:
+        print(f"⚠️ PDF generation failed: {exc}")
 
 
 @dataclass
@@ -3667,6 +3979,7 @@ async def main():
     end_time = datetime.now()
     generate_markdown_report(start_time, end_time)
     generate_json_summary(start_time, end_time)
+    generate_pdf_report(start_time, end_time)
 
 if __name__ == "__main__":
     cli_args = parse_cli_args()

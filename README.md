@@ -1,8 +1,6 @@
 # MonkeyLM: Advanced Smart Monkey Testing Agent
 
-[![MonkeyLM Deep Test](https://github.com/<OWNER>/<REPO>/actions/workflows/monkeylm-deep-test.yml/badge.svg)](https://github.com/<OWNER>/<REPO>/actions/workflows/monkeylm-deep-test.yml)
-
-> Update `<OWNER>/<REPO>` after pushing this repository to GitHub.
+[![MonkeyLM Deep Test](https://github.com/sameersemna/MonkeyLM/actions/workflows/monkeylm-deep-test.yml/badge.svg)](https://github.com/sameersemna/MonkeyLM/actions/workflows/monkeylm-deep-test.yml)
 
 An LLM-guided, Playwright-powered monkey testing framework for aggressively exploring web apps and surfacing defects across UX, reliability, accessibility, security, and performance.
 
@@ -19,6 +17,9 @@ pip install -r requirements.txt
 playwright install chromium
 ollama pull llama3.2
 
+# Optional: pull a vision model if you want smart screenshot annotations.
+ollama pull llama3.2-vision
+
 # Optional: copy the example environment file and edit values for your setup.
 cp .env.example .env
 
@@ -33,6 +34,7 @@ Environment variables are resolved in this precedence order:
 
 Notes:
 - The current default model in code is `minimax-m3:cloud`. If you want local Ollama inference, switch to a local model (for example `llama3.2`) in configuration.
+- `requirements.txt` installs `Pillow` and `reportlab` for image annotation and PDF generation.
 - Test artifacts are written into a timestamped folder like `testrun_YYYYMMDD_HHMMSS/`.
 
 ## 🧠 Architecture Diagram
@@ -85,6 +87,46 @@ The advanced runner now supports both environment-variable configuration and CLI
 | `REDIS_PATH_LOCK_TTL_SECONDS` | `45` | TTL for cross-worker action-path Redis locks. Must be 1–300 seconds. |
 | `STRICT_SANDBOX` | `false` | If `true`, Chromium must launch in sandbox mode or the run fails. |
 | `ALLOW_NO_SANDBOX_FALLBACK` | `false` | If `true`, fallback to `--no-sandbox` is allowed when sandbox launch fails. |
+| `PDF_GENERATE` | `false` | Set to `true` to generate an executive PDF audit report (`test_execution_audit.pdf`). |
+| `PDF_VISION_MODEL` | `llama3.2-vision` | Local Ollama vision model used to locate anomalies on annotated screenshots. |
+| `PDF_VISION_TIMEOUT_SECONDS` | `30` | Hard timeout for each vision-model annotation call. |
+
+### Selective Vision Audit & Executive PDF
+
+When `PDF_GENERATE=true`, the runner selectively sends only the most relevant
+screenshots to a local vision model and compiles a rich executive PDF report.
+
+A step is annotated only when it is genuinely interesting:
+- Status is `FAILED` or `CRASH`.
+- A security risk, visual regression, or layout instability defect was recorded for that step.
+
+Benign/successful steps are skipped to protect local computing throughput.
+
+**Prerequisite:** you must have a vision model available locally, for example:
+
+```bash
+ollama pull llama3.2-vision
+```
+
+Equivalent models such as `qwen2.5-vl` can be used by setting `PDF_VISION_MODEL`.
+
+**Example invocation:**
+
+```bash
+export PDF_GENERATE=true
+python3 monkey_agent_advanced.py
+```
+
+You can combine it with the standard configuration variables:
+
+```bash
+export PDF_GENERATE=true
+export PDF_VISION_MODEL=llama3.2-vision
+export PDF_VISION_TIMEOUT_SECONDS=30
+export TARGET_URL="https://example.com/dashboard"
+export MAX_STEPS=50
+python3 monkey_agent_advanced.py
+```
 
 ### CLI Overrides
 
@@ -186,6 +228,8 @@ Operational guidance:
 - Performance telemetry (CDP metrics, long tasks, JS heap, FPS sampling).
 - Visual regression and layout instability detection via screenshot diffing.
 - Markdown and JSON reporting (`test_report.md`, `results.json`) plus per-step screenshots.
+- Selective smart screenshot annotation: FAILED/CRASH/security/visual/layout steps are sent to a local vision model, which locates the anomaly and draws a red bounding box + arrow.
+- Executive PDF audit report (`test_execution_audit.pdf`) with run stats, defect logs, and inline annotated visual proof plates.
 - Worker startup and boundary-recovery retries with exponential backoff for transient navigation/service failures.
 
 ## 🔁 Execution Workflow
@@ -199,6 +243,7 @@ Operational guidance:
 7. Execute action and collect post-action telemetry.
 8. Record defects, logs, and artifacts per worker, then merge globally.
 9. Repeat until allocated global budget is consumed, then generate reports.
+10. If `PDF_GENERATE=true`, selectively annotate critical screenshots and emit `test_execution_audit.pdf`.
 
 ## 🔍 Gap Analysis
 
@@ -360,7 +405,9 @@ exiting. Pressing Ctrl+C a second time forces immediate termination.
 Each run creates:
 - `test_report.md`: human-readable report.
 - `results.json`: structured machine-readable summary.
+- `test_execution_audit.pdf`: executive PDF with run stats, defect logs, and annotated visual proof plates (when `PDF_GENERATE=true`).
 - `step_*.png`: screenshots for before/after/final phases.
+- `step_*_annotated.png`: vision-annotated screenshots for critical regression/failure steps.
 - `visual_diff_step_*.png`: visual diff images when enabled.
 
 ## 🤖 CI Example (GitHub Actions)
