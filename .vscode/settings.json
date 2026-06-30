@@ -1,0 +1,25 @@
+{
+    "python.formatting.provider": "yapf",
+    "workbench.colorCustomizations": {
+        "activityBar.activeBackground": "#995530",
+        "activityBar.activeBorder": "#da9671",
+        "activityBar.background": "#995530",
+        "activityBar.foreground": "#e7e7e7",
+        "activityBar.inactiveForeground": "#e7e7e799",
+        "activityBarBadge.background": "#da9671",
+        "activityBarBadge.foreground": "#15202b",
+        "sash.hoverBorder": "#995530",
+        "commandCenter.border": "#e7e7e799",
+        "statusBar.background": "#803c17",
+        "statusBar.foreground": "#e7e7e7",
+        "statusBarItem.hoverBackground": "#995530",
+        "statusBarItem.remoteBackground": "#803c17",
+        "statusBarItem.remoteForeground": "#e7e7e7",
+        "titleBar.activeBackground": "#803c17",
+        "titleBar.activeForeground": "#e7e7e7",
+        "titleBar.inactiveBackground": "#803c1799",
+        "titleBar.inactiveForeground": "#e7e7e799"
+    },
+    "peacock.color": "#803c17",
+    "python.terminal.activateEnvInCurrentTerminal": true
+}
