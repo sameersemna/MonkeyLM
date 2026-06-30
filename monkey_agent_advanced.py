@@ -8,6 +8,7 @@ import random
 import re
 import subprocess
 import time
+from urllib.parse import urlparse
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -29,7 +30,7 @@ Image = _optional_import("PIL", "Image")
 pil_pixelmatch = _optional_import("pixelmatch.contrib.PIL", "pixelmatch")
 
 # CONFIGURATION
-DEFAULT_TARGET_URL = "https://noblequran-85hu2yge.manus.space/dashboard"
+DEFAULT_TARGET_URL = "https://noblequran-85hu2yge.manus.space/"
 DEFAULT_OLLAMA_MODEL = "minimax-m3:cloud"
 DEFAULT_MAX_STEPS = 100
 DEFAULT_HEADLESS = True
@@ -41,6 +42,12 @@ VISUAL_DIFF_THRESHOLD_RATIO = 0.01
 LAYOUT_SHIFT_THRESHOLD_PX = 50
 STATE_LOOP_THRESHOLD = 3
 ACTION_COOLDOWN_SECONDS = 1.0
+OLLAMA_DECISION_OPTIONS: Dict[str, Any] = {
+    "temperature": 0.2,
+    "top_p": 0.9,
+    "repeat_penalty": 1.05,
+    "num_ctx": 4096,
+}
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -83,6 +90,7 @@ MAX_STEPS = max(1, _env_int("MAX_STEPS", DEFAULT_MAX_STEPS))
 HEADLESS = _env_bool("HEADLESS", default=DEFAULT_HEADLESS)
 BROWSER_WINDOW_SIZE = _normalize_window_size(os.getenv("BROWSER_WINDOW_SIZE", DEFAULT_WINDOW_SIZE))
 NO_VIEWPORT = _env_bool("NO_VIEWPORT", default=DEFAULT_NO_VIEWPORT)
+ACTIVE_SEED: Optional[str] = None
 
 
 STRICT_SANDBOX = _env_bool("STRICT_SANDBOX", default=False)
@@ -92,8 +100,10 @@ ALLOW_NO_SANDBOX_FALLBACK = _env_bool("ALLOW_NO_SANDBOX_FALLBACK", default=False
 TIMESTAMP = datetime.now().strftime("%Y%m%d_%H%M%S")
 OUTPUT_DIR = os.path.abspath(f"testrun_{TIMESTAMP}")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
-USER_DATA_DIR = os.path.abspath("./playwright_user_data")
-os.makedirs(USER_DATA_DIR, exist_ok=True)
+USER_DATA_ROOT = os.path.abspath("./playwright_user_data")
+RUN_USER_DATA_DIR = os.path.join(USER_DATA_ROOT, f"session_{TIMESTAMP}")
+os.makedirs(USER_DATA_ROOT, exist_ok=True)
+os.makedirs(RUN_USER_DATA_DIR, exist_ok=True)
 
 test_logs: List[Dict[str, Any]] = []
 BROWSER_LAUNCH_INFO: Dict[str, Any] = {
@@ -104,6 +114,7 @@ BROWSER_LAUNCH_INFO: Dict[str, Any] = {
     "no_viewport": NO_VIEWPORT,
     "strict_sandbox": STRICT_SANDBOX,
     "allow_no_sandbox_fallback": ALLOW_NO_SANDBOX_FALLBACK,
+    "user_data_dir": RUN_USER_DATA_DIR,
 }
 
 ALLOWED_ACTIONS = {
@@ -140,11 +151,26 @@ def normalize_action_plan(raw_plan: Any) -> Dict[str, str]:
     }
 
 
+def is_in_scope(current_url: str, target_url: str) -> bool:
+    """Return True when current_url stays within target_url netloc/domain boundary."""
+    try:
+        current = urlparse(current_url)
+        target = urlparse(target_url)
+    except Exception:
+        return False
+
+    if not current.netloc or not target.netloc:
+        return False
+
+    return current.netloc.lower() == target.netloc.lower()
+
+
 def parse_cli_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Advanced monkey testing agent")
     parser.add_argument("--target-url", help="Target URL to test")
     parser.add_argument("--ollama-model", help="Ollama model name to use")
     parser.add_argument("--max-steps", type=int, help="Maximum monkey steps to execute")
+    parser.add_argument("--seed", type=int, help="Random seed for deterministic test replay")
     parser.add_argument("--window-size", help="Browser window size as WIDTH,HEIGHT or WIDTHxHEIGHT")
 
     headless_group = parser.add_mutually_exclusive_group()
@@ -171,7 +197,7 @@ def parse_cli_args() -> argparse.Namespace:
 
 
 def apply_runtime_overrides(args: argparse.Namespace) -> None:
-    global TARGET_URL, OLLAMA_MODEL, MAX_STEPS, HEADLESS, BROWSER_WINDOW_SIZE, NO_VIEWPORT
+    global TARGET_URL, OLLAMA_MODEL, MAX_STEPS, HEADLESS, BROWSER_WINDOW_SIZE, NO_VIEWPORT, ACTIVE_SEED
 
     if args.target_url:
         TARGET_URL = args.target_url
@@ -185,6 +211,9 @@ def apply_runtime_overrides(args: argparse.Namespace) -> None:
         BROWSER_WINDOW_SIZE = _normalize_window_size(args.window_size, fallback=BROWSER_WINDOW_SIZE)
     if args.no_viewport is not None:
         NO_VIEWPORT = bool(args.no_viewport)
+    if args.seed is not None:
+        random.seed(args.seed)
+        ACTIVE_SEED = str(args.seed)
 
 
 @dataclass
@@ -215,6 +244,7 @@ class DefectTracker:
         self.performance_bottlenecks: List[Dict[str, Any]] = []
         self.console_findings: List[Dict[str, Any]] = []
         self.race_findings: List[Dict[str, Any]] = []
+        self.boundary_drift: List[Dict[str, Any]] = []
 
     def add(self, category: str, payload: Dict[str, Any]) -> None:
         collection = getattr(self, category, None)
@@ -273,12 +303,12 @@ class A11yChecker:
             self.injected_pages.add(page_id)
         except Exception as exc:
             self.defects.add(
-                "accessibility_violations",
+                "console_findings",
                 {
                     "step": -1,
-                    "severity": "serious",
-                    "id": "axe-injection-failed",
-                    "description": f"Unable to inject axe-core: {exc}",
+                    "type": "axe-injection-warning",
+                    "severity": "warning",
+                    "message": f"Unable to inject axe-core (likely CSP/network): {exc}",
                     "url": page.url,
                 },
             )
@@ -288,24 +318,47 @@ class A11yChecker:
         try:
             results = await page.evaluate(
                 """async () => {
-                    if (!window.axe) return { error: 'axe_missing', violations: [] };
-                    const result = await window.axe.run(document, {
-                        resultTypes: ['violations'],
-                        runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'best-practice'] }
-                    });
-                    return result;
+                    try {
+                        if (!window.axe) return { error: 'axe_missing', violations: [] };
+                        const result = await window.axe.run(document, {
+                            resultTypes: ['violations'],
+                            runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'best-practice'] }
+                        });
+                        return result;
+                    } catch (err) {
+                        return {
+                            error: 'axe_runtime_error',
+                            errorMessage: String(err || 'unknown axe error'),
+                            violations: []
+                        };
+                    }
                 }"""
             )
         except Exception as exc:
-            return [
+            self.defects.add(
+                "console_findings",
                 {
                     "step": step_num,
-                    "severity": "serious",
-                    "id": "axe-runtime-failed",
-                    "description": str(exc),
+                    "type": "axe-runtime-warning",
+                    "severity": "warning",
+                    "message": str(exc),
                     "url": page.url,
-                }
-            ]
+                },
+            )
+            return []
+
+        if results.get("error"):
+            self.defects.add(
+                "console_findings",
+                {
+                    "step": step_num,
+                    "type": "axe-runtime-warning",
+                    "severity": "warning",
+                    "message": results.get("errorMessage", results.get("error")),
+                    "url": page.url,
+                },
+            )
+            return []
 
         filtered: List[Dict[str, Any]] = []
         for violation in results.get("violations", []):
@@ -440,6 +493,10 @@ class PerformanceMonitor:
             return
         self.cdp = await page.context.new_cdp_session(page)
         await self.cdp.send("Performance.enable")
+        try:
+            await self.cdp.send("Page.enable")
+        except Exception:
+            pass
         await page.add_init_script(
             """
             () => {
@@ -462,6 +519,25 @@ class PerformanceMonitor:
 
     async def snapshot(self, page: Page) -> Dict[str, Any]:
         metrics = await self.cdp.send("Performance.getMetrics") if self.cdp else {"metrics": []}
+        navigation: Dict[str, Any] = {"entries": []}
+        if self.cdp:
+            try:
+                history = await self.cdp.send("Page.getNavigationHistory")
+                entries = history.get("entries", [])
+                navigation = {
+                    "current_index": history.get("currentIndex", -1),
+                    "entries": [
+                        {
+                            "id": item.get("id"),
+                            "url": item.get("url"),
+                            "title": item.get("title"),
+                            "transition_type": item.get("transitionType"),
+                        }
+                        for item in entries
+                    ],
+                }
+            except Exception as exc:
+                navigation = {"entries": [], "error": str(exc)}
         memory = await page.evaluate(
             """() => {
                 const mem = performance.memory || {};
@@ -489,7 +565,13 @@ class PerformanceMonitor:
                 requestAnimationFrame(tick);
             })"""
         )
-        return {"metrics": metrics.get("metrics", []), "memory": memory, "long_tasks": long_tasks, "fps": fps}
+        return {
+            "metrics": metrics.get("metrics", []),
+            "navigation": navigation,
+            "memory": memory,
+            "long_tasks": long_tasks,
+            "fps": fps,
+        }
 
     async def detect_bottlenecks(
         self,
@@ -570,6 +652,44 @@ def state_to_prompt(snapshot: PageSnapshot) -> str:
     )
 
 
+def _extract_target_id(target: Any) -> Optional[int]:
+    if isinstance(target, int):
+        return target if target >= 0 else None
+    target_str = str(target or "").strip()
+    if not target_str:
+        return None
+
+    if target_str.isdigit():
+        return int(target_str)
+
+    match = re.search(r"\[id\s*=\s*(\d+)\]", target_str, re.IGNORECASE)
+    if match:
+        return int(match.group(1))
+    return None
+
+
+async def _locator_for_target_id(page: Page, target_id: Any) -> Optional[Any]:
+    parsed_id = _extract_target_id(target_id)
+    if parsed_id is None:
+        return None
+
+    selector = "button, a, input, select, textarea, [role='button'], [onclick], form"
+    candidates = page.locator(selector)
+    count = await candidates.count()
+    visible_index = 0
+    for idx in range(count):
+        candidate = candidates.nth(idx)
+        bbox = await candidate.bounding_box()
+        if not bbox:
+            continue
+        if bbox.get("width", 0) <= 0 or bbox.get("height", 0) <= 0:
+            continue
+        if visible_index == parsed_id:
+            return candidate
+        visible_index += 1
+    return None
+
+
 def _sanitize_filename(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]", "_", name)[:120]
 
@@ -615,7 +735,7 @@ async def launch_context_with_fallback(playwright_instance):
 
     try:
         context = await playwright_instance.chromium.launch_persistent_context(
-            user_data_dir=USER_DATA_DIR,
+            user_data_dir=RUN_USER_DATA_DIR,
             headless=HEADLESS,
             args=sandbox_args,
             no_viewport=NO_VIEWPORT,
@@ -627,6 +747,7 @@ async def launch_context_with_fallback(playwright_instance):
             "window_size": BROWSER_WINDOW_SIZE,
             "no_viewport": NO_VIEWPORT,
             "headless": HEADLESS,
+            "user_data_dir": RUN_USER_DATA_DIR,
         }
         print("🛡️ Browser launch mode: sandbox")
         return context
@@ -653,7 +774,7 @@ async def launch_context_with_fallback(playwright_instance):
 
         print(f"⚠️ Sandbox launch failed, retrying with no-sandbox: {sandbox_exc}")
         context = await playwright_instance.chromium.launch_persistent_context(
-            user_data_dir=USER_DATA_DIR,
+            user_data_dir=RUN_USER_DATA_DIR,
             headless=HEADLESS,
             args=no_sandbox_args,
             no_viewport=NO_VIEWPORT,
@@ -667,6 +788,7 @@ async def launch_context_with_fallback(playwright_instance):
             "headless": HEADLESS,
             "strict_sandbox": STRICT_SANDBOX,
             "allow_no_sandbox_fallback": ALLOW_NO_SANDBOX_FALLBACK,
+            "user_data_dir": RUN_USER_DATA_DIR,
         }
         print("🔓 Browser launch mode: no-sandbox-fallback")
         return context
@@ -692,21 +814,24 @@ async def capture_dom_and_layout(page: Page) -> Dict[str, Any]:
             ));
             const tags = [];
             const anchors = {};
+            let visibleIndex = 0;
 
-            interactives.forEach((el, idx) => {
+            interactives.forEach((el) => {
                 const rect = el.getBoundingClientRect();
                 if (rect.width <= 0 || rect.height <= 0) return;
+                const itemId = visibleIndex;
+                visibleIndex += 1;
                 const text = collectText(el);
                 let typeInfo = el.tagName;
                 if (el.tagName === 'INPUT') typeInfo = `INPUT[type=${el.type}]`;
-                tags.push(`<${typeInfo} text="${text}" />`);
+                tags.push(`[id=${itemId}] <${typeInfo} text="${text}" />`);
 
                 // Use a deterministic anchor key to track layout shifts across actions.
                 const idPart = el.id ? `#${el.id}` : '';
                 const clsPart = (el.className && typeof el.className === 'string')
                     ? '.' + el.className.split(/\\s+/).slice(0, 2).join('.')
                     : '';
-                const key = `${el.tagName}${idPart}${clsPart}::${text.slice(0, 20)}::${idx}`;
+                const key = `${itemId}::${el.tagName}${idPart}${clsPart}::${text.slice(0, 20)}`;
                 anchors[key] = { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
             });
 
@@ -876,33 +1001,78 @@ def compare_screenshots_pixelmatch(before_path: str, after_path: str, step_num: 
 
 
 async def decide_next_action(page_state: str) -> dict:
-    prompt = f"""
-    You are an Advanced Monkey Testing Agent. Your goal is to deeply test the app by filling forms, submitting data, and handling modals.
-    
-    Current Page State:
-    {page_state}
-    
-    Choose ONE action from this list:
-    1. "click": Click a button or link.
-    2. "type": Type random text into an input field.
-    3. "submit_form": Find a form and submit it (trigger a 'submit' button or press Enter).
-    4. "handle_modal": If a modal/dialog is detected, try to close it (click 'X', 'Cancel', 'Close') or accept it.
-    5. "scroll": Scroll the page.
-    
-    Rules:
-    - If you see a <FORM>, prioritize "submit_form" or "type" inside it.
-    - If you see a <MODAL>, prioritize "handle_modal".
-    - For "type", generate a random string like "test_123".
-    - The 'target' MUST match the 'text' attribute from the list EXACTLY.
-    
-    Respond ONLY with JSON: {{"action": "...", "target": "...", "value": "..."}}
-    """
+    prompt = build_decision_prompt(page_state)
+
+    for _ in range(2):
+        try:
+            response = ollama.chat(
+                model=OLLAMA_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                format="json",
+                options=OLLAMA_DECISION_OPTIONS,
+            )
+            content = response["message"]["content"]
+            parsed = parse_action_plan_response(content)
+            if parsed is not None:
+                return parsed
+        except Exception:
+            continue
+
+    return normalize_action_plan({"action": "scroll", "target": "", "value": ""})
+
+
+def build_decision_prompt(page_state: str) -> str:
+    return f"""
+You are an Advanced Monkey Testing Agent. Your goal is to deeply test the app by filling forms, submitting data, and handling modals.
+
+Current Page State:
+{page_state}
+
+Choose ONE action from this list:
+1. "click": Click a button or link.
+2. "type": Type random text into an input field.
+3. "submit_form": Find a form and submit it (trigger a 'submit' button or press Enter).
+4. "handle_modal": If a modal/dialog is detected, try to close it (click 'X', 'Cancel', 'Close') or accept it.
+5. "scroll": Scroll the page.
+
+Rules:
+- If you see a <FORM>, prioritize "submit_form" or "type" inside it.
+- If you see a <MODAL>, prioritize "handle_modal".
+- For "type", generate a random string like "test_123".
+- Each element line starts with [id=N]. Use that numeric id for target selection.
+- For actions that need a target, return "target" as [id=N] (example: [id=3]).
+- Never return raw text labels as target.
+
+Respond ONLY with JSON: {{"action": "...", "target": "...", "value": "..."}}
+"""
+
+
+def parse_action_plan_response(raw_content: Any) -> Optional[Dict[str, str]]:
+    if not isinstance(raw_content, str):
+        return None
+
+    content = raw_content.replace("```json", "").replace("```", "").strip()
+    if not content:
+        return None
+
     try:
-        response = ollama.chat(model=OLLAMA_MODEL, messages=[{'role': 'user', 'content': prompt}])
-        content = response['message']['content'].replace('```json', '').replace('```', '').strip()
-        return normalize_action_plan(json.loads(content))
-    except Exception as e:
-        return normalize_action_plan({"action": "scroll", "target": "", "value": ""})
+        parsed = json.loads(content)
+    except Exception:
+        match = re.search(r"\{.*\}", content, re.DOTALL)
+        if not match:
+            return None
+        try:
+            parsed = json.loads(match.group(0))
+        except Exception:
+            return None
+
+    normalized = normalize_action_plan(parsed)
+    action = normalized.get("action", "scroll")
+    target = normalized.get("target", "")
+    if action in {"click", "type"} and _extract_target_id(target) is None:
+        return None
+
+    return normalized
 
 
 def apply_state_aware_policy(
@@ -922,13 +1092,13 @@ def apply_state_aware_policy(
     action = action_plan.get("action", "scroll")
     if action == "click" and action_plan.get("target") in seen_click_targets:
         # Encourage exploration by choosing unseen clickable targets if possible.
-        clickable = [x for x in snapshot.elements if x.startswith("<BUTTON") or x.startswith("<A")]
+        clickable = [x for x in snapshot.elements if "<BUTTON" in x or "<A" in x]
         unseen = [x for x in clickable if x not in seen_click_targets]
         if unseen:
             pick = random.choice(unseen)
-            text_match = re.search(r'text="(.*)"', pick)
-            if text_match:
-                action_plan["target"] = text_match.group(1)
+            id_match = re.search(r'\[id=(\d+)\]', pick)
+            if id_match:
+                action_plan["target"] = f"[id={id_match.group(1)}]"
     return action_plan
 
 async def execute_action(
@@ -1016,20 +1186,20 @@ async def execute_action(
                 raise Exception("No visible form found to submit")
 
         elif action == "click":
-            locator = page.get_by_text(target, exact=False).first
-            if await locator.count() == 0:
-                locator = page.get_by_role("button", name=target, exact=False).first
+            locator = await _locator_for_target_id(page, target)
             
-            if await locator.count() > 0:
+            if locator:
                 await locator.click(timeout=3000)
             else:
                 raise Exception(f"Element '{target}' not found")
                 
         elif action == "type":
-            locator = page.get_by_label(target, exact=False).first
-            if await locator.count() == 0:
-                locator = page.get_by_placeholder(target, exact=False).first
-            if await locator.count() == 0:
+            locator = await _locator_for_target_id(page, target)
+            if locator:
+                tag_name = (await locator.evaluate("el => el.tagName.toLowerCase()"))
+                if tag_name not in {"input", "textarea"}:
+                    locator = None
+            if locator is None:
                 # Fallback: find any visible input
                 locator = page.locator("input:visible, textarea:visible").first
             
@@ -1237,6 +1407,7 @@ def generate_json_summary(start_time: datetime, end_time: datetime) -> None:
     summary = {
         "target_url": TARGET_URL,
         "model": OLLAMA_MODEL,
+        "active_seed": ACTIVE_SEED,
         "start_time": start_time.isoformat(),
         "end_time": end_time.isoformat(),
         "duration_seconds": (end_time - start_time).total_seconds(),
@@ -1251,6 +1422,7 @@ def generate_json_summary(start_time: datetime, end_time: datetime) -> None:
             "layout_instability": DEFECTS.layout_instability,
             "race_findings": DEFECTS.race_findings,
             "console_findings": DEFECTS.console_findings,
+            "boundary_drift": DEFECTS.boundary_drift,
         },
         "network_injections": NETWORK_MONITOR.injected_events,
         "logs": test_logs,
@@ -1333,6 +1505,20 @@ async def main():
                     print(f"   -> ♿ A11y findings at step {step}: {len(violations)} serious/critical")
             
             await wait_for_page_ready(page, f"post-step-{step}")
+
+            current_url = page.url
+            if not is_in_scope(current_url, TARGET_URL):
+                DEFECTS.add(
+                    "boundary_drift",
+                    {
+                        "step": step,
+                        "type": "Boundary Drift",
+                        "current_url": current_url,
+                        "target_url": TARGET_URL,
+                    },
+                )
+                await page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=45000)
+                await wait_for_page_ready(page, f"boundary-recovery-{step}")
 
             # Detect potential reflected input issues by checking if payload echoes unsafely in markup.
             if log_entry.get("value"):
