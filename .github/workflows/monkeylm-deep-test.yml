@@ -1,0 +1,78 @@
+name: MonkeyLM Deep Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_url:
+        description: Target URL
+        required: true
+        default: https://example.com/dashboard
+      ollama_model:
+        description: Ollama model
+        required: true
+        default: llama3.2
+      max_steps:
+        description: Max monkey steps
+        required: true
+        default: "50"
+  schedule:
+    - cron: "0 2 * * *"
+
+jobs:
+  monkey-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install system and Python dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          playwright install chromium
+
+      - name: Install Ollama
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+
+      - name: Start Ollama service
+        run: |
+          nohup ollama serve > ollama.log 2>&1 &
+
+      - name: Pull model
+        env:
+          OLLAMA_MODEL: ${{ github.event.inputs.ollama_model || 'llama3.2' }}
+        run: |
+          ollama pull "$OLLAMA_MODEL"
+
+      - name: Run monkey test
+        env:
+          TARGET_URL: ${{ github.event.inputs.target_url || 'https://example.com/dashboard' }}
+          OLLAMA_MODEL: ${{ github.event.inputs.ollama_model || 'llama3.2' }}
+          MAX_STEPS: ${{ github.event.inputs.max_steps || '50' }}
+          HEADLESS: "true"
+          BROWSER_WINDOW_SIZE: "1920,1080"
+          NO_VIEWPORT: "true"
+          ALLOW_NO_SANDBOX_FALLBACK: "true"
+        run: |
+          python3 monkey_agent_advanced.py --headless --no-viewport
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: monkeylm-artifacts
+          path: |
+            testrun_*/test_report.md
+            testrun_*/results.json
+            testrun_*/**/*.png
+            ollama.log

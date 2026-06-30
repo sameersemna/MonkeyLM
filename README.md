@@ -1,5 +1,9 @@
 # MonkeyLM: Advanced Smart Monkey Testing Agent
 
+[![MonkeyLM Deep Test](https://github.com/<OWNER>/<REPO>/actions/workflows/monkeylm-deep-test.yml/badge.svg)](https://github.com/<OWNER>/<REPO>/actions/workflows/monkeylm-deep-test.yml)
+
+> Update `<OWNER>/<REPO>` after pushing this repository to GitHub.
+
 An LLM-guided, Playwright-powered monkey testing framework for aggressively exploring web apps and surfacing defects across UX, reliability, accessibility, security, and performance.
 
 This project has two runnable scripts:
@@ -14,7 +18,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 playwright install chromium
 ollama pull llama3.2
-python monkey_agent_advanced.py
+python3 monkey_agent_advanced.py
 ```
 
 Notes:
@@ -46,25 +50,60 @@ flowchart LR
 
 ## ⚙️ Configuration
 
-The current code uses a mix of hardcoded constants and environment variables.
+The advanced runner now supports both environment-variable configuration and CLI overrides.
 
 ### Environment Variables (implemented)
 
 | Variable | Default | Purpose |
 |---|---|---|
+| `TARGET_URL` | `https://noblequran-85hu2yge.manus.space/dashboard` | Start URL for the monkey run. |
+| `OLLAMA_MODEL` | `minimax-m3:cloud` | LLM model used for action planning. |
+| `MAX_STEPS` | `100` | Number of monkey actions to execute. |
+| `HEADLESS` | `true` | Run browser headless when enabled. |
+| `BROWSER_WINDOW_SIZE` | `1920,1080` | Browser launch size (`width,height` or `widthxheight`). |
+| `NO_VIEWPORT` | `true` | Use window size directly instead of Playwright viewport emulation. |
 | `STRICT_SANDBOX` | `false` | If `true`, Chromium must launch in sandbox mode or the run fails. |
 | `ALLOW_NO_SANDBOX_FALLBACK` | `false` | If `true`, fallback to `--no-sandbox` is allowed when sandbox launch fails. |
 
-### Common Runtime Knobs (currently constants in code)
+### CLI Overrides
 
-| Setting | Current Default | Suggested Env Name | Meaning |
-|---|---|---|---|
-| `TARGET_URL` | `https://noblequran-85hu2yge.manus.space/dashboard` | `TARGET_URL` | Start URL for the monkey run. |
-| `OLLAMA_MODEL` | `minimax-m3:cloud` | `OLLAMA_MODEL` | LLM used for action decisions. |
-| `MAX_STEPS` | `100` | `MAX_STEPS` | Number of actions to execute. |
-| `HEADLESS` | `True` | `HEADLESS` | Run browser in headless mode. |
-| Browser args | `--window-size=1920,1080` + `no_viewport=True` | `BROWSER_WINDOW_SIZE` | Controls viewport/window behavior. |
-| `ACTION_COOLDOWN_SECONDS` | `1.0` | `ACTION_COOLDOWN_SECONDS` | Delay between actions. |
+| Flag | Purpose |
+|---|---|
+| `--target-url` | Override target URL for the run. |
+| `--ollama-model` | Override model name for the run. |
+| `--max-steps` | Override step budget. |
+| `--window-size` | Override browser window size. |
+| `--headless` / `--headed` | Force headless or headed mode. |
+| `--no-viewport` / `--use-viewport` | Force viewport behavior. |
+
+Precedence rule:
+- CLI flag value wins over environment variable value.
+
+### Example Runs
+
+Environment-driven:
+
+```bash
+TARGET_URL="https://example.com/dashboard" \
+OLLAMA_MODEL="llama3.2" \
+MAX_STEPS=75 \
+HEADLESS=true \
+BROWSER_WINDOW_SIZE="1600x900" \
+NO_VIEWPORT=true \
+python3 monkey_agent_advanced.py
+```
+
+CLI-driven:
+
+```bash
+python3 monkey_agent_advanced.py \
+	--target-url "https://example.com/dashboard" \
+	--ollama-model "llama3.2" \
+	--max-steps 75 \
+	--window-size "1600,900" \
+	--headless \
+	--no-viewport
+```
 
 ## 📊 Features
 
@@ -95,13 +134,13 @@ The current code uses a mix of hardcoded constants and environment variables.
 Based on architecture review, these gaps are currently the highest-impact improvements:
 
 1. Config parity gap:
-	- `TARGET_URL`, `OLLAMA_MODEL`, `MAX_STEPS`, `HEADLESS`, and viewport are not env-driven yet.
+	- Core runtime knobs are now env-driven and CLI-overridable in the advanced runner.
 2. Optional Node fallback dependency gap:
 	- Screenshot diff fallback expects `pngjs` and `pixelmatch` in Node, but this is not documented as an optional setup path.
 3. Reproducibility gap:
 	- No seeded randomness flag, making exact replay difficult.
 4. CI ergonomics gap:
-	- No standard CLI arguments and no ready-made CI workflow template.
+	- CLI overrides are available; a ready-made CI workflow template is still not included.
 5. Test scope clarity gap:
 	- No explicit policy section for allowed domains/rate limits when running against production-like systems.
 
@@ -154,6 +193,86 @@ Each run creates:
 - `results.json`: structured machine-readable summary.
 - `step_*.png`: screenshots for before/after/final phases.
 - `visual_diff_step_*.png`: visual diff images when enabled.
+
+## 🤖 CI Example (GitHub Actions)
+
+Use this workflow as a starting point for scheduled or manual deep monkey runs.
+
+```yaml
+name: MonkeyLM Deep Test
+
+on:
+	workflow_dispatch:
+		inputs:
+			target_url:
+				description: "Target URL"
+				required: true
+				default: "https://example.com/dashboard"
+			ollama_model:
+				description: "Ollama model"
+				required: true
+				default: "llama3.2"
+			max_steps:
+				description: "Max monkey steps"
+				required: true
+				default: "50"
+	schedule:
+		- cron: "0 2 * * *"
+
+jobs:
+	monkey-test:
+		runs-on: ubuntu-latest
+		timeout-minutes: 45
+
+		steps:
+			- name: Checkout
+				uses: actions/checkout@v4
+
+			- name: Setup Python
+				uses: actions/setup-python@v5
+				with:
+					python-version: "3.11"
+
+			- name: Install dependencies
+				run: |
+					python -m pip install --upgrade pip
+					pip install -r requirements.txt
+					playwright install chromium
+
+			- name: Run monkey test
+				env:
+					TARGET_URL: ${{ github.event.inputs.target_url || 'https://example.com/dashboard' }}
+					OLLAMA_MODEL: ${{ github.event.inputs.ollama_model || 'llama3.2' }}
+					MAX_STEPS: ${{ github.event.inputs.max_steps || '50' }}
+					HEADLESS: "true"
+					BROWSER_WINDOW_SIZE: "1920,1080"
+					NO_VIEWPORT: "true"
+					ALLOW_NO_SANDBOX_FALLBACK: "true"
+				run: |
+					python3 monkey_agent_advanced.py --headless --no-viewport
+
+			- name: Upload artifacts
+				if: always()
+				uses: actions/upload-artifact@v4
+				with:
+					name: monkeylm-artifacts
+					path: |
+						testrun_*/test_report.md
+						testrun_*/results.json
+						testrun_*/**/*.png
+```
+
+Tips:
+- If your runner has no local Ollama service, use a model/backend configuration reachable from CI.
+- For stricter Linux hardening, set `STRICT_SANDBOX=true` and remove no-sandbox fallback.
+
+### How To Trigger CI
+
+1. Open the repository in GitHub.
+2. Go to Actions -> MonkeyLM Deep Test.
+3. Click Run workflow.
+4. Provide `target_url`, `ollama_model`, and `max_steps`.
+5. Download artifacts from the run summary (`test_report.md`, `results.json`, screenshots).
 
 ## 📚 Development Docs
 

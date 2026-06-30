@@ -1,3 +1,4 @@
+import argparse
 import asyncio
 import hashlib
 import importlib
@@ -28,13 +29,13 @@ Image = _optional_import("PIL", "Image")
 pil_pixelmatch = _optional_import("pixelmatch.contrib.PIL", "pixelmatch")
 
 # CONFIGURATION
-TARGET_URL = "https://noblequran-85hu2yge.manus.space/dashboard"
-# TARGET_URL = "https://noblequran-85hu2yge.manus.space"
-# TARGET_URL = "https://chro.unbiasedtalent.com/"
-# OLLAMA_MODEL = "llama3.2"
-OLLAMA_MODEL = "minimax-m3:cloud"
-MAX_STEPS = 100
-HEADLESS = True
+DEFAULT_TARGET_URL = "https://noblequran-85hu2yge.manus.space/dashboard"
+DEFAULT_OLLAMA_MODEL = "minimax-m3:cloud"
+DEFAULT_MAX_STEPS = 100
+DEFAULT_HEADLESS = True
+DEFAULT_WINDOW_SIZE = "1920,1080"
+DEFAULT_NO_VIEWPORT = True
+
 AXE_CDN_URL = "https://cdnjs.cloudflare.com/ajax/libs/axe-core/4.9.1/axe.min.js"
 VISUAL_DIFF_THRESHOLD_RATIO = 0.01
 LAYOUT_SHIFT_THRESHOLD_PX = 50
@@ -47,6 +48,41 @@ def _env_bool(name: str, default: bool = False) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(value.strip())
+    except Exception:
+        return default
+
+
+def _normalize_window_size(raw: str, fallback: str = DEFAULT_WINDOW_SIZE) -> str:
+    if not raw:
+        return fallback
+    candidate = raw.strip().lower().replace("x", ",")
+    parts = [p.strip() for p in candidate.split(",")]
+    if len(parts) != 2:
+        return fallback
+    try:
+        width = int(parts[0])
+        height = int(parts[1])
+    except Exception:
+        return fallback
+    if width < 320 or height < 200:
+        return fallback
+    return f"{width},{height}"
+
+
+TARGET_URL = os.getenv("TARGET_URL", DEFAULT_TARGET_URL)
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL)
+MAX_STEPS = max(1, _env_int("MAX_STEPS", DEFAULT_MAX_STEPS))
+HEADLESS = _env_bool("HEADLESS", default=DEFAULT_HEADLESS)
+BROWSER_WINDOW_SIZE = _normalize_window_size(os.getenv("BROWSER_WINDOW_SIZE", DEFAULT_WINDOW_SIZE))
+NO_VIEWPORT = _env_bool("NO_VIEWPORT", default=DEFAULT_NO_VIEWPORT)
 
 
 STRICT_SANDBOX = _env_bool("STRICT_SANDBOX", default=False)
@@ -64,9 +100,91 @@ BROWSER_LAUNCH_INFO: Dict[str, Any] = {
     "mode": "unknown",
     "args": [],
     "error": None,
+    "window_size": BROWSER_WINDOW_SIZE,
+    "no_viewport": NO_VIEWPORT,
     "strict_sandbox": STRICT_SANDBOX,
     "allow_no_sandbox_fallback": ALLOW_NO_SANDBOX_FALLBACK,
 }
+
+ALLOWED_ACTIONS = {
+    "click",
+    "type",
+    "submit_form",
+    "handle_modal",
+    "scroll",
+    "back",
+    "random_jump",
+    "restart_target",
+}
+
+
+def normalize_action_plan(raw_plan: Any) -> Dict[str, str]:
+    if not isinstance(raw_plan, dict):
+        return {"action": "scroll", "target": "", "value": ""}
+
+    action = str(raw_plan.get("action", "scroll")).strip().lower()
+    if action not in ALLOWED_ACTIONS:
+        action = "scroll"
+
+    target = raw_plan.get("target", "")
+    value = raw_plan.get("value", "")
+    if target is None:
+        target = ""
+    if value is None:
+        value = ""
+
+    return {
+        "action": action,
+        "target": str(target),
+        "value": str(value),
+    }
+
+
+def parse_cli_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Advanced monkey testing agent")
+    parser.add_argument("--target-url", help="Target URL to test")
+    parser.add_argument("--ollama-model", help="Ollama model name to use")
+    parser.add_argument("--max-steps", type=int, help="Maximum monkey steps to execute")
+    parser.add_argument("--window-size", help="Browser window size as WIDTH,HEIGHT or WIDTHxHEIGHT")
+
+    headless_group = parser.add_mutually_exclusive_group()
+    headless_group.add_argument("--headless", dest="headless", action="store_true", help="Run in headless mode")
+    headless_group.add_argument("--headed", dest="headless", action="store_false", help="Run with UI")
+    parser.set_defaults(headless=None)
+
+    viewport_group = parser.add_mutually_exclusive_group()
+    viewport_group.add_argument(
+        "--no-viewport",
+        dest="no_viewport",
+        action="store_true",
+        help="Use browser window size directly (Playwright no_viewport=True)",
+    )
+    viewport_group.add_argument(
+        "--use-viewport",
+        dest="no_viewport",
+        action="store_false",
+        help="Enable Playwright viewport emulation",
+    )
+    parser.set_defaults(no_viewport=None)
+
+    return parser.parse_args()
+
+
+def apply_runtime_overrides(args: argparse.Namespace) -> None:
+    global TARGET_URL, OLLAMA_MODEL, MAX_STEPS, HEADLESS, BROWSER_WINDOW_SIZE, NO_VIEWPORT
+
+    if args.target_url:
+        TARGET_URL = args.target_url
+    if args.ollama_model:
+        OLLAMA_MODEL = args.ollama_model
+    if args.max_steps is not None:
+        MAX_STEPS = max(1, args.max_steps)
+    if args.headless is not None:
+        HEADLESS = bool(args.headless)
+    if args.window_size:
+        BROWSER_WINDOW_SIZE = _normalize_window_size(args.window_size, fallback=BROWSER_WINDOW_SIZE)
+    if args.no_viewport is not None:
+        NO_VIEWPORT = bool(args.no_viewport)
 
 
 @dataclass
@@ -491,7 +609,7 @@ async def launch_context_with_fallback(playwright_instance):
     """
     global BROWSER_LAUNCH_INFO
 
-    base_args = ["--window-size=1920,1080", "--disable-blink-features=AutomationControlled"]
+    base_args = [f"--window-size={BROWSER_WINDOW_SIZE}", "--disable-blink-features=AutomationControlled"]
     sandbox_args = list(base_args)
     no_sandbox_args = base_args + ["--no-sandbox", "--disable-setuid-sandbox"]
 
@@ -500,12 +618,15 @@ async def launch_context_with_fallback(playwright_instance):
             user_data_dir=USER_DATA_DIR,
             headless=HEADLESS,
             args=sandbox_args,
-            no_viewport=True,
+            no_viewport=NO_VIEWPORT,
         )
         BROWSER_LAUNCH_INFO = {
             "mode": "sandbox",
             "args": sandbox_args,
             "error": None,
+            "window_size": BROWSER_WINDOW_SIZE,
+            "no_viewport": NO_VIEWPORT,
+            "headless": HEADLESS,
         }
         print("🛡️ Browser launch mode: sandbox")
         return context
@@ -516,6 +637,9 @@ async def launch_context_with_fallback(playwright_instance):
                 "mode": mode,
                 "args": sandbox_args,
                 "error": str(sandbox_exc),
+                "window_size": BROWSER_WINDOW_SIZE,
+                "no_viewport": NO_VIEWPORT,
+                "headless": HEADLESS,
                 "strict_sandbox": STRICT_SANDBOX,
                 "allow_no_sandbox_fallback": ALLOW_NO_SANDBOX_FALLBACK,
             }
@@ -532,12 +656,15 @@ async def launch_context_with_fallback(playwright_instance):
             user_data_dir=USER_DATA_DIR,
             headless=HEADLESS,
             args=no_sandbox_args,
-            no_viewport=True,
+            no_viewport=NO_VIEWPORT,
         )
         BROWSER_LAUNCH_INFO = {
             "mode": "no-sandbox-fallback",
             "args": no_sandbox_args,
             "error": str(sandbox_exc),
+            "window_size": BROWSER_WINDOW_SIZE,
+            "no_viewport": NO_VIEWPORT,
+            "headless": HEADLESS,
             "strict_sandbox": STRICT_SANDBOX,
             "allow_no_sandbox_fallback": ALLOW_NO_SANDBOX_FALLBACK,
         }
@@ -773,9 +900,9 @@ async def decide_next_action(page_state: str) -> dict:
     try:
         response = ollama.chat(model=OLLAMA_MODEL, messages=[{'role': 'user', 'content': prompt}])
         content = response['message']['content'].replace('```json', '').replace('```', '').strip()
-        return json.loads(content)
+        return normalize_action_plan(json.loads(content))
     except Exception as e:
-        return {"action": "scroll", "target": "none", "value": ""}
+        return normalize_action_plan({"action": "scroll", "target": "", "value": ""})
 
 
 def apply_state_aware_policy(
@@ -1234,4 +1361,6 @@ async def main():
     generate_json_summary(start_time, end_time)
 
 if __name__ == "__main__":
+    cli_args = parse_cli_args()
+    apply_runtime_overrides(cli_args)
     asyncio.run(main())
