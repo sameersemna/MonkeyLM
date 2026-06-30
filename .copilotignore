@@ -1,0 +1,57 @@
+# ====================================================================
+# GITHUB COPILOT IGNORE FILE (.copilotignore)
+# Restricts indexing and access for Copilot Chat & Workspace agents
+# ====================================================================
+
+# --- Block Credentials Globally ---
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/*.secret
+**/credentials.json
+
+# --- Block Dependency Folders ---
+**/node_modules/**
+**/vendor/**
+**/bower_components/**
+**/.pnpm-store/**
+
+# --- Block Frontend Bundles ---
+**/dist/**
+**/build/**
+**/.next/**
+**/.nuxt/**
+**/.svelte-kit/**
+**/.turbo/**
+
+# --- Block Python Environments & Caches ---
+**/__pycache__/**
+**/.venv/**
+**/venv/**
+**/.pytest_cache/**
+**/.mypy_cache/**
+
+# --- Block Rust & Go Binaries ---
+**/target/**
+**/bin/**
+**/pkg/**
+
+# --- Block Mobile Build Artifacts ---
+**/.expo/**
+**/android/app/build/**
+**/ios/build/**
+
+# --- Block Large Data & System Logs ---
+**/*.sql
+**/*.sqlite
+**/*.db
+**/*.log
+**/logs/**
+**/tmp/**
+**/cache/**
+**/data/**
+**/backup/**
+**/dump/**
+
+*.prs

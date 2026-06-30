@@ -1,0 +1,105 @@
+# ====================================================================
+# UNIVERSAL AI IGNORE FILE (.aibignore)
+# Blocks heavy dependencies, build artifacts, and secrets across stacks
+# ====================================================================
+
+# --- Sensitive Secrets & Credentials ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.secret
+*.passwd
+credentials.json
+.aws/
+.gcloud/
+
+# --- Heavy Dependencies (Prevents Context Bloat/Indexing Loops) ---
+node_modules/
+bower_components/
+.pnp/
+.pnp.js
+jspm_packages/
+vendor/
+packages/
+
+# --- Build Artifacts, Bundles, and Compilations ---
+dist/
+build/
+out/
+.next/
+.nuxt/
+.svelte-kit/
+.turbo/
+.cache/
+.parcel-cache/
+.eslintcache
+.stylelintcache
+.yarn/
+.pnpm-store/
+
+# --- Python Stacks (Pip, Poetry, Conda, Virtualenvs) ---
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+htmlcov/
+.coverage
+instance/
+
+# --- Go Stacks ---
+bin/
+pkg/
+/go.sum
+
+# --- Rust Stacks ---
+target/
+**/*.rs.bk
+
+# --- PHP Stacks ---
+/vendor/
+.phpunit.result.cache
+
+# --- Mobile Stacks (Expo / React Native / iOS / Android) ---
+.expo/
+.eas/
+android/app/build/
+ios/build/
+*.xcworkspace/
+*.xcodeproj/
+
+# --- Database & Storage Dumps (Crucial to block massive text assets) ---
+*.sql
+*.sqlite
+*.sqlite3
+*.db
+*.local
+*.log
+logs/
+*.tlog
+
+# --- Media & Binary Assets ---
+*.mp4
+*.mp3
+*.wav
+*.pdf
+*.zip
+*.tar.gz
+*.rar
+*.7z
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.ico
+*.svg
+
+*.prs
