@@ -2,17 +2,18 @@
 
 ## Purpose
 
-`monkey_agent_advanced.py` implements a "smart monkey" loop that combines:
+`monkey_agent_advanced.py` implements a semaphore-limited, async multi-worker "smart monkey" engine that combines:
 - deterministic browser automation primitives (Playwright),
 - probabilistic exploration policy,
 - LLM-guided action planning,
 - and multi-layer defect instrumentation.
 
-The design goal is simple: maximize behavioral coverage while preserving enough state and telemetry to explain failures.
+The design goal is simple: maximize behavioral coverage in parallel while preserving enough state and telemetry to explain failures deterministically.
 
 ## High-Level Components
 
-- **Browser Orchestrator**: Launches Chromium persistent context and page lifecycle.
+- **Coordinator**: Partitions total step budget across workers and schedules worker tasks under `asyncio.Semaphore(WORKERS)`.
+- **Worker Runtime**: Each worker owns its own Chromium persistent context, page lifecycle, local monitors, and local defect/log buffers.
 - **State Extractor**: Builds `PageSnapshot` from DOM structure, interactives, modal/spinner counts, and screenshot.
 - **Planner (LLM)**: Converts state text into one action (`click`, `type`, `submit_form`, `handle_modal`, `scroll`).
 - **Policy Guardrail**: Overrides plans in loop states (`random_jump`, `restart_target`) and diversifies repeated clicks.
@@ -21,12 +22,12 @@ The design goal is simple: maximize behavioral coverage while preserving enough 
   - `NetworkMonitor`: latency/5xx fault injection + zombie UI checks.
   - `PerformanceMonitor`: long tasks, heap deltas, FPS drops.
   - `A11yChecker`: periodic axe scans.
-- **Defect Aggregator**: `DefectTracker` stores findings by category.
+- **Defect Aggregator**: worker-local `DefectTracker` instances are merged into a final global tracker.
 - **Reporters**: markdown (`test_report.md`) and JSON (`results.json`).
 
 ## Core Loop Deep Dive
 
-The center of gravity is:
+The center of gravity per worker is:
 
 `get_page_state` -> `decide_next_action` -> `execute_action`
 
@@ -83,21 +84,64 @@ There are two complementary diff strategies:
 
 Together, these detect both invisible structural loops and visible UI regressions.
 
-## Persistent Context Strategy
+## Isolated Persistent Context Strategy
 
-The browser runs with:
+Each active worker runs with an isolated persistent profile folder:
 
 ```python
-launch_persistent_context(user_data_dir="./playwright_user_data", no_viewport=True, ...)
+launch_persistent_context(
+  user_data_dir="./playwright_user_data/session_<timestamp>/worker-XX",
+  no_viewport=True,
+  ...,
+)
 ```
 
 Why this matters:
 - preserves cookies/session storage across runs,
+- isolates worker state and storage footprints from other concurrent workers,
 - enables realistic authenticated journeys,
 - reduces re-login overhead in long tests.
 
 Operational caution:
-- persistent profiles can accumulate stale data. For deterministic CI, use isolated user-data folders per run.
+- persistent profiles can accumulate stale data. The current design isolates by run and worker to reduce cross-run contamination.
+
+## Concurrency and Budget Semantics
+
+- `MAX_STEPS` is the global total step budget.
+- `WORKERS` is the max number of active concurrent worker tasks.
+- `MAX_STEPS_PER_WORKER` caps each worker's step consumption and must be less than or equal to `MAX_STEPS`.
+- The coordinator allocates steps round-robin per worker until the global budget is consumed or worker caps are exhausted.
+
+## Retry and Backoff
+
+Worker startup and critical navigation paths use retry/backoff for transient failures:
+- initial target navigation,
+- Qdrant worker initialization,
+- boundary recovery navigation.
+
+Backoff behavior is exponential with jitter and logs each retry attempt.
+
+Runtime retry controls:
+- `WORKER_NAVIGATION_RETRIES`
+- `WORKER_QDRANT_INIT_RETRIES`
+- `WORKER_BOUNDARY_RECOVERY_RETRIES`
+- `RETRY_BASE_DELAY_SECONDS`
+
+## Operational Tuning
+
+Recommended scaling sequence:
+1. Increase `WORKERS` gradually.
+2. Observe browser launch time, action latency, and error rates.
+3. Confirm PostgreSQL and Redis stay below saturation.
+4. Increase total step budget only after worker stability is confirmed.
+
+Current persistence sizing strategy in code:
+- PostgreSQL pool: `min_size = min(4, WORKERS)`, `max_size = max(4, WORKERS * 4)`.
+- Redis max connections: `max(16, WORKERS * 8)`.
+- Write-path throttling: semaphore-protected PostgreSQL and Redis write sections.
+
+Tradeoff:
+- Higher worker counts improve exploration breadth, but can reduce per-worker determinism and increase service pressure.
 
 ## Data Flow: Reporting Pipeline
 
@@ -121,17 +165,18 @@ flowchart TD
 
 ## Execution Sequence (Expanded)
 
-1. `launch_context_with_fallback`
-2. `page.goto(TARGET_URL)`
-3. install monitors (`NETWORK_MONITOR`, `PERF_MONITOR`)
-4. loop `step in 1..MAX_STEPS`
-5. plan snapshot + state memoization
-6. LLM plan + state-aware policy override
-7. execute action + telemetry
-8. periodic a11y scan (`step % 5 == 0`)
-9. reflected-input probe
-10. cooldown sleep
-11. finalize with markdown + JSON reports
+1. Coordinator validates configuration and allocates global steps across workers.
+2. Worker task starts under semaphore concurrency guard.
+3. `launch_context_with_fallback` for the worker profile directory.
+4. `page.goto(TARGET_URL)` with retry/backoff.
+5. install worker-local monitors and memory store.
+6. loop through worker-allocated steps.
+7. plan snapshot + state memoization.
+8. LLM plan + state-aware policy override.
+9. execute action + telemetry.
+10. periodic a11y scan (`step % 5 == 0`).
+11. reflected-input probe + cooldown sleep.
+12. coordinator merges worker outputs and emits markdown + JSON reports.
 
 ## Architectural Strengths
 
@@ -142,11 +187,10 @@ flowchart TD
 
 ## Known Architectural Gaps
 
-- Most runtime knobs are not env-driven yet.
-- No global seed control for reproducibility.
-- Planner output schema is not strictly validated.
+- Planner output schema is not strictly validated beyond lightweight parsing.
 - Optional Node fallback dependencies are not self-checked at startup.
 - No plugin registry for action handlers (currently `if/elif`).
+- Shared persistence services are still single-instance dependencies (no sharding).
 
 ## Suggested Next Evolution
 

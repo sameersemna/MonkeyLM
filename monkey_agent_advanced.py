@@ -6,8 +6,10 @@ import json
 import os
 import random
 import re
+import signal
 import subprocess
 import time
+from pathlib import Path
 from urllib.parse import urlparse
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -25,6 +27,22 @@ def _optional_import(module_name: str, attr_name: Optional[str] = None):
         return None
 
 
+def _load_dotenv() -> None:
+    """Load environment variables from a local `.env` file if python-dotenv is available."""
+    dotenv = _optional_import("dotenv")
+    if dotenv is None:
+        return
+    try:
+        env_path = Path(__file__).resolve().parent / ".env"
+        if env_path.is_file():
+            dotenv.load_dotenv(env_path, override=False)
+    except Exception:
+        pass
+
+
+_load_dotenv()
+
+
 Faker = _optional_import("faker", "Faker")
 Image = _optional_import("PIL", "Image")
 pil_pixelmatch = _optional_import("pixelmatch.contrib.PIL", "pixelmatch")
@@ -35,12 +53,23 @@ httpx = _optional_import("httpx")
 # CONFIGURATION
 DEFAULT_TARGET_URL = "https://noblequran-85hu2yge.manus.space/"
 DEFAULT_OLLAMA_MODEL = "minimax-m3:cloud"
+DEFAULT_OLLAMA_TIMEOUT_SECONDS = 15.0
 DEFAULT_MAX_STEPS = 100
+DEFAULT_WORKERS = 1
+DEFAULT_MAX_STEPS_PER_WORKER = 100
+DEFAULT_WORKER_NAVIGATION_RETRIES = 2
+DEFAULT_WORKER_QDRANT_INIT_RETRIES = 1
+DEFAULT_WORKER_BOUNDARY_RECOVERY_RETRIES = 1
+DEFAULT_RETRY_BASE_DELAY_SECONDS = 0.75
+MAX_ALLOWED_RETRIES = 10
+MAX_ALLOWED_RETRY_BASE_DELAY_SECONDS = 10.0
 DEFAULT_HEADLESS = True
 DEFAULT_WINDOW_SIZE = "1920,1080"
 DEFAULT_NO_VIEWPORT = True
 DEFAULT_POSTGRES_DSN = "postgresql://localhost:5432/monkeylm"
 DEFAULT_REDIS_URL = "redis://localhost:6379/0"
+DEFAULT_REDIS_PREFIX = ""
+DEFAULT_REDIS_PATH_LOCK_TTL_SECONDS = 45
 DEFAULT_GOLDEN_BASELINE_MODE = "preexisting"
 DEFAULT_STRICT_PERSISTENCE = False
 DEFAULT_REDIS_STATE_TTL_SECONDS = 86400
@@ -93,6 +122,16 @@ def _env_str(name: str, default: str) -> str:
     return stripped if stripped else default
 
 
+def _env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return float(value.strip())
+    except Exception:
+        return default
+
+
 def _normalize_window_size(raw: str, fallback: str = DEFAULT_WINDOW_SIZE) -> str:
     if not raw:
         return fallback
@@ -112,13 +151,34 @@ def _normalize_window_size(raw: str, fallback: str = DEFAULT_WINDOW_SIZE) -> str
 
 TARGET_URL = os.getenv("TARGET_URL", DEFAULT_TARGET_URL)
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL)
+OLLAMA_TIMEOUT_SECONDS = max(1.0, _env_float("OLLAMA_TIMEOUT_SECONDS", DEFAULT_OLLAMA_TIMEOUT_SECONDS))
 MAX_STEPS = max(1, _env_int("MAX_STEPS", DEFAULT_MAX_STEPS))
+WORKERS = max(1, _env_int("WORKERS", DEFAULT_WORKERS))
+MAX_STEPS_PER_WORKER = max(
+    1,
+    _env_int(
+        "MAX_STEPS_PER_WORKER",
+        min(MAX_STEPS, DEFAULT_MAX_STEPS_PER_WORKER),
+    ),
+)
+WORKER_NAVIGATION_RETRIES = max(0, _env_int("WORKER_NAVIGATION_RETRIES", DEFAULT_WORKER_NAVIGATION_RETRIES))
+WORKER_QDRANT_INIT_RETRIES = max(0, _env_int("WORKER_QDRANT_INIT_RETRIES", DEFAULT_WORKER_QDRANT_INIT_RETRIES))
+WORKER_BOUNDARY_RECOVERY_RETRIES = max(
+    0,
+    _env_int("WORKER_BOUNDARY_RECOVERY_RETRIES", DEFAULT_WORKER_BOUNDARY_RECOVERY_RETRIES),
+)
+RETRY_BASE_DELAY_SECONDS = max(0.1, _env_float("RETRY_BASE_DELAY_SECONDS", DEFAULT_RETRY_BASE_DELAY_SECONDS))
 HEADLESS = _env_bool("HEADLESS", default=DEFAULT_HEADLESS)
 BROWSER_WINDOW_SIZE = _normalize_window_size(os.getenv("BROWSER_WINDOW_SIZE", DEFAULT_WINDOW_SIZE))
 NO_VIEWPORT = _env_bool("NO_VIEWPORT", default=DEFAULT_NO_VIEWPORT)
 ACTIVE_SEED: Optional[str] = None
 POSTGRES_DSN = _env_str("POSTGRES_DSN", DEFAULT_POSTGRES_DSN)
 REDIS_URL = _env_str("REDIS_URL", DEFAULT_REDIS_URL)
+REDIS_PREFIX = _env_str("REDIS_PREFIX", DEFAULT_REDIS_PREFIX)
+REDIS_PATH_LOCK_TTL_SECONDS = max(
+    1,
+    _env_int("REDIS_PATH_LOCK_TTL_SECONDS", DEFAULT_REDIS_PATH_LOCK_TTL_SECONDS),
+)
 GOLDEN_BASELINE_MODE = _env_str("GOLDEN_BASELINE_MODE", DEFAULT_GOLDEN_BASELINE_MODE).lower()
 STRICT_PERSISTENCE = _env_bool("STRICT_PERSISTENCE", default=DEFAULT_STRICT_PERSISTENCE)
 REDIS_STATE_TTL_SECONDS = max(60, _env_int("REDIS_STATE_TTL_SECONDS", DEFAULT_REDIS_STATE_TTL_SECONDS))
@@ -140,7 +200,7 @@ ALLOW_NO_SANDBOX_FALLBACK = _env_bool("ALLOW_NO_SANDBOX_FALLBACK", default=False
 
 # 📁 TIMESTAMPED OUTPUT FOLDER
 TIMESTAMP = datetime.now().strftime("%Y%m%d_%H%M%S")
-OUTPUT_DIR = os.path.abspath(f"testrun_{TIMESTAMP}")
+OUTPUT_DIR = os.path.abspath(f"reports/testrun_{TIMESTAMP}")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 USER_DATA_ROOT = os.path.abspath("./playwright_user_data")
 RUN_USER_DATA_DIR = os.path.join(USER_DATA_ROOT, f"session_{TIMESTAMP}")
@@ -158,6 +218,56 @@ BROWSER_LAUNCH_INFO: Dict[str, Any] = {
     "allow_no_sandbox_fallback": ALLOW_NO_SANDBOX_FALLBACK,
     "user_data_dir": RUN_USER_DATA_DIR,
 }
+
+# 🛑 Graceful shutdown coordination
+SHUTDOWN_EVENT: asyncio.Event = asyncio.Event()
+GRACEFUL_SHUTDOWN_REQUESTED: bool = False
+
+
+def _request_graceful_shutdown(signum: int, frame: Optional[Any]) -> None:
+    """Signal handler that requests a graceful shutdown.
+
+    The first Ctrl+C/SIGTERM sets an asyncio event so workers finish their
+    current step and return. A second signal falls back to the default
+    interpreter behavior and exits immediately.
+    """
+    global GRACEFUL_SHUTDOWN_REQUESTED
+    if GRACEFUL_SHUTDOWN_REQUESTED:
+        # Second signal: let the default handler terminate the process.
+        signal.default_int_handler()
+        return
+
+    GRACEFUL_SHUTDOWN_REQUESTED = True
+    print("\n🛑 Graceful shutdown requested (signal {}). Finishing in-flight steps...".format(signum))
+    try:
+        loop = asyncio.get_event_loop()
+        loop.call_soon_threadsafe(SHUTDOWN_EVENT.set)
+    except Exception:
+        # If the event loop is not available, set it directly on the next
+        # iteration if we are already running inside the loop.
+        try:
+            SHUTDOWN_EVENT.set()
+        except Exception:
+            pass
+
+
+def _register_graceful_shutdown_signals() -> None:
+    """Register SIGINT/SIGTERM handlers for graceful shutdown.
+
+    Falls back to the synchronous `signal.signal` API on platforms where
+    asyncio's `add_signal_handler` is unavailable (e.g., some Windows loops).
+    """
+    loop = asyncio.get_running_loop()
+    try:
+        loop.add_signal_handler(signal.SIGINT, _request_graceful_shutdown)
+        loop.add_signal_handler(signal.SIGTERM, _request_graceful_shutdown)
+    except NotImplementedError:
+        # Fallback for platforms without asyncio signal handler support.
+        signal.signal(signal.SIGINT, _request_graceful_shutdown)
+        try:
+            signal.signal(signal.SIGTERM, _request_graceful_shutdown)
+        except Exception:
+            pass
 
 ALLOWED_ACTIONS = {
     "click",
@@ -211,11 +321,63 @@ def parse_cli_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Advanced monkey testing agent")
     parser.add_argument("--target-url", help="Target URL to test")
     parser.add_argument("--ollama-model", help="Ollama model name to use")
+    parser.add_argument(
+        "--ollama-timeout-seconds",
+        type=float,
+        default=OLLAMA_TIMEOUT_SECONDS,
+        help="Hard timeout for each Ollama inference call in seconds (default: 15)",
+    )
     parser.add_argument("--max-steps", type=int, help="Maximum monkey steps to execute")
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=WORKERS,
+        help="Maximum concurrent worker contexts (default: 1)",
+    )
+    parser.add_argument(
+        "--max-steps-per-worker",
+        type=int,
+        default=MAX_STEPS_PER_WORKER,
+        help="Per-worker maximum step cap; must be <= --max-steps",
+    )
+    parser.add_argument(
+        "--worker-navigation-retries",
+        type=int,
+        default=WORKER_NAVIGATION_RETRIES,
+        help="Retry count for initial worker navigation",
+    )
+    parser.add_argument(
+        "--worker-qdrant-init-retries",
+        type=int,
+        default=WORKER_QDRANT_INIT_RETRIES,
+        help="Retry count for worker Qdrant initialization",
+    )
+    parser.add_argument(
+        "--worker-boundary-recovery-retries",
+        type=int,
+        default=WORKER_BOUNDARY_RECOVERY_RETRIES,
+        help="Retry count for worker boundary-recovery navigation",
+    )
+    parser.add_argument(
+        "--retry-base-delay-seconds",
+        type=float,
+        default=RETRY_BASE_DELAY_SECONDS,
+        help="Base retry delay in seconds for worker backoff",
+    )
     parser.add_argument("--seed", type=int, help="Random seed for deterministic test replay")
     parser.add_argument("--window-size", help="Browser window size as WIDTH,HEIGHT or WIDTHxHEIGHT")
     parser.add_argument("--postgres-dsn", help="PostgreSQL connection string")
     parser.add_argument("--redis-url", help="Redis connection URL")
+    parser.add_argument(
+        "--redis-prefix",
+        help="Optional prefix for all Redis keys (default: empty)",
+    )
+    parser.add_argument(
+        "--redis-path-lock-ttl-seconds",
+        type=int,
+        default=REDIS_PATH_LOCK_TTL_SECONDS,
+        help="TTL in seconds for cross-worker action-path Redis locks (default: 45)",
+    )
     parser.add_argument(
         "--golden-baseline-mode",
         choices=["preexisting", "auto_upsert"],
@@ -322,8 +484,11 @@ def parse_cli_args() -> argparse.Namespace:
 
 
 def apply_runtime_overrides(args: argparse.Namespace) -> None:
-    global TARGET_URL, OLLAMA_MODEL, MAX_STEPS, HEADLESS, BROWSER_WINDOW_SIZE, NO_VIEWPORT, ACTIVE_SEED
-    global POSTGRES_DSN, REDIS_URL, GOLDEN_BASELINE_MODE, STRICT_PERSISTENCE
+    global TARGET_URL, OLLAMA_MODEL, OLLAMA_TIMEOUT_SECONDS, MAX_STEPS, WORKERS, MAX_STEPS_PER_WORKER
+    global WORKER_NAVIGATION_RETRIES, WORKER_QDRANT_INIT_RETRIES, WORKER_BOUNDARY_RECOVERY_RETRIES
+    global RETRY_BASE_DELAY_SECONDS
+    global HEADLESS, BROWSER_WINDOW_SIZE, NO_VIEWPORT, ACTIVE_SEED
+    global POSTGRES_DSN, REDIS_URL, REDIS_PREFIX, REDIS_PATH_LOCK_TTL_SECONDS, GOLDEN_BASELINE_MODE, STRICT_PERSISTENCE
     global QDRANT_URL, QDRANT_COLLECTION, QDRANT_ENABLE_READS, QDRANT_ENABLE_WRITES
     global QDRANT_EMBEDDING_PROVIDER, QDRANT_EMBEDDING_MODEL, QDRANT_ADMIN_ACTION
     global QDRANT_RERANK_ENABLED, QDRANT_RERANK_MODEL, QDRANT_CANDIDATE_LIMIT
@@ -332,8 +497,22 @@ def apply_runtime_overrides(args: argparse.Namespace) -> None:
         TARGET_URL = args.target_url
     if getattr(args, "ollama_model", None):
         OLLAMA_MODEL = args.ollama_model
+    if getattr(args, "ollama_timeout_seconds", None) is not None:
+        OLLAMA_TIMEOUT_SECONDS = max(1.0, float(args.ollama_timeout_seconds))
     if getattr(args, "max_steps", None) is not None:
         MAX_STEPS = max(1, args.max_steps)
+    if getattr(args, "workers", None) is not None:
+        WORKERS = max(1, int(args.workers))
+    if getattr(args, "max_steps_per_worker", None) is not None:
+        MAX_STEPS_PER_WORKER = max(1, int(args.max_steps_per_worker))
+    if getattr(args, "worker_navigation_retries", None) is not None:
+        WORKER_NAVIGATION_RETRIES = max(0, int(args.worker_navigation_retries))
+    if getattr(args, "worker_qdrant_init_retries", None) is not None:
+        WORKER_QDRANT_INIT_RETRIES = max(0, int(args.worker_qdrant_init_retries))
+    if getattr(args, "worker_boundary_recovery_retries", None) is not None:
+        WORKER_BOUNDARY_RECOVERY_RETRIES = max(0, int(args.worker_boundary_recovery_retries))
+    if getattr(args, "retry_base_delay_seconds", None) is not None:
+        RETRY_BASE_DELAY_SECONDS = max(0.1, float(args.retry_base_delay_seconds))
     if getattr(args, "headless", None) is not None:
         HEADLESS = bool(args.headless)
     if getattr(args, "window_size", None):
@@ -347,6 +526,10 @@ def apply_runtime_overrides(args: argparse.Namespace) -> None:
         POSTGRES_DSN = args.postgres_dsn.strip()
     if getattr(args, "redis_url", None):
         REDIS_URL = args.redis_url.strip()
+    if getattr(args, "redis_prefix", None) is not None:
+        REDIS_PREFIX = args.redis_prefix
+    if getattr(args, "redis_path_lock_ttl_seconds", None) is not None:
+        REDIS_PATH_LOCK_TTL_SECONDS = max(1, int(args.redis_path_lock_ttl_seconds))
     if getattr(args, "golden_baseline_mode", None):
         GOLDEN_BASELINE_MODE = args.golden_baseline_mode.strip().lower()
     if getattr(args, "strict_persistence", None) is not None:
@@ -378,6 +561,46 @@ def apply_runtime_overrides(args: argparse.Namespace) -> None:
         QDRANT_ADMIN_ACTION = "inspect"
     if getattr(args, "qdrant_clear", False):
         QDRANT_ADMIN_ACTION = "clear"
+
+
+def validate_runtime_configuration() -> None:
+    if MAX_STEPS_PER_WORKER > MAX_STEPS:
+        raise ValueError(
+            "MAX_STEPS_PER_WORKER must be less than or equal to MAX_STEPS "
+            f"(got MAX_STEPS_PER_WORKER={MAX_STEPS_PER_WORKER}, MAX_STEPS={MAX_STEPS})."
+        )
+    if RETRY_BASE_DELAY_SECONDS <= 0.0:
+        raise ValueError("RETRY_BASE_DELAY_SECONDS must be greater than 0.")
+    retry_settings = {
+        "WORKER_NAVIGATION_RETRIES": WORKER_NAVIGATION_RETRIES,
+        "WORKER_QDRANT_INIT_RETRIES": WORKER_QDRANT_INIT_RETRIES,
+        "WORKER_BOUNDARY_RECOVERY_RETRIES": WORKER_BOUNDARY_RECOVERY_RETRIES,
+    }
+    for setting_name, setting_value in retry_settings.items():
+        if setting_value > MAX_ALLOWED_RETRIES:
+            raise ValueError(
+                f"{setting_name} must be less than or equal to {MAX_ALLOWED_RETRIES} "
+                f"(got {setting_value})."
+            )
+    if RETRY_BASE_DELAY_SECONDS > MAX_ALLOWED_RETRY_BASE_DELAY_SECONDS:
+        raise ValueError(
+            "RETRY_BASE_DELAY_SECONDS is too high for safe runtime defaults; "
+            f"must be <= {MAX_ALLOWED_RETRY_BASE_DELAY_SECONDS} "
+            f"(got {RETRY_BASE_DELAY_SECONDS})."
+        )
+    if REDIS_PATH_LOCK_TTL_SECONDS < 1 or REDIS_PATH_LOCK_TTL_SECONDS > 300:
+        raise ValueError(
+            "REDIS_PATH_LOCK_TTL_SECONDS must be between 1 and 300 seconds "
+            f"(got {REDIS_PATH_LOCK_TTL_SECONDS})."
+        )
+
+
+def build_redis_key(base_key: str) -> str:
+    """Prepend the configured REDIS_PREFIX to a Redis key name."""
+    prefix = REDIS_PREFIX
+    if prefix:
+        return f"{prefix}{base_key}"
+    return base_key
 
 
 @dataclass
@@ -415,6 +638,22 @@ class DefectTracker:
         collection = getattr(self, category, None)
         if collection is not None:
             collection.append(payload)
+
+    def merge_from(self, other: "DefectTracker") -> None:
+        categories = [
+            "layout_instability",
+            "visual_regressions",
+            "regression_findings",
+            "security_risks",
+            "accessibility_violations",
+            "performance_bottlenecks",
+            "console_findings",
+            "race_findings",
+            "boundary_drift",
+        ]
+        for category in categories:
+            own_collection = getattr(self, category)
+            own_collection.extend(getattr(other, category, []))
 
 
 class Fuzzer:
@@ -949,10 +1188,13 @@ async def extract_component_manifest(page: Page) -> List[Dict[str, Any]]:
 
 
 class PersistenceEngine:
-    def __init__(self, defects: DefectTracker) -> None:
+    def __init__(self, defects: DefectTracker, max_workers: int = 1) -> None:
         self.defects = defects
+        self.max_workers = max(1, max_workers)
         self.pg_pool = None
         self.redis_client = None
+        self.pg_write_semaphore = asyncio.Semaphore(max(2, self.max_workers * 2))
+        self.redis_write_semaphore = asyncio.Semaphore(max(4, self.max_workers * 4))
 
     async def initialize(self) -> None:
         await self._initialize_postgres()
@@ -975,10 +1217,12 @@ class PersistenceEngine:
             return
 
         try:
+            min_size = max(1, min(4, self.max_workers))
+            max_size = max(4, self.max_workers * 4)
             self.pg_pool = await asyncpg.create_pool(
                 POSTGRES_DSN,
-                min_size=1,
-                max_size=4,
+                min_size=min_size,
+                max_size=max_size,
                 command_timeout=30,
             )
             async with self.pg_pool.acquire() as conn:
@@ -1042,7 +1286,15 @@ class PersistenceEngine:
             return
 
         try:
-            self.redis_client = redis_asyncio.from_url(REDIS_URL, decode_responses=True)
+            self.redis_client = redis_asyncio.from_url(
+                REDIS_URL,
+                decode_responses=True,
+                max_connections=max(16, self.max_workers * 8),
+                socket_connect_timeout=5,
+                socket_timeout=5,
+                health_check_interval=30,
+                retry_on_timeout=True,
+            )
             await self.redis_client.ping()
             print("✅ Redis state cache is ready.")
         except Exception as exc:
@@ -1059,7 +1311,10 @@ class PersistenceEngine:
 
         if self.redis_client is not None:
             try:
-                await self.redis_client.close()
+                close_method = getattr(self.redis_client, "aclose", None)
+                if close_method is None:
+                    close_method = self.redis_client.close
+                await close_method()
             except Exception as exc:
                 _local_service_log(f"Failed to close Redis client cleanly: {exc}")
             self.redis_client = None
@@ -1070,12 +1325,38 @@ class PersistenceEngine:
 
         redis_key = f"monkeylm:visited_states:{TIMESTAMP}"
         try:
-            count = await self.redis_client.hincrby(redis_key, state_key, 1)
-            await self.redis_client.expire(redis_key, REDIS_STATE_TTL_SECONDS)
+            async with self.redis_write_semaphore:
+                prefixed_key = build_redis_key(redis_key)
+                count = await self.redis_client.hincrby(prefixed_key, state_key, 1)
+                await self.redis_client.expire(prefixed_key, REDIS_STATE_TTL_SECONDS)
             return int(count)
         except Exception as exc:
             _local_service_log(f"Redis visited-state update failed: {exc}")
             return None
+
+    async def claim_action_path_lock(self, path_hash: str) -> bool:
+        """Try to claim a cross-worker action-path lock in Redis.
+
+        Returns True if this worker successfully claimed the lock, False if
+        another worker already holds it within the TTL window.
+        """
+        if self.redis_client is None:
+            return True
+
+        redis_key = f"monkeylm:active_path:{path_hash}"
+        try:
+            async with self.redis_write_semaphore:
+                prefixed_key = build_redis_key(redis_key)
+                acquired = await self.redis_client.set(
+                    prefixed_key,
+                    "1",
+                    nx=True,
+                    ex=REDIS_PATH_LOCK_TTL_SECONDS,
+                )
+            return bool(acquired)
+        except Exception as exc:
+            _local_service_log(f"Redis action-path lock claim failed: {exc}")
+            return True
 
     async def _fetch_golden_baseline(self, domain: str, page_route: str) -> Optional[Dict[str, Any]]:
         if self.pg_pool is None:
@@ -1125,17 +1406,35 @@ class PersistenceEngine:
 
         try:
             manifest_json = json.dumps(component_manifest)
-            async with self.pg_pool.acquire() as conn:
-                if is_golden_standard:
-                    async with conn.transaction():
-                        await conn.execute(
-                            """
-                            DELETE FROM app_baselines
-                            WHERE domain = $1 AND page_route = $2 AND is_golden_standard = TRUE
-                            """,
-                            domain,
-                            page_route,
-                        )
+            async with self.pg_write_semaphore:
+                async with self.pg_pool.acquire() as conn:
+                    if is_golden_standard:
+                        async with conn.transaction():
+                            await conn.execute(
+                                """
+                                DELETE FROM app_baselines
+                                WHERE domain = $1 AND page_route = $2 AND is_golden_standard = TRUE
+                                """,
+                                domain,
+                                page_route,
+                            )
+                            await conn.execute(
+                                """
+                                INSERT INTO app_baselines (
+                                    domain,
+                                    page_route,
+                                    dom_structure_hash,
+                                    component_manifest,
+                                    is_golden_standard,
+                                    updated_at
+                                ) VALUES ($1, $2, $3, $4::jsonb, TRUE, NOW())
+                                """,
+                                domain,
+                                page_route,
+                                dom_structure_hash,
+                                manifest_json,
+                            )
+                    else:
                         await conn.execute(
                             """
                             INSERT INTO app_baselines (
@@ -1145,34 +1444,17 @@ class PersistenceEngine:
                                 component_manifest,
                                 is_golden_standard,
                                 updated_at
-                            ) VALUES ($1, $2, $3, $4::jsonb, TRUE, NOW())
+                            ) VALUES ($1, $2, $3, $4::jsonb, FALSE, NOW())
+                            ON CONFLICT (domain, page_route, dom_structure_hash, is_golden_standard)
+                            DO UPDATE SET
+                                component_manifest = EXCLUDED.component_manifest,
+                                updated_at = NOW()
                             """,
                             domain,
                             page_route,
                             dom_structure_hash,
                             manifest_json,
                         )
-                else:
-                    await conn.execute(
-                        """
-                        INSERT INTO app_baselines (
-                            domain,
-                            page_route,
-                            dom_structure_hash,
-                            component_manifest,
-                            is_golden_standard,
-                            updated_at
-                        ) VALUES ($1, $2, $3, $4::jsonb, FALSE, NOW())
-                        ON CONFLICT (domain, page_route, dom_structure_hash, is_golden_standard)
-                        DO UPDATE SET
-                            component_manifest = EXCLUDED.component_manifest,
-                            updated_at = NOW()
-                        """,
-                        domain,
-                        page_route,
-                        dom_structure_hash,
-                        manifest_json,
-                    )
         except Exception as exc:
             _local_service_log(f"Failed to upsert baseline data: {exc}")
 
@@ -1192,29 +1474,30 @@ class PersistenceEngine:
             return
 
         try:
-            async with self.pg_pool.acquire() as conn:
-                await conn.execute(
-                    """
-                    INSERT INTO regression_drift_log (
+            async with self.pg_write_semaphore:
+                async with self.pg_pool.acquire() as conn:
+                    await conn.execute(
+                        """
+                        INSERT INTO regression_drift_log (
+                            domain,
+                            page_route,
+                            defect_tag,
+                            severity,
+                            missing_components,
+                            broken_selectors,
+                            drift_alert,
+                            step_number
+                        ) VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8)
+                        """,
                         domain,
                         page_route,
                         defect_tag,
                         severity,
-                        missing_components,
-                        broken_selectors,
-                        drift_alert,
-                        step_number
-                    ) VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8)
-                    """,
-                    domain,
-                    page_route,
-                    defect_tag,
-                    severity,
-                    json.dumps(missing_components),
-                    json.dumps(broken_selectors),
-                    json.dumps(drift_alert),
-                    step_number,
-                )
+                        json.dumps(missing_components),
+                        json.dumps(broken_selectors),
+                        json.dumps(drift_alert),
+                        step_number,
+                    )
         except Exception as exc:
             _local_service_log(f"Failed to insert regression drift log row: {exc}")
 
@@ -1938,39 +2221,44 @@ async def wait_for_page_ready(page: Page, phase: str, strict: bool = False) -> N
         print(msg)
 
 
-async def launch_context_with_fallback(playwright_instance):
+async def launch_context_with_fallback(
+    playwright_instance,
+    *,
+    user_data_dir: str,
+    worker_label: str,
+) -> Tuple[Any, Dict[str, Any]]:
     """
     Launch Chromium with sandbox enabled first.
     If that fails, no-sandbox fallback is only used when explicitly allowed.
     """
-    global BROWSER_LAUNCH_INFO
-
     base_args = [f"--window-size={BROWSER_WINDOW_SIZE}", "--disable-blink-features=AutomationControlled"]
     sandbox_args = list(base_args)
     no_sandbox_args = base_args + ["--no-sandbox", "--disable-setuid-sandbox"]
 
     try:
         context = await playwright_instance.chromium.launch_persistent_context(
-            user_data_dir=RUN_USER_DATA_DIR,
+            user_data_dir=user_data_dir,
             headless=HEADLESS,
             args=sandbox_args,
             no_viewport=NO_VIEWPORT,
         )
-        BROWSER_LAUNCH_INFO = {
+        launch_info = {
+            "worker": worker_label,
             "mode": "sandbox",
             "args": sandbox_args,
             "error": None,
             "window_size": BROWSER_WINDOW_SIZE,
             "no_viewport": NO_VIEWPORT,
             "headless": HEADLESS,
-            "user_data_dir": RUN_USER_DATA_DIR,
+            "user_data_dir": user_data_dir,
         }
-        print("🛡️ Browser launch mode: sandbox")
-        return context
+        print(f"🛡️ Browser launch mode [{worker_label}]: sandbox")
+        return context, launch_info
     except Exception as sandbox_exc:
         if STRICT_SANDBOX or not ALLOW_NO_SANDBOX_FALLBACK:
             mode = "sandbox-required-failed" if STRICT_SANDBOX else "sandbox-failed-no-fallback"
-            BROWSER_LAUNCH_INFO = {
+            launch_info = {
+                "worker": worker_label,
                 "mode": mode,
                 "args": sandbox_args,
                 "error": str(sandbox_exc),
@@ -1979,7 +2267,9 @@ async def launch_context_with_fallback(playwright_instance):
                 "headless": HEADLESS,
                 "strict_sandbox": STRICT_SANDBOX,
                 "allow_no_sandbox_fallback": ALLOW_NO_SANDBOX_FALLBACK,
+                "user_data_dir": user_data_dir,
             }
+            _local_service_log(f"Browser launch failed [{worker_label}] with mode={mode}: {sandbox_exc}")
             policy_hint = (
                 "STRICT_SANDBOX is enabled" if STRICT_SANDBOX else "ALLOW_NO_SANDBOX_FALLBACK is disabled"
             )
@@ -1990,12 +2280,13 @@ async def launch_context_with_fallback(playwright_instance):
 
         print(f"⚠️ Sandbox launch failed, retrying with no-sandbox: {sandbox_exc}")
         context = await playwright_instance.chromium.launch_persistent_context(
-            user_data_dir=RUN_USER_DATA_DIR,
+            user_data_dir=user_data_dir,
             headless=HEADLESS,
             args=no_sandbox_args,
             no_viewport=NO_VIEWPORT,
         )
-        BROWSER_LAUNCH_INFO = {
+        launch_info = {
+            "worker": worker_label,
             "mode": "no-sandbox-fallback",
             "args": no_sandbox_args,
             "error": str(sandbox_exc),
@@ -2004,10 +2295,10 @@ async def launch_context_with_fallback(playwright_instance):
             "headless": HEADLESS,
             "strict_sandbox": STRICT_SANDBOX,
             "allow_no_sandbox_fallback": ALLOW_NO_SANDBOX_FALLBACK,
-            "user_data_dir": RUN_USER_DATA_DIR,
+            "user_data_dir": user_data_dir,
         }
-        print("🔓 Browser launch mode: no-sandbox-fallback")
-        return context
+        print(f"🔓 Browser launch mode [{worker_label}]: no-sandbox-fallback")
+        return context, launch_info
 
 
 async def capture_dom_and_layout(page: Page) -> Dict[str, Any]:
@@ -2216,24 +2507,82 @@ def compare_screenshots_pixelmatch(before_path: str, after_path: str, step_num: 
     return result
 
 
-async def decide_next_action(page_state: str) -> dict:
-    memory_logs = await QDRANT_MEMORY.search_similar_layouts(page_state, limit=3)
+def _is_ollama_overload_error(exc: Exception) -> bool:
+    """Detect Ollama 503/overload or queue-pressure errors."""
+    status_code = getattr(exc, "status_code", None)
+    if status_code == 503:
+        return True
+    exc_str = str(exc).lower()
+    return any(marker in exc_str for marker in ["503", "overload", "queue", "busy", "too many requests"])
+
+
+async def _ollama_chat_with_retry(
+    *,
+    model: str,
+    messages: List[Dict[str, str]],
+    timeout_seconds: float,
+    max_retries: int = 3,
+) -> Optional[Dict[str, Any]]:
+    """Call ollama.chat asynchronously with a strict timeout and exponential backoff on overload."""
+    base_delay = 1.0
+    last_exc: Optional[Exception] = None
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    ollama.chat,
+                    model=model,
+                    messages=messages,
+                    format="json",
+                    options=OLLAMA_DECISION_OPTIONS,
+                ),
+                timeout=timeout_seconds,
+            )
+            return response
+        except asyncio.TimeoutError as exc:
+            last_exc = exc
+            _local_service_log(f"Ollama inference timed out after {timeout_seconds}s (attempt {attempt}/{max_retries})")
+        except Exception as exc:
+            last_exc = exc
+            if _is_ollama_overload_error(exc):
+                _local_service_log(f"Ollama inference overloaded (attempt {attempt}/{max_retries}): {exc}")
+            else:
+                # Non-overload errors are not retried; return None to let caller fall back.
+                return None
+
+        if attempt >= max_retries:
+            break
+
+        delay = base_delay * (2 ** (attempt - 1)) + random.uniform(0.0, 2.0)
+        _local_service_log(f"Backing off from Ollama for {delay:.2f}s before retry {attempt + 1}/{max_retries}")
+        await asyncio.sleep(delay)
+
+    if last_exc is not None:
+        _local_service_log(f"Ollama inference failed after {max_retries} attempts: {last_exc}")
+    return None
+
+
+async def decide_next_action(page_state: str, memory_store: Optional[QdrantMemoryStore] = None) -> dict:
+    active_memory_store = memory_store or QDRANT_MEMORY
+    memory_logs = await active_memory_store.search_similar_layouts(page_state, limit=3)
     prompt = build_decision_prompt(page_state, memory_logs)
 
-    for _ in range(2):
+    response = await _ollama_chat_with_retry(
+        model=OLLAMA_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        timeout_seconds=OLLAMA_TIMEOUT_SECONDS,
+        max_retries=3,
+    )
+
+    if response is not None:
         try:
-            response = ollama.chat(
-                model=OLLAMA_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                format="json",
-                options=OLLAMA_DECISION_OPTIONS,
-            )
             content = response["message"]["content"]
             parsed = parse_action_plan_response(content)
             if parsed is not None:
                 return parsed
-        except Exception:
-            continue
+        except Exception as exc:
+            _local_service_log(f"Failed to parse Ollama action plan response: {exc}")
 
     return normalize_action_plan({"action": "scroll", "target": "", "value": ""})
 
@@ -2323,6 +2672,21 @@ def apply_state_aware_policy(
                 action_plan["target"] = f"[id={id_match.group(1)}]"
     return action_plan
 
+def _compute_action_path_hash(
+    domain: str,
+    route: str,
+    action: str,
+    target: str,
+) -> str:
+    """Compute a deterministic signature for an action path.
+
+    The hash combines the current page route and the target element identifier
+    so concurrent workers avoid duplicating the same UI click/navigation sequence.
+    """
+    raw = f"{domain}|{route}|{action}|{target}".encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
 async def execute_action(
     page: Page,
     action_plan: Dict[str, Any],
@@ -2331,6 +2695,8 @@ async def execute_action(
     defects: DefectTracker,
     network_monitor: NetworkMonitor,
     perf_monitor: PerformanceMonitor,
+    log_sink: Optional[List[Dict[str, Any]]] = None,
+    persistence_engine: Optional["PersistenceEngine"] = None,
 ) -> Tuple[Optional[PageSnapshot], Dict[str, Any]]:
     action = action_plan.get("action", "scroll")
     target = action_plan.get("target", "")
@@ -2338,12 +2704,31 @@ async def execute_action(
 
     before_snapshot = await get_page_state(page, step_num, phase="before")
     perf_before = await perf_monitor.snapshot(page)
-    
+
     log_entry = {
         "step": step_num, "action": action, "target": target,
         "value": value if action == "type" else None,
         "status": "SUCCESS", "error": None, "screenshot": None, "url": page.url
     }
+
+    # Cross-worker action-path deduplication: try to claim a Redis lock for
+    # this (domain, route, action, target) combination. If another worker has
+    # already claimed it within the TTL window, fall back to a safe scroll.
+    if persistence_engine is not None and action in {
+        "click", "type", "submit_form", "handle_modal", "random_jump", "back", "restart_target"
+    }:
+        domain = split_domain_and_route(page.url)[0]
+        route = split_domain_and_route(page.url)[1]
+        path_hash = _compute_action_path_hash(domain, route, action, target)
+        if not await persistence_engine.claim_action_path_lock(path_hash):
+            print(
+                f"🤖 Step {step_num}: action path '{action}/{target}' already claimed by another worker; skipping."
+            )
+            action = "scroll"
+            target = ""
+            log_entry["action"] = action
+            log_entry["target"] = target
+            log_entry["status"] = "SKIPPED_PATH"
 
     print(f"🤖 Step {step_num}: Executing {action} on '{target}'")
 
@@ -2533,7 +2918,10 @@ async def execute_action(
         except:
             pass
 
-    test_logs.append(log_entry)
+    if log_sink is None:
+        test_logs.append(log_entry)
+    else:
+        log_sink.append(log_entry)
     try:
         return await get_page_state(page, step_num, phase="final"), log_entry
     except Exception:
@@ -2693,6 +3081,7 @@ def generate_markdown_report(start_time, end_time):
 **Browser Launch Mode:** {BROWSER_LAUNCH_INFO.get('mode', 'unknown')}  
 **Run Summary Status:** {accountability.get('run_summary_status')}  
 **Regression Drift Index:** {accountability.get('regression_drift_index')}%  
+**Graceful Shutdown:** {"requested" if BROWSER_LAUNCH_INFO.get('graceful_shutdown_requested') else "not requested"}  
 **Output Folder:** `{OUTPUT_DIR}`
 
 ## Summary
@@ -2826,6 +3215,18 @@ def generate_json_summary(start_time: datetime, end_time: datetime) -> None:
         "target_url": TARGET_URL,
         "model": OLLAMA_MODEL,
         "active_seed": ACTIVE_SEED,
+        "workers": WORKERS,
+        "max_steps_per_worker": MAX_STEPS_PER_WORKER,
+        "configured_max_steps": MAX_STEPS,
+        "ollama_timeout_seconds": OLLAMA_TIMEOUT_SECONDS,
+        "redis_path_lock_ttl_seconds": REDIS_PATH_LOCK_TTL_SECONDS,
+        "graceful_shutdown_requested": GRACEFUL_SHUTDOWN_REQUESTED,
+        "retry_policy": {
+            "worker_navigation_retries": WORKER_NAVIGATION_RETRIES,
+            "worker_qdrant_init_retries": WORKER_QDRANT_INIT_RETRIES,
+            "worker_boundary_recovery_retries": WORKER_BOUNDARY_RECOVERY_RETRIES,
+            "base_delay_seconds": RETRY_BASE_DELAY_SECONDS,
+        },
         "start_time": start_time.isoformat(),
         "end_time": end_time.isoformat(),
         "duration_seconds": (end_time - start_time).total_seconds(),
@@ -2856,12 +3257,314 @@ def generate_json_summary(start_time: datetime, end_time: datetime) -> None:
     print(f"📦 JSON summary generated: {output_path}")
 
 
+@dataclass
+class WorkerRunResult:
+    worker_id: int
+    allocated_steps: int
+    completed_steps: int
+    logs: List[Dict[str, Any]]
+    defects: DefectTracker
+    network_injections: List[Dict[str, Any]]
+    launch_info: Dict[str, Any]
+
+
+def build_worker_user_data_dir(worker_id: int) -> str:
+    worker_label = f"worker-{worker_id:02d}"
+    worker_data_dir = os.path.join(RUN_USER_DATA_DIR, worker_label)
+    os.makedirs(worker_data_dir, exist_ok=True)
+    return worker_data_dir
+
+
+async def with_retry_backoff(
+    operation_name: str,
+    operation,
+    *,
+    retries: int = 2,
+    initial_delay_seconds: float = 0.75,
+) -> Any:
+    attempts = max(1, retries + 1)
+    delay = max(0.1, float(initial_delay_seconds))
+    last_exc: Optional[Exception] = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            result = operation()
+            if asyncio.iscoroutine(result):
+                return await result
+            return result
+        except Exception as exc:
+            last_exc = exc
+            if attempt >= attempts:
+                break
+            jitter = random.uniform(0.0, 0.2)
+            sleep_for = delay + jitter
+            _local_service_log(
+                f"{operation_name} failed on attempt {attempt}/{attempts}; "
+                f"retrying in {sleep_for:.2f}s: {exc}"
+            )
+            await asyncio.sleep(sleep_for)
+            delay *= 2.0
+
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError(f"{operation_name} failed without exception details")
+
+
+def allocate_worker_steps(total_steps: int, worker_count: int, per_worker_cap: int) -> List[int]:
+    worker_count = max(1, worker_count)
+    remaining = max(0, total_steps)
+    cap = max(1, per_worker_cap)
+    allocations = [0 for _ in range(worker_count)]
+
+    while remaining > 0:
+        progressed = False
+        for idx in range(worker_count):
+            if remaining <= 0:
+                break
+            if allocations[idx] >= cap:
+                continue
+            allocations[idx] += 1
+            remaining -= 1
+            progressed = True
+        if not progressed:
+            break
+
+    if remaining > 0:
+        _local_service_log(
+            "Step allocation exhausted per-worker caps. "
+            f"Unallocated steps={remaining}, workers={worker_count}, cap={cap}."
+        )
+    return allocations
+
+
+async def _run_worker_with_limit(
+    worker_semaphore: asyncio.Semaphore,
+    *,
+    playwright_instance: Any,
+    worker_id: int,
+    allocated_steps: int,
+    start_step: int,
+    persistence_engine: PersistenceEngine,
+) -> WorkerRunResult:
+    async with worker_semaphore:
+        return await run_worker(
+            playwright_instance=playwright_instance,
+            worker_id=worker_id,
+            allocated_steps=allocated_steps,
+            start_step=start_step,
+            persistence_engine=persistence_engine,
+        )
+
+
+async def run_worker(
+    *,
+    playwright_instance: Any,
+    worker_id: int,
+    allocated_steps: int,
+    start_step: int,
+    persistence_engine: PersistenceEngine,
+) -> WorkerRunResult:
+    worker_label = f"worker-{worker_id:02d}"
+    worker_defects = DefectTracker()
+    worker_fuzzer = Fuzzer()
+    worker_network_monitor = NetworkMonitor(worker_defects)
+    worker_a11y_checker = A11yChecker(worker_defects)
+    worker_perf_monitor = PerformanceMonitor(worker_defects)
+    worker_memory = QdrantMemoryStore()
+    worker_logs: List[Dict[str, Any]] = []
+    visited_states: Dict[str, int] = {}
+    seen_click_targets: set = set()
+    completed_steps = 0
+
+    worker_data_dir = build_worker_user_data_dir(worker_id)
+
+    context = None
+    launch_info: Dict[str, Any] = {
+        "worker": worker_label,
+        "mode": "not-started",
+        "user_data_dir": worker_data_dir,
+    }
+
+    try:
+        context, launch_info = await launch_context_with_fallback(
+            playwright_instance,
+            user_data_dir=worker_data_dir,
+            worker_label=worker_label,
+        )
+
+        page = context.pages[0] if context.pages else await context.new_page()
+        page.on("dialog", handle_dialog)
+
+        def _console_listener(msg) -> None:
+            text = msg.text
+            if "content security policy" in text.lower() or "csp" in text.lower():
+                worker_defects.add(
+                    "console_findings",
+                    {
+                        "step": -1,
+                        "type": "csp-warning",
+                        "message": text,
+                        "url": page.url,
+                        "worker": worker_label,
+                    },
+                )
+
+        page.on("console", _console_listener)
+
+        print(f"🚀 Starting {worker_label} on {TARGET_URL} with {allocated_steps} steps...")
+        await with_retry_backoff(
+            f"{worker_label} initial navigation",
+            lambda: page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=45000),
+            retries=WORKER_NAVIGATION_RETRIES,
+            initial_delay_seconds=RETRY_BASE_DELAY_SECONDS,
+        )
+        await wait_for_page_ready(page, f"{worker_label}-initial-navigation")
+
+        await worker_network_monitor.install(page)
+        await worker_perf_monitor.install(page)
+        await with_retry_backoff(
+            f"{worker_label} qdrant initialize",
+            worker_memory.initialize,
+            retries=WORKER_QDRANT_INIT_RETRIES,
+            initial_delay_seconds=RETRY_BASE_DELAY_SECONDS,
+        )
+
+        for idx in range(allocated_steps):
+            if SHUTDOWN_EVENT.is_set():
+                print(f"\n🛑 {worker_label} stopping early due to graceful shutdown request.")
+                break
+
+            step = start_step + idx
+            print(f"\n--- {worker_label} step {step}/{MAX_STEPS} ---")
+
+            try:
+                snapshot = await get_page_state(page, step, phase="plan")
+                state_key = f"{snapshot.url}::{snapshot.structure_hash}"
+                local_count = visited_states.get(state_key, 0) + 1
+                redis_count = await persistence_engine.increment_visited_state(state_key)
+                visited_states[state_key] = redis_count if redis_count is not None else local_count
+                state = state_to_prompt(snapshot)
+            except Exception as exc:
+                print(f"   -> 🚨 {worker_label} failed to get state: {exc}. Skipping step.")
+                continue
+
+            plan = await decide_next_action(state, memory_store=worker_memory)
+            retrieval_telemetry = worker_memory.consume_last_search_telemetry()
+            plan = apply_state_aware_policy(plan, snapshot, visited_states, seen_click_targets)
+            if plan.get("action") == "click" and plan.get("target"):
+                seen_click_targets.add(plan.get("target"))
+
+            _, log_entry = await execute_action(
+                page,
+                plan,
+                step,
+                worker_fuzzer,
+                worker_defects,
+                worker_network_monitor,
+                worker_perf_monitor,
+                log_sink=worker_logs,
+                persistence_engine=persistence_engine,
+            )
+            log_entry["worker_id"] = worker_id
+            log_entry["memory_retrieval"] = retrieval_telemetry
+
+            if step % 5 == 0:
+                violations = await worker_a11y_checker.scan(page, step)
+                if violations:
+                    print(f"   -> ♿ {worker_label} a11y findings at step {step}: {len(violations)}")
+
+            await wait_for_page_ready(page, f"{worker_label}-post-step-{step}")
+
+            current_url = page.url
+            if not is_in_scope(current_url, TARGET_URL):
+                worker_defects.add(
+                    "boundary_drift",
+                    {
+                        "step": step,
+                        "type": "Boundary Drift",
+                        "current_url": current_url,
+                        "target_url": TARGET_URL,
+                        "worker": worker_label,
+                    },
+                )
+                await with_retry_backoff(
+                    f"{worker_label} boundary recovery navigation",
+                    lambda: page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=45000),
+                    retries=WORKER_BOUNDARY_RECOVERY_RETRIES,
+                    initial_delay_seconds=RETRY_BASE_DELAY_SECONDS,
+                )
+                await wait_for_page_ready(page, f"{worker_label}-boundary-recovery-{step}")
+
+            try:
+                baseline_snapshot = await get_page_state(page, step, phase="baseline")
+                await persistence_engine.analyze_route_regression(page, baseline_snapshot, step)
+            except Exception as exc:
+                _local_service_log(f"{worker_label} post-step baseline analysis failed at step {step}: {exc}")
+
+            regression_hits = [
+                finding
+                for finding in worker_defects.regression_findings
+                if int(finding.get("step", -1)) == step
+            ]
+            outcome_bits = [f"status={log_entry.get('status', 'UNKNOWN')}"]
+            if log_entry.get("error"):
+                outcome_bits.append(f"error={log_entry['error'][:180]}")
+            if regression_hits:
+                outcome_bits.append(
+                    f"regressions={len(regression_hits)} tag=Vibe-Code-Regression-Missing-Component"
+                )
+
+            await worker_memory.add_step_memory(
+                page_state=state,
+                action=str(plan.get("action", "scroll")),
+                outcome="; ".join(outcome_bits),
+                url=page.url,
+                step=step,
+            )
+            log_entry["memory_write"] = worker_memory.consume_last_write_telemetry()
+
+            if log_entry.get("value"):
+                payload_probe = log_entry["value"]
+                try:
+                    body_html = await page.content()
+                    if payload_probe in body_html and "<" in payload_probe:
+                        worker_defects.add(
+                            "security_risks",
+                            {
+                                "step": step,
+                                "type": "possible-reflected-input",
+                                "payload_preview": payload_probe[:200],
+                                "url": page.url,
+                                "worker": worker_label,
+                            },
+                        )
+                except Exception:
+                    pass
+
+            completed_steps += 1
+            await asyncio.sleep(ACTION_COOLDOWN_SECONDS)
+    finally:
+        await worker_memory.close()
+        if context is not None:
+            await context.close()
+
+    return WorkerRunResult(
+        worker_id=worker_id,
+        allocated_steps=allocated_steps,
+        completed_steps=completed_steps,
+        logs=worker_logs,
+        defects=worker_defects,
+        network_injections=list(worker_network_monitor.injected_events),
+        launch_info=launch_info,
+    )
+
+
 DEFECTS = DefectTracker()
 FUZZER = Fuzzer()
 NETWORK_MONITOR = NetworkMonitor(DEFECTS)
 A11Y_CHECKER = A11yChecker(DEFECTS)
 PERF_MONITOR = PerformanceMonitor(DEFECTS)
-PERSISTENCE_ENGINE = PersistenceEngine(DEFECTS)
+PERSISTENCE_ENGINE = PersistenceEngine(DEFECTS, max_workers=WORKERS)
 QDRANT_MEMORY = QdrantMemoryStore()
 
 async def main():
@@ -2882,142 +3585,84 @@ async def main():
             await QDRANT_MEMORY.close()
         return
     
+    global DEFECTS, NETWORK_MONITOR, A11Y_CHECKER, PERF_MONITOR, PERSISTENCE_ENGINE, BROWSER_LAUNCH_INFO, test_logs
+    DEFECTS = DefectTracker()
+    NETWORK_MONITOR = NetworkMonitor(DEFECTS)
+    A11Y_CHECKER = A11yChecker(DEFECTS)
+    PERF_MONITOR = PerformanceMonitor(DEFECTS)
+    PERSISTENCE_ENGINE = PersistenceEngine(DEFECTS, max_workers=WORKERS)
+
+    print("💡 Ollama throughput tip: set OLLAMA_NUM_PARALLEL=" + str(WORKERS) + " (or higher) and "
+          "OLLAMA_KV_CACHE_TYPE=q4_0 for lower-latency batch inference under concurrent workers.")
+
+    allocations = allocate_worker_steps(MAX_STEPS, WORKERS, MAX_STEPS_PER_WORKER)
+    active_allocations = [(idx + 1, count) for idx, count in enumerate(allocations) if count > 0]
+    if not active_allocations:
+        _local_service_log("No steps allocated for execution. Exiting run early.")
+        return
+
     async with async_playwright() as p:
-        context = await launch_context_with_fallback(p)
-        
-        page = context.pages[0]
-        page.on("dialog", handle_dialog)
-
-        def _console_listener(msg) -> None:
-            text = msg.text
-            if "content security policy" in text.lower() or "csp" in text.lower():
-                DEFECTS.add(
-                    "console_findings",
-                    {
-                        "step": -1,
-                        "type": "csp-warning",
-                        "message": text,
-                        "url": page.url,
-                    },
-                )
-
-        print(f"🚀 Starting Advanced Monkey Test on {TARGET_URL}...")
-        await page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=45000)
-        await wait_for_page_ready(page, "initial-navigation")
-
-        page.on("console", _console_listener)
-        await NETWORK_MONITOR.install(page)
-        await PERF_MONITOR.install(page)
         await PERSISTENCE_ENGINE.initialize()
-        await QDRANT_MEMORY.initialize()
-
-        visited_states: Dict[str, int] = {}
-        seen_click_targets: set = set()
-
         try:
-            for step in range(1, MAX_STEPS + 1):
-                print(f"\n--- Step {step}/{MAX_STEPS} ---")
-
-                try:
-                    snapshot = await get_page_state(page, step, phase="plan")
-                    state_key = f"{snapshot.url}::{snapshot.structure_hash}"
-                    local_count = visited_states.get(state_key, 0) + 1
-                    redis_count = await PERSISTENCE_ENGINE.increment_visited_state(state_key)
-                    visited_states[state_key] = redis_count if redis_count is not None else local_count
-                    state = state_to_prompt(snapshot)
-                except Exception as e:
-                    print(f"   -> 🚨 Failed to get state: {e}. Skipping step.")
-                    continue
-
-                plan = await decide_next_action(state)
-                retrieval_telemetry = QDRANT_MEMORY.consume_last_search_telemetry()
-                plan = apply_state_aware_policy(plan, snapshot, visited_states, seen_click_targets)
-                if plan.get("action") == "click" and plan.get("target"):
-                    seen_click_targets.add(plan.get("target"))
-
-                _, log_entry = await execute_action(
-                    page,
-                    plan,
-                    step,
-                    FUZZER,
-                    DEFECTS,
-                    NETWORK_MONITOR,
-                    PERF_MONITOR,
-                )
-                log_entry["memory_retrieval"] = retrieval_telemetry
-
-                if step % 5 == 0:
-                    violations = await A11Y_CHECKER.scan(page, step)
-                    if violations:
-                        print(f"   -> ♿ A11y findings at step {step}: {len(violations)} serious/critical")
-
-                await wait_for_page_ready(page, f"post-step-{step}")
-
-                current_url = page.url
-                if not is_in_scope(current_url, TARGET_URL):
-                    DEFECTS.add(
-                        "boundary_drift",
-                        {
-                            "step": step,
-                            "type": "Boundary Drift",
-                            "current_url": current_url,
-                            "target_url": TARGET_URL,
-                        },
+            worker_semaphore = asyncio.Semaphore(WORKERS)
+            worker_tasks: List[asyncio.Task] = []
+            next_start_step = 1
+            for worker_id, allocated_steps in active_allocations:
+                worker_tasks.append(
+                    asyncio.create_task(
+                        _run_worker_with_limit(
+                            worker_semaphore,
+                            playwright_instance=p,
+                            worker_id=worker_id,
+                            allocated_steps=allocated_steps,
+                            start_step=next_start_step,
+                            persistence_engine=PERSISTENCE_ENGINE,
+                        )
                     )
-                    await page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=45000)
-                    await wait_for_page_ready(page, f"boundary-recovery-{step}")
-
-                try:
-                    baseline_snapshot = await get_page_state(page, step, phase="baseline")
-                    await PERSISTENCE_ENGINE.analyze_route_regression(page, baseline_snapshot, step)
-                except Exception as exc:
-                    _local_service_log(f"Post-step baseline analysis failed at step {step}: {exc}")
-
-                outcome_bits = [f"status={log_entry.get('status', 'UNKNOWN')}"]
-                if log_entry.get("error"):
-                    outcome_bits.append(f"error={log_entry['error'][:180]}")
-                regression_hits = [
-                    finding
-                    for finding in DEFECTS.regression_findings
-                    if int(finding.get("step", -1)) == step
-                ]
-                if regression_hits:
-                    outcome_bits.append(
-                        f"regressions={len(regression_hits)} tag=Vibe-Code-Regression-Missing-Component"
-                    )
-
-                await QDRANT_MEMORY.add_step_memory(
-                    page_state=state,
-                    action=str(plan.get("action", "scroll")),
-                    outcome="; ".join(outcome_bits),
-                    url=page.url,
-                    step=step,
                 )
-                log_entry["memory_write"] = QDRANT_MEMORY.consume_last_write_telemetry()
+                next_start_step += allocated_steps
 
-                # Detect potential reflected input issues by checking if payload echoes unsafely in markup.
-                if log_entry.get("value"):
-                    payload_probe = log_entry["value"]
-                    try:
-                        body_html = await page.content()
-                        if payload_probe in body_html and "<" in payload_probe:
-                            DEFECTS.add(
-                                "security_risks",
-                                {
-                                    "step": step,
-                                    "type": "possible-reflected-input",
-                                    "payload_preview": payload_probe[:200],
-                                    "url": page.url,
-                                },
-                            )
-                    except Exception:
-                        pass
-
-                await asyncio.sleep(ACTION_COOLDOWN_SECONDS)
+            _register_graceful_shutdown_signals()
+            worker_results = await asyncio.gather(*worker_tasks, return_exceptions=True)
         finally:
-            await QDRANT_MEMORY.close()
             await PERSISTENCE_ENGINE.close()
-            await context.close()
+
+    merged_defects = DefectTracker()
+    merged_logs: List[Dict[str, Any]] = []
+    merged_network_events: List[Dict[str, Any]] = []
+    worker_launches: List[Dict[str, Any]] = []
+    worker_completion: List[Dict[str, Any]] = []
+    for result in worker_results:
+        if isinstance(result, Exception):
+            print(f"   -> 🚨 Worker raised an exception during shutdown: {result}")
+            continue
+        merged_defects.merge_from(result.defects)
+        merged_logs.extend(result.logs)
+        merged_network_events.extend(result.network_injections)
+        worker_launches.append(result.launch_info)
+        worker_completion.append(
+            {
+                "worker_id": result.worker_id,
+                "allocated_steps": result.allocated_steps,
+                "completed_steps": result.completed_steps,
+            }
+        )
+
+    merged_logs.sort(key=lambda entry: int(entry.get("step", 0)))
+    test_logs = merged_logs
+    DEFECTS = merged_defects
+    NETWORK_MONITOR = NetworkMonitor(DEFECTS)
+    NETWORK_MONITOR.injected_events = merged_network_events
+    BROWSER_LAUNCH_INFO = {
+        "mode": "multi-worker" if len(worker_launches) > 1 else "single-worker",
+        "workers": worker_launches,
+        "worker_completion": worker_completion,
+        "window_size": BROWSER_WINDOW_SIZE,
+        "no_viewport": NO_VIEWPORT,
+        "headless": HEADLESS,
+        "root_user_data_dir": RUN_USER_DATA_DIR,
+        "graceful_shutdown_requested": GRACEFUL_SHUTDOWN_REQUESTED,
+    }
 
     end_time = datetime.now()
     generate_markdown_report(start_time, end_time)
@@ -3026,4 +3671,5 @@ async def main():
 if __name__ == "__main__":
     cli_args = parse_cli_args()
     apply_runtime_overrides(cli_args)
+    validate_runtime_configuration()
     asyncio.run(main())

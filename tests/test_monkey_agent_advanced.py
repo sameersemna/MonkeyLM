@@ -1,9 +1,13 @@
 import argparse
+import asyncio
 import json
+import os
 import random
+import signal
 import tempfile
 import unittest
 from datetime import datetime
+from typing import Any, Dict, Optional
 
 import monkey_agent_advanced as m
 
@@ -35,11 +39,37 @@ class MonkeyAgentAdvancedTests(unittest.TestCase):
         args = argparse.Namespace(
             target_url=None,
             ollama_model=None,
+            ollama_timeout_seconds=None,
             max_steps=None,
+            workers=None,
+            max_steps_per_worker=None,
+            worker_navigation_retries=None,
+            worker_qdrant_init_retries=None,
+            worker_boundary_recovery_retries=None,
+            retry_base_delay_seconds=None,
             headless=None,
             window_size=None,
             no_viewport=None,
             seed=321,
+            postgres_dsn=None,
+            redis_url=None,
+            redis_prefix=None,
+            redis_path_lock_ttl_seconds=None,
+            golden_baseline_mode=None,
+            strict_persistence=None,
+            qdrant_url=None,
+            qdrant_collection=None,
+            qdrant_embedding_provider=None,
+            qdrant_embedding_model=None,
+            qdrant_disable_reads=False,
+            qdrant_disable_writes=False,
+            qdrant_read_only=False,
+            qdrant_enable_rerank=False,
+            qdrant_disable_rerank=False,
+            qdrant_rerank_model=None,
+            qdrant_candidate_limit=None,
+            qdrant_inspect=False,
+            qdrant_clear=False,
         )
 
         m.apply_runtime_overrides(args)
@@ -63,13 +93,22 @@ class MonkeyAgentAdvancedTests(unittest.TestCase):
         args = argparse.Namespace(
             target_url=None,
             ollama_model=None,
+            ollama_timeout_seconds=None,
             max_steps=None,
+            workers=None,
+            max_steps_per_worker=None,
+            worker_navigation_retries=None,
+            worker_qdrant_init_retries=None,
+            worker_boundary_recovery_retries=None,
+            retry_base_delay_seconds=None,
             headless=None,
             window_size=None,
             no_viewport=None,
             seed=None,
             postgres_dsn=None,
             redis_url=None,
+            redis_prefix=None,
+            redis_path_lock_ttl_seconds=None,
             golden_baseline_mode=None,
             strict_persistence=None,
             qdrant_url=None,
@@ -106,6 +145,60 @@ class MonkeyAgentAdvancedTests(unittest.TestCase):
         m.QDRANT_RERANK_ENABLED = original_rerank_enabled
         m.QDRANT_RERANK_MODEL = original_rerank_model
         m.QDRANT_CANDIDATE_LIMIT = original_candidate_limit
+
+    def test_apply_runtime_overrides_retry_policy(self) -> None:
+        original_nav_retries = m.WORKER_NAVIGATION_RETRIES
+        original_qdrant_retries = m.WORKER_QDRANT_INIT_RETRIES
+        original_boundary_retries = m.WORKER_BOUNDARY_RECOVERY_RETRIES
+        original_base_delay = m.RETRY_BASE_DELAY_SECONDS
+
+        args = argparse.Namespace(
+            target_url=None,
+            ollama_model=None,
+            ollama_timeout_seconds=None,
+            max_steps=None,
+            workers=None,
+            max_steps_per_worker=None,
+            worker_navigation_retries=4,
+            worker_qdrant_init_retries=2,
+            worker_boundary_recovery_retries=3,
+            retry_base_delay_seconds=1.25,
+            headless=None,
+            window_size=None,
+            no_viewport=None,
+            seed=None,
+            postgres_dsn=None,
+            redis_url=None,
+            redis_prefix=None,
+            redis_path_lock_ttl_seconds=None,
+            golden_baseline_mode=None,
+            strict_persistence=None,
+            qdrant_url=None,
+            qdrant_collection=None,
+            qdrant_embedding_provider=None,
+            qdrant_embedding_model=None,
+            qdrant_disable_reads=False,
+            qdrant_disable_writes=False,
+            qdrant_read_only=False,
+            qdrant_enable_rerank=False,
+            qdrant_disable_rerank=False,
+            qdrant_rerank_model=None,
+            qdrant_candidate_limit=None,
+            qdrant_inspect=False,
+            qdrant_clear=False,
+        )
+
+        m.apply_runtime_overrides(args)
+
+        self.assertEqual(m.WORKER_NAVIGATION_RETRIES, 4)
+        self.assertEqual(m.WORKER_QDRANT_INIT_RETRIES, 2)
+        self.assertEqual(m.WORKER_BOUNDARY_RECOVERY_RETRIES, 3)
+        self.assertEqual(m.RETRY_BASE_DELAY_SECONDS, 1.25)
+
+        m.WORKER_NAVIGATION_RETRIES = original_nav_retries
+        m.WORKER_QDRANT_INIT_RETRIES = original_qdrant_retries
+        m.WORKER_BOUNDARY_RECOVERY_RETRIES = original_boundary_retries
+        m.RETRY_BASE_DELAY_SECONDS = original_base_delay
 
     def test_generate_json_summary_contains_seed_and_boundary_drift(self) -> None:
         original_output_dir = m.OUTPUT_DIR
@@ -337,14 +430,241 @@ class MonkeyAgentAdvancedTests(unittest.TestCase):
         parsed = store._parse_rerank_response('{"ranked_indices": [2, 0, 1]}')
         self.assertEqual(parsed, [2, 0, 1])
 
+    def test_allocate_worker_steps_respects_total_and_cap(self) -> None:
+        allocations = m.allocate_worker_steps(total_steps=10, worker_count=3, per_worker_cap=4)
+        self.assertEqual(sum(allocations), 10)
+        self.assertTrue(all(count <= 4 for count in allocations))
+
+    def test_validate_runtime_configuration_rejects_invalid_per_worker_cap(self) -> None:
+        original_max_steps = m.MAX_STEPS
+        original_max_steps_per_worker = m.MAX_STEPS_PER_WORKER
+        try:
+            m.MAX_STEPS = 5
+            m.MAX_STEPS_PER_WORKER = 6
+            with self.assertRaises(ValueError):
+                m.validate_runtime_configuration()
+        finally:
+            m.MAX_STEPS = original_max_steps
+            m.MAX_STEPS_PER_WORKER = original_max_steps_per_worker
+
+    def test_validate_runtime_configuration_rejects_excessive_retry_count(self) -> None:
+        original_nav_retries = m.WORKER_NAVIGATION_RETRIES
+        try:
+            m.WORKER_NAVIGATION_RETRIES = m.MAX_ALLOWED_RETRIES + 1
+            with self.assertRaises(ValueError):
+                m.validate_runtime_configuration()
+        finally:
+            m.WORKER_NAVIGATION_RETRIES = original_nav_retries
+
+    def test_validate_runtime_configuration_rejects_excessive_retry_delay(self) -> None:
+        original_retry_delay = m.RETRY_BASE_DELAY_SECONDS
+        try:
+            m.RETRY_BASE_DELAY_SECONDS = m.MAX_ALLOWED_RETRY_BASE_DELAY_SECONDS + 0.5
+            with self.assertRaises(ValueError):
+                m.validate_runtime_configuration()
+        finally:
+            m.RETRY_BASE_DELAY_SECONDS = original_retry_delay
+
+    def test_build_worker_user_data_dir_returns_distinct_paths(self) -> None:
+        dir_one = m.build_worker_user_data_dir(1)
+        dir_two = m.build_worker_user_data_dir(2)
+
+        self.assertNotEqual(dir_one, dir_two)
+        self.assertTrue(os.path.isdir(dir_one))
+        self.assertTrue(os.path.isdir(dir_two))
+
+    def test_build_redis_key_applies_prefix(self) -> None:
+        original_prefix = m.REDIS_PREFIX
+        try:
+            m.REDIS_PREFIX = "monkey:"
+            self.assertEqual(m.build_redis_key("visited"), "monkey:visited")
+            m.REDIS_PREFIX = ""
+            self.assertEqual(m.build_redis_key("visited"), "visited")
+        finally:
+            m.REDIS_PREFIX = original_prefix
+
+    def test_apply_runtime_overrides_redis_prefix(self) -> None:
+        original_prefix = m.REDIS_PREFIX
+        try:
+            args = argparse.Namespace(
+                target_url=None,
+                ollama_model=None,
+                ollama_timeout_seconds=None,
+                max_steps=None,
+                workers=None,
+                max_steps_per_worker=None,
+                worker_navigation_retries=None,
+                worker_qdrant_init_retries=None,
+                worker_boundary_recovery_retries=None,
+                retry_base_delay_seconds=None,
+                redis_url=None,
+                redis_prefix="test:",
+                redis_path_lock_ttl_seconds=None,
+                headless=None,
+                window_size=None,
+                no_viewport=None,
+                seed=None,
+                postgres_dsn=None,
+                golden_baseline_mode=None,
+                strict_persistence=None,
+                qdrant_url=None,
+                qdrant_collection=None,
+                qdrant_embedding_provider=None,
+                qdrant_embedding_model=None,
+                qdrant_disable_reads=False,
+                qdrant_disable_writes=False,
+                qdrant_read_only=False,
+                qdrant_enable_rerank=False,
+                qdrant_disable_rerank=False,
+                qdrant_rerank_model=None,
+                qdrant_candidate_limit=None,
+                qdrant_inspect=False,
+                qdrant_clear=False,
+            )
+            m.apply_runtime_overrides(args)
+            self.assertEqual(m.REDIS_PREFIX, "test:")
+        finally:
+            m.REDIS_PREFIX = original_prefix
+
+    def test_apply_runtime_overrides_ollama_timeout(self) -> None:
+        original_timeout = m.OLLAMA_TIMEOUT_SECONDS
+        try:
+            args = argparse.Namespace(
+                target_url=None,
+                ollama_model=None,
+                ollama_timeout_seconds=30.0,
+                max_steps=None,
+                workers=None,
+                max_steps_per_worker=None,
+                worker_navigation_retries=None,
+                worker_qdrant_init_retries=None,
+                worker_boundary_recovery_retries=None,
+                retry_base_delay_seconds=None,
+                redis_url=None,
+                redis_prefix=None,
+                redis_path_lock_ttl_seconds=None,
+                headless=None,
+                window_size=None,
+                no_viewport=None,
+                seed=None,
+                postgres_dsn=None,
+                golden_baseline_mode=None,
+                strict_persistence=None,
+                qdrant_url=None,
+                qdrant_collection=None,
+                qdrant_embedding_provider=None,
+                qdrant_embedding_model=None,
+                qdrant_disable_reads=False,
+                qdrant_disable_writes=False,
+                qdrant_read_only=False,
+                qdrant_enable_rerank=False,
+                qdrant_disable_rerank=False,
+                qdrant_rerank_model=None,
+                qdrant_candidate_limit=None,
+                qdrant_inspect=False,
+                qdrant_clear=False,
+            )
+            m.apply_runtime_overrides(args)
+            self.assertEqual(m.OLLAMA_TIMEOUT_SECONDS, 30.0)
+        finally:
+            m.OLLAMA_TIMEOUT_SECONDS = original_timeout
+
+    def test_apply_runtime_overrides_redis_path_lock_ttl(self) -> None:
+        original_ttl = m.REDIS_PATH_LOCK_TTL_SECONDS
+        try:
+            args = argparse.Namespace(
+                target_url=None,
+                ollama_model=None,
+                ollama_timeout_seconds=None,
+                max_steps=None,
+                workers=None,
+                max_steps_per_worker=None,
+                worker_navigation_retries=None,
+                worker_qdrant_init_retries=None,
+                worker_boundary_recovery_retries=None,
+                retry_base_delay_seconds=None,
+                redis_url=None,
+                redis_prefix=None,
+                redis_path_lock_ttl_seconds=90,
+                headless=None,
+                window_size=None,
+                no_viewport=None,
+                seed=None,
+                postgres_dsn=None,
+                golden_baseline_mode=None,
+                strict_persistence=None,
+                qdrant_url=None,
+                qdrant_collection=None,
+                qdrant_embedding_provider=None,
+                qdrant_embedding_model=None,
+                qdrant_disable_reads=False,
+                qdrant_disable_writes=False,
+                qdrant_read_only=False,
+                qdrant_enable_rerank=False,
+                qdrant_disable_rerank=False,
+                qdrant_rerank_model=None,
+                qdrant_candidate_limit=None,
+                qdrant_inspect=False,
+                qdrant_clear=False,
+            )
+            m.apply_runtime_overrides(args)
+            self.assertEqual(m.REDIS_PATH_LOCK_TTL_SECONDS, 90)
+        finally:
+            m.REDIS_PATH_LOCK_TTL_SECONDS = original_ttl
+
+    def test_validate_runtime_configuration_rejects_invalid_path_lock_ttl(self) -> None:
+        original_ttl = m.REDIS_PATH_LOCK_TTL_SECONDS
+        try:
+            m.REDIS_PATH_LOCK_TTL_SECONDS = 0
+            with self.assertRaises(ValueError) as ctx:
+                m.validate_runtime_configuration()
+            self.assertIn("REDIS_PATH_LOCK_TTL_SECONDS", str(ctx.exception))
+
+            m.REDIS_PATH_LOCK_TTL_SECONDS = 301
+            with self.assertRaises(ValueError) as ctx:
+                m.validate_runtime_configuration()
+            self.assertIn("REDIS_PATH_LOCK_TTL_SECONDS", str(ctx.exception))
+        finally:
+            m.REDIS_PATH_LOCK_TTL_SECONDS = original_ttl
+
+    def test_compute_action_path_hash_is_deterministic(self) -> None:
+        h1 = m._compute_action_path_hash("example.com", "/login", "click", "submit-btn")
+        h2 = m._compute_action_path_hash("example.com", "/login", "click", "submit-btn")
+        self.assertEqual(h1, h2)
+        h3 = m._compute_action_path_hash("example.com", "/login", "click", "cancel-btn")
+        self.assertNotEqual(h1, h3)
+
 
 class MonkeyAgentAdvancedAsyncTests(unittest.IsolatedAsyncioTestCase):
+    async def test_with_retry_backoff_retries_and_succeeds(self) -> None:
+        attempts = {"count": 0}
+
+        async def flaky() -> str:
+            attempts["count"] += 1
+            if attempts["count"] < 3:
+                raise RuntimeError("transient")
+            return "ok"
+
+        result = await m.with_retry_backoff(
+            "test-flaky",
+            flaky,
+            retries=3,
+            initial_delay_seconds=0.01,
+        )
+        self.assertEqual(result, "ok")
+        self.assertEqual(attempts["count"], 3)
+
     async def test_performance_snapshot_includes_navigation_telemetry_shape(self) -> None:
         defects = m.DefectTracker()
         perf_monitor = m.PerformanceMonitor(defects)
 
         async with m.async_playwright() as p:
-            context = await m.launch_context_with_fallback(p)
+            user_data_dir = f"{m.RUN_USER_DATA_DIR}/test_perf_nav"
+            context, _ = await m.launch_context_with_fallback(
+                p,
+                user_data_dir=user_data_dir,
+                worker_label="test-perf-nav",
+            )
             page = context.pages[0]
 
             await page.goto(m.TARGET_URL, wait_until="domcontentloaded", timeout=45000)
@@ -374,7 +694,12 @@ class MonkeyAgentAdvancedAsyncTests(unittest.IsolatedAsyncioTestCase):
         local_defects = m.DefectTracker()
 
         async with m.async_playwright() as p:
-            context = await m.launch_context_with_fallback(p)
+            user_data_dir = f"{m.RUN_USER_DATA_DIR}/test_boundary_recovery"
+            context, _ = await m.launch_context_with_fallback(
+                p,
+                user_data_dir=user_data_dir,
+                worker_label="test-boundary",
+            )
             page = context.pages[0]
 
             await page.goto(m.TARGET_URL, wait_until="domcontentloaded", timeout=45000)
@@ -403,6 +728,51 @@ class MonkeyAgentAdvancedAsyncTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(local_defects.boundary_drift[0]["type"], "Boundary Drift")
 
             await context.close()
+
+    async def test_claim_action_path_lock_with_fake_redis(self) -> None:
+        defects = m.DefectTracker()
+        engine = m.PersistenceEngine(defects, max_workers=2)
+
+        class FakeRedis:
+            def __init__(self) -> None:
+                self.store: Dict[str, Any] = {}
+
+            async def set(self, key: str, value: str, *, nx: bool = False, ex: Optional[int] = None) -> Optional[str]:
+                if nx and key in self.store:
+                    return None
+                self.store[key] = (value, ex)
+                return "OK"
+
+        engine.redis_client = FakeRedis()
+        try:
+            self.assertTrue(await engine.claim_action_path_lock("abc123"))
+            self.assertFalse(await engine.claim_action_path_lock("abc123"))
+            self.assertTrue(await engine.claim_action_path_lock("def456"))
+        finally:
+            engine.redis_client = None
+
+    async def test_graceful_shutdown_event_exists_and_can_be_set(self) -> None:
+        self.assertIsInstance(m.SHUTDOWN_EVENT, asyncio.Event)
+        self.assertFalse(m.SHUTDOWN_EVENT.is_set())
+        m.SHUTDOWN_EVENT.set()
+        self.assertTrue(m.SHUTDOWN_EVENT.is_set())
+        m.SHUTDOWN_EVENT.clear()
+        self.assertFalse(m.SHUTDOWN_EVENT.is_set())
+
+    async def test_request_graceful_shutdown_sets_event_and_flag(self) -> None:
+        original_flag = m.GRACEFUL_SHUTDOWN_REQUESTED
+        try:
+            m.GRACEFUL_SHUTDOWN_REQUESTED = False
+            m.SHUTDOWN_EVENT.clear()
+            m._request_graceful_shutdown(signal.SIGINT, None)
+            self.assertTrue(m.GRACEFUL_SHUTDOWN_REQUESTED)
+            # The handler schedules the event set on the running loop; yield so
+            # the callback is processed before asserting.
+            await asyncio.sleep(0)
+            self.assertTrue(m.SHUTDOWN_EVENT.is_set())
+        finally:
+            m.GRACEFUL_SHUTDOWN_REQUESTED = original_flag
+            m.SHUTDOWN_EVENT.clear()
 
 
 if __name__ == "__main__":
