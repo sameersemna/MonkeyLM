@@ -54,7 +54,7 @@ httpx = _optional_import("httpx")
 
 try:
     from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image as RLImage, Table, TableStyle, PageBreak
-    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.lib.units import inch
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import letter
@@ -854,14 +854,23 @@ class A11yChecker:
         filtered: List[Dict[str, Any]] = []
         for violation in results.get("violations", []):
             impact = (violation.get("impact") or "").lower()
-            if impact in {"critical", "serious"}:
+            if impact not in {"critical", "serious"}:
+                continue
+            rule_id = violation.get("id")
+            description = violation.get("description")
+            help_text = violation.get("help")
+            for node in violation.get("nodes", []):
+                targets = node.get("target", [])
+                selector = ", ".join(targets) if targets else "(unknown)"
                 finding = {
                     "step": step_num,
                     "severity": impact,
-                    "id": violation.get("id"),
-                    "description": violation.get("description"),
-                    "help": violation.get("help"),
-                    "nodes": len(violation.get("nodes", [])),
+                    "id": rule_id,
+                    "description": description,
+                    "help": help_text,
+                    "selector": selector,
+                    "html_snippet": node.get("html", ""),
+                    "remediation": node.get("failureSummary", ""),
                     "url": page.url,
                 }
                 filtered.append(finding)
@@ -4055,7 +4064,17 @@ Actions included: Clicking, Typing, Form Submission, Modal Handling, and State E
     md_content += "\n## Accessibility Violations\n"
     if DEFECTS.accessibility_violations:
         for item in DEFECTS.accessibility_violations:
-            md_content += f"- Step {item['step']}: [{item['severity']}] {item.get('id')} ({item.get('nodes', 0)} nodes)\n"
+            selector = item.get("selector", "(unknown)")
+            rule_id = item.get("id", "unknown")
+            remediation = item.get("remediation", "")
+            html_snippet = item.get("html_snippet", "")
+            md_content += f"### Step {item['step']}: [{item['severity'].upper()}] `{rule_id}`\n\n"
+            md_content += f"- **Selector:** `{selector}`\n"
+            if html_snippet:
+                md_content += f"- **HTML Snippet:**\n```html\n{html_snippet[:300]}\n```\n"
+            if remediation:
+                md_content += f"- **Remediation:** {remediation}\n"
+            md_content += "\n"
     else:
         md_content += "- None detected.\n"
 
@@ -4239,7 +4258,7 @@ def generate_pdf_report(start_time: datetime, end_time: datetime) -> None:
             ("Baseline Regressions", DEFECTS.regression_findings),
             ("Visual Regressions", DEFECTS.visual_regressions),
             ("Layout Instability", DEFECTS.layout_instability),
-            ("Accessibility Violations", DEFECTS.accessibility_violations),
+            # Accessibility Violations is rendered separately with a dedicated ticket layout below
             ("Race Findings", DEFECTS.race_findings),
             ("Console Findings", DEFECTS.console_findings),
             ("Boundary Drift", DEFECTS.boundary_drift),
@@ -4263,6 +4282,161 @@ def generate_pdf_report(start_time: datetime, end_time: datetime) -> None:
                     line += f" — {str(detail)[:120]}"
                 story.append(Paragraph(line, styles["BodyText"]))
             story.append(Spacer(1, 0.1 * inch))
+
+        # Accessibility Violations — Structured Engineering Ticket Cards
+        if DEFECTS.accessibility_violations:
+            story.append(Paragraph("Accessibility Violations", styles["Heading3"]))
+            story.append(Spacer(1, 0.05 * inch))
+
+            # ── Card dimensions & shared styles ──────────────────────────
+            card_width = 7.8 * inch  # Full usable page width (letter minus margins)
+
+            header_critical_style = ParagraphStyle(
+                "a11yHeaderCritical",
+                parent=styles["BodyText"],
+                fontName="Helvetica-Bold",
+                textColor=colors.whitesmoke,
+                fontSize=10,
+                leading=13,
+            )
+            header_serious_style = ParagraphStyle(
+                "a11yHeaderSerious",
+                parent=styles["BodyText"],
+                fontName="Helvetica-Bold",
+                textColor=colors.whitesmoke,
+                fontSize=10,
+                leading=13,
+            )
+            selector_style = ParagraphStyle(
+                "a11ySelector",
+                parent=styles["BodyText"],
+                fontName="Courier",
+                fontSize=8,
+                leading=11,
+                textColor=colors.HexColor("#2c3e50"),
+            )
+            code_block_style = ParagraphStyle(
+                "a11yCodeBlock",
+                parent=styles["BodyText"],
+                fontName="Courier",
+                fontSize=7.5,
+                leading=9,
+                wordWrap="CJK",  # Character-level wrapping prevents right-margin overflow
+                textColor=colors.HexColor("#333333"),
+            )
+            remediation_style = ParagraphStyle(
+                "a11yRemediation",
+                parent=styles["BodyText"],
+                fontName="Helvetica",
+                fontSize=9,
+                leading=12,
+                textColor=colors.HexColor("#27ae60"),
+            )
+            description_style = ParagraphStyle(
+                "a11yDescription",
+                parent=styles["BodyText"],
+                fontName="Helvetica-Oblique",
+                fontSize=8.5,
+                leading=11,
+                textColor=colors.HexColor("#555555"),
+            )
+
+            def _xml_escape(text: str) -> str:
+                """Escape XML-like characters that would break ReportLab Paragraph rendering."""
+                return (
+                    text.replace("&", "&amp;")
+                    .replace("<", "&lt;")
+                    .replace(">", "&gt;")
+                    .replace('"', "&quot;")
+                    .replace("'", "&#39;")
+                )
+
+            # ── Build one card per violation ─────────────────────────────
+            for item in DEFECTS.accessibility_violations[:50]:
+                severity = (item.get("severity") or "unknown").lower()
+                rule_id = item.get("id", "unknown")
+                description = item.get("description", "")
+                selector = item.get("selector", "(unknown)")
+                html_snippet = item.get("html_snippet", "")
+                remediation = item.get("remediation", "")
+                step = item.get("step", "n/a")
+
+                # Header text & style based on severity
+                if severity == "critical":
+                    header_text = f"[CRITICAL] Rule: {rule_id} at Step {step}"
+                    header_style = header_critical_style
+                    header_bg = colors.HexColor("#c0392b")  # Dark red
+                else:
+                    header_text = f"[SERIOUS] Rule: {rule_id} at Step {step}"
+                    header_style = header_serious_style
+                    header_bg = colors.HexColor("#d35400")  # Dark orange
+
+                # Build card rows with explicit (row_content, background_color) pairs
+                row_specs = []  # List of (Paragraph, bg_color) tuples
+
+                # Row 0: Severity header
+                row_specs.append((Paragraph(header_text, header_style), header_bg))
+
+                # Row 1 (optional): Rule description
+                if description:
+                    row_specs.append((
+                        Paragraph(description, description_style),
+                        colors.HexColor("#fafafa"),
+                    ))
+
+                # Selector row — monospace path
+                row_specs.append((
+                    Paragraph(f"Selector Path: {_xml_escape(selector)}", selector_style),
+                    colors.white,
+                ))
+
+                # Code block row — truncated HTML with CJK word-wrap
+                if html_snippet:
+                    truncated_html = _xml_escape(html_snippet[:250])
+                    if len(html_snippet) > 250:
+                        truncated_html += " ... (truncated)"
+                    row_specs.append((
+                        Paragraph(truncated_html, code_block_style),
+                        colors.HexColor("#f0f0f0"),
+                    ))
+
+                # Remediation row — fix instructions
+                if remediation:
+                    row_specs.append((
+                        Paragraph(f"How to fix: {remediation}", remediation_style),
+                        colors.HexColor("#f0fff4"),
+                    ))
+
+                # Assemble the card Table from row specs
+                card_rows = [cell for cell, _ in row_specs]
+
+                ticket_table = Table(
+                    [[row] for row in card_rows],
+                    colWidths=[card_width],
+                    repeatRows=0,
+                )
+
+                # Build TableStyle commands — per-row backgrounds from specs
+                style_cmds = [
+                    # Global: borders and padding
+                    ("BOX", (0, 0), (-1, -1), 1.0, colors.HexColor("#bdc3c7")),
+                    ("INNERGRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#d5dbdb")),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+                    ("TOPPADDING", (0, 0), (-1, -1), 5),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ]
+                for row_idx, (_cell, bg_color) in enumerate(row_specs):
+                    style_cmds.append(("BACKGROUND", (0, row_idx), (0, row_idx), bg_color))
+
+                ticket_table.setStyle(TableStyle(style_cmds))
+                story.append(ticket_table)
+
+                # Card separator
+                story.append(Spacer(1, 0.1 * inch))
+
+            story.append(Spacer(1, 0.15 * inch))
 
         # Visual Proof Plates
         annotated_logs = [
