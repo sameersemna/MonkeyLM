@@ -39,6 +39,7 @@ class MonkeyAgentAdvancedTests(unittest.TestCase):
         args = argparse.Namespace(
             target_url=None,
             ollama_model=None,
+            vision_model=None,
             ollama_timeout_seconds=None,
             max_steps=None,
             workers=None,
@@ -93,6 +94,7 @@ class MonkeyAgentAdvancedTests(unittest.TestCase):
         args = argparse.Namespace(
             target_url=None,
             ollama_model=None,
+            vision_model=None,
             ollama_timeout_seconds=None,
             max_steps=None,
             workers=None,
@@ -155,6 +157,7 @@ class MonkeyAgentAdvancedTests(unittest.TestCase):
         args = argparse.Namespace(
             target_url=None,
             ollama_model=None,
+            vision_model=None,
             ollama_timeout_seconds=None,
             max_steps=None,
             workers=None,
@@ -489,6 +492,7 @@ class MonkeyAgentAdvancedTests(unittest.TestCase):
             args = argparse.Namespace(
                 target_url=None,
                 ollama_model=None,
+                vision_model=None,
                 ollama_timeout_seconds=None,
                 max_steps=None,
                 workers=None,
@@ -532,6 +536,7 @@ class MonkeyAgentAdvancedTests(unittest.TestCase):
             args = argparse.Namespace(
                 target_url=None,
                 ollama_model=None,
+                vision_model=None,
                 ollama_timeout_seconds=30.0,
                 max_steps=None,
                 workers=None,
@@ -575,6 +580,7 @@ class MonkeyAgentAdvancedTests(unittest.TestCase):
             args = argparse.Namespace(
                 target_url=None,
                 ollama_model=None,
+                vision_model=None,
                 ollama_timeout_seconds=None,
                 max_steps=None,
                 workers=None,
@@ -633,6 +639,71 @@ class MonkeyAgentAdvancedTests(unittest.TestCase):
         self.assertEqual(h1, h2)
         h3 = m._compute_action_path_hash("example.com", "/login", "click", "cancel-btn")
         self.assertNotEqual(h1, h3)
+
+    def test_is_cloud_vision_model_preview_suffix(self) -> None:
+        self.assertTrue(m._is_cloud_vision_model("gemini-3-flash-preview"))
+
+    def test_is_cloud_vision_model_cloud_suffix(self) -> None:
+        self.assertTrue(m._is_cloud_vision_model("gemma4:31b-cloud"))
+
+    def test_is_cloud_vision_model_minimax_m3(self) -> None:
+        self.assertTrue(m._is_cloud_vision_model("minimax-m3"))
+        self.assertTrue(m._is_cloud_vision_model("minimax-m3:cloud"))
+
+    def test_is_cloud_vision_model_local(self) -> None:
+        self.assertFalse(m._is_cloud_vision_model("llama3.2-vision"))
+        self.assertFalse(m._is_cloud_vision_model(""))
+
+    def test_build_vision_annotation_prompt_contains_box_2d(self) -> None:
+        prompt = m._build_vision_annotation_prompt("button missing")
+        self.assertIn("box_2d", prompt)
+        self.assertIn("[ymin, xmin, ymax, xmax]", prompt)
+        self.assertNotIn('"box":', prompt)
+        self.assertIn("do not use `box`", prompt)
+
+    def test_apply_runtime_overrides_vision_model(self) -> None:
+        original_vision_model = m.VISION_MODEL
+        try:
+            args = argparse.Namespace(
+                target_url=None,
+                ollama_model=None,
+                vision_model="gemini-3-flash-preview",
+                ollama_timeout_seconds=None,
+                max_steps=None,
+                workers=None,
+                max_steps_per_worker=None,
+                worker_navigation_retries=None,
+                worker_qdrant_init_retries=None,
+                worker_boundary_recovery_retries=None,
+                retry_base_delay_seconds=None,
+                redis_url=None,
+                redis_prefix=None,
+                redis_path_lock_ttl_seconds=None,
+                headless=None,
+                window_size=None,
+                no_viewport=None,
+                seed=None,
+                postgres_dsn=None,
+                golden_baseline_mode=None,
+                strict_persistence=None,
+                qdrant_url=None,
+                qdrant_collection=None,
+                qdrant_embedding_provider=None,
+                qdrant_embedding_model=None,
+                qdrant_disable_reads=False,
+                qdrant_disable_writes=False,
+                qdrant_read_only=False,
+                qdrant_enable_rerank=False,
+                qdrant_disable_rerank=False,
+                qdrant_rerank_model=None,
+                qdrant_candidate_limit=None,
+                qdrant_inspect=False,
+                qdrant_clear=False,
+            )
+            m.apply_runtime_overrides(args)
+            self.assertEqual(m.VISION_MODEL, "gemini-3-flash-preview")
+        finally:
+            m.VISION_MODEL = original_vision_model
 
 
 class MonkeyAgentAdvancedAsyncTests(unittest.IsolatedAsyncioTestCase):

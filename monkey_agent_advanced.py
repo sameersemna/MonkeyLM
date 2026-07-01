@@ -98,6 +98,7 @@ DEFAULT_QDRANT_CANDIDATE_LIMIT = 20
 
 DEFAULT_PDF_GENERATE = False
 DEFAULT_PDF_VISION_MODEL = "llama3.2-vision"
+DEFAULT_VISION_MODEL = "gemini-3-flash-preview"
 DEFAULT_PDF_VISION_TIMEOUT_SECONDS = 30.0
 
 AXE_CDN_URL = "https://cdnjs.cloudflare.com/ajax/libs/axe-core/4.9.1/axe.min.js"
@@ -212,6 +213,7 @@ QDRANT_CANDIDATE_LIMIT = max(3, _env_int("QDRANT_CANDIDATE_LIMIT", DEFAULT_QDRAN
 
 PDF_GENERATE = _env_bool("PDF_GENERATE", default=DEFAULT_PDF_GENERATE)
 PDF_VISION_MODEL = _env_str("PDF_VISION_MODEL", DEFAULT_PDF_VISION_MODEL)
+VISION_MODEL = _env_str("VISION_MODEL", DEFAULT_VISION_MODEL)
 PDF_VISION_TIMEOUT_SECONDS = max(1.0, _env_float("PDF_VISION_TIMEOUT_SECONDS", DEFAULT_PDF_VISION_TIMEOUT_SECONDS))
 
 
@@ -341,6 +343,8 @@ def parse_cli_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Advanced monkey testing agent")
     parser.add_argument("--target-url", help="Target URL to test")
     parser.add_argument("--ollama-model", help="Ollama model name to use")
+    parser.add_argument("--vision-model", help="Vision model name for screenshot annotation (cloud or local)",
+                        default=DEFAULT_VISION_MODEL)
     parser.add_argument(
         "--ollama-timeout-seconds",
         type=float,
@@ -512,11 +516,14 @@ def apply_runtime_overrides(args: argparse.Namespace) -> None:
     global QDRANT_URL, QDRANT_COLLECTION, QDRANT_ENABLE_READS, QDRANT_ENABLE_WRITES
     global QDRANT_EMBEDDING_PROVIDER, QDRANT_EMBEDDING_MODEL, QDRANT_ADMIN_ACTION
     global QDRANT_RERANK_ENABLED, QDRANT_RERANK_MODEL, QDRANT_CANDIDATE_LIMIT
+    global VISION_MODEL
 
     if getattr(args, "target_url", None):
         TARGET_URL = args.target_url
     if getattr(args, "ollama_model", None):
         OLLAMA_MODEL = args.ollama_model
+    if getattr(args, "vision_model", None):
+        VISION_MODEL = args.vision_model.strip()
     if getattr(args, "ollama_timeout_seconds", None) is not None:
         OLLAMA_TIMEOUT_SECONDS = max(1.0, float(args.ollama_timeout_seconds))
     if getattr(args, "max_steps", None) is not None:
@@ -2722,6 +2729,32 @@ def _step_defects_summary(step_num: int, defects: DefectTracker) -> List[str]:
     return reasons
 
 
+def _is_cloud_vision_model(model_name: str) -> bool:
+    """Return True if the configured vision model routes through a cloud endpoint."""
+    if not model_name:
+        return False
+    name = model_name.lower().strip()
+    return (
+        name.endswith("-preview")
+        or name.endswith("-cloud")
+        or name.startswith("minimax-m3")
+    )
+
+
+def _build_vision_annotation_prompt(context_issue: str) -> str:
+    """Return a unified prompt that forces cloud and local vision models to emit the same coordinate schema."""
+    return (
+        "You are a QA vision assistant. A browser test step failed or produced a defect. "
+        f"Issue context: {context_issue}\n\n"
+        "Look at the screenshot and locate the region that best represents the issue. "
+        "Return ONLY a JSON object with this exact schema:\n"
+        '{"box_2d": [ymin, xmin, ymax, xmax], "description": "short sentence"}\n'
+        "All coordinates are normalized percentages between 0.0 and 1.0. "
+        "Return the bounding region using the field name `box_2d` - do not use `box`, `bbox`, or any other key. "
+        "If you cannot locate the issue, return an empty box: [0.0, 0.0, 0.0, 0.0]."
+    )
+
+
 def _draw_red_box_arrow(
     image_path: str,
     box_pct: List[float],
@@ -2779,8 +2812,8 @@ def _draw_red_box_arrow(
 
 async def annotate_relevant_screenshot(image_path: str, context_issue: str) -> str:
     """
-    Send a screenshot to a local Ollama vision model, ask it to locate the anomaly,
-    draw a red bounding box + arrow, and return the annotated image path.
+    Send a screenshot to a configured vision model (cloud or local), ask it to locate
+    the anomaly, draw a red bounding box + arrow, and return the annotated image path.
     Falls back to the original image path on any failure.
     """
     if not PDF_GENERATE or not image_path or not os.path.exists(image_path):
@@ -2794,33 +2827,34 @@ async def annotate_relevant_screenshot(image_path: str, context_issue: str) -> s
             image_bytes = f.read()
         b64_image = base64.b64encode(image_bytes).decode("utf-8")
 
-        prompt = (
-            "You are a QA vision assistant. A browser test step failed or produced a defect. "
-            f"Issue context: {context_issue}\n\n"
-            "Look at the screenshot and locate the region that best represents the issue. "
-            "Return ONLY a JSON object with this exact schema:\n"
-            '{"box": [ymin, xmin, ymax, xmax], "description": "short sentence"}\n'
-            "All coordinates are normalized percentages between 0.0 and 1.0. "
-            "If you cannot locate the issue, return an empty box: [0.0, 0.0, 0.0, 0.0]."
-        )
+        active_model = VISION_MODEL or PDF_VISION_MODEL
+        prompt = _build_vision_annotation_prompt(context_issue)
+
+        # Cloud endpoints manage their own context window; local weights need an
+        # explicit large context to avoid downsampling the screenshot layout.
+        if _is_cloud_vision_model(active_model):
+            options = {"temperature": 0.2}
+        else:
+            options = {"temperature": 0.2, "num_ctx": 32000}
 
         response = await asyncio.wait_for(
             asyncio.to_thread(
                 ollama.chat,
-                model=PDF_VISION_MODEL,
+                model=active_model,
                 messages=[
                     {"role": "user", "content": prompt, "images": [b64_image]},
                 ],
                 format="json",
-                options={"temperature": 0.1, "num_ctx": 4096},
+                options=options,
             ),
             timeout=PDF_VISION_TIMEOUT_SECONDS,
         )
 
         content = response.get("message", {}).get("content", "")
         parsed = json.loads(content)
-        box = parsed.get("box", [0.0, 0.0, 0.0, 0.0])
+        box = parsed.get("box_2d") or parsed.get("box", [0.0, 0.0, 0.0, 0.0])
         if not isinstance(box, (list, tuple)) or len(box) != 4:
+            _local_service_log(f"Vision annotation returned invalid box schema for {image_path}: {parsed}")
             return image_path
 
         if all(float(v) == 0.0 for v in box):
@@ -2831,6 +2865,9 @@ async def annotate_relevant_screenshot(image_path: str, context_issue: str) -> s
         return image_path
     except asyncio.TimeoutError:
         _local_service_log(f"Vision annotation timed out for {image_path} after {PDF_VISION_TIMEOUT_SECONDS}s")
+        return image_path
+    except json.JSONDecodeError as exc:
+        _local_service_log(f"Vision annotation returned invalid JSON for {image_path}: {exc}")
         return image_path
     except Exception as exc:
         _local_service_log(f"Vision annotation failed for {image_path}: {exc}")
@@ -3906,6 +3943,10 @@ async def main():
 
     print("💡 Ollama throughput tip: set OLLAMA_NUM_PARALLEL=" + str(WORKERS) + " (or higher) and "
           "OLLAMA_KV_CACHE_TYPE=q4_0 for lower-latency batch inference under concurrent workers.")
+
+    active_vision_model = VISION_MODEL or PDF_VISION_MODEL
+    vision_tier = "cloud" if _is_cloud_vision_model(active_vision_model) else "local"
+    print(f"📸 Visual Auditor initialized with: {active_vision_model} ({vision_tier} tier)")
 
     allocations = allocate_worker_steps(MAX_STEPS, WORKERS, MAX_STEPS_PER_WORKER)
     active_allocations = [(idx + 1, count) for idx, count in enumerate(allocations) if count > 0]
