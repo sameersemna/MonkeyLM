@@ -674,6 +674,7 @@ class FormControlRecord:
     label_confidence: float
     semantic_kind: str
     visible: bool = True
+    options: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -1420,11 +1421,12 @@ class PersistenceEngine:
             _local_service_log(f"Redis visited-state update failed: {exc}")
             return None
 
-    async def claim_action_path_lock(self, path_hash: str) -> bool:
+    async def claim_action_path_lock(self, path_hash: str, worker_label: str) -> bool:
         """Try to claim a cross-worker action-path lock in Redis.
 
-        Returns True if this worker successfully claimed the lock, False if
-        another worker already holds it within the TTL window.
+        Returns True if this worker successfully claimed the lock, or if the
+        lock is already held by the same worker. Returns False only if a
+        different worker already holds it within the TTL window.
         """
         if self.redis_client is None:
             return True
@@ -1435,11 +1437,18 @@ class PersistenceEngine:
                 prefixed_key = build_redis_key(redis_key)
                 acquired = await self.redis_client.set(
                     prefixed_key,
-                    "1",
+                    worker_label,
                     nx=True,
                     ex=REDIS_PATH_LOCK_TTL_SECONDS,
                 )
-            return bool(acquired)
+                if acquired:
+                    return True
+
+                # Key already exists: check whether this worker owns it.
+                current_owner = await self.redis_client.get(prefixed_key)
+                if current_owner and current_owner.decode("utf-8") == worker_label:
+                    return True
+            return False
         except Exception as exc:
             _local_service_log(f"Redis action-path lock claim failed: {exc}")
             return True
@@ -2257,6 +2266,9 @@ def state_to_prompt(snapshot: PageSnapshot) -> str:
                         attrs.append(f"min={fc.min_value}")
                     if fc.max_value:
                         attrs.append(f"max={fc.max_value}")
+                    if fc.tag_name == "select" and fc.options:
+                        preview = ",".join(fc.options[:10])
+                        attrs.append(f"options=[{preview}]")
                     attr_str = ",".join(attrs)
                     label_part = f" label=\"{fc.resolved_label}\"" if fc.resolved_label else ""
                     control_summaries.append(
@@ -2576,6 +2588,10 @@ async def capture_dom_and_layout(page: Page) -> Dict[str, Any]:
                 const formEl = el.closest('form');
                 const formId = formEl ? (formEl.id || `form_${Array.from(document.querySelectorAll('form')).indexOf(formEl)}`) : null;
 
+                const optionValues = (el.tagName.toLowerCase() === 'select')
+                    ? Array.from(el.querySelectorAll('option')).map(o => o.value || o.textContent.trim()).filter(v => v)
+                    : [];
+
                 formControls.push({
                     control_id: controlId,
                     form_id: formId,
@@ -2599,6 +2615,7 @@ async def capture_dom_and_layout(page: Page) -> Dict[str, Any]:
                     label_confidence: labelInfo.confidence,
                     semantic_kind: semanticKind,
                     visible: true,
+                    options: optionValues,
                 });
             });
 
@@ -2674,6 +2691,8 @@ def _normalize_form_control_raw(raw_control: Dict[str, Any]) -> Dict[str, Any]:
         val = normalized.get(key)
         if val is None or val == -1:
             normalized[key] = None
+    if "options" not in normalized or not isinstance(normalized.get("options"), list):
+        normalized["options"] = []
     return normalized
 
 
@@ -2931,6 +2950,10 @@ def generate_form_payload(control: FormControlRecord, strategy: str) -> Tuple[st
             return ("MonkeyP@ssw0rd!2026", "happy_valid_password")
         if kind == "textarea":
             return ("A concise happy-path description for MonkeyLM testing.", "happy_textarea")
+        if kind == "select":
+            if control.options:
+                return (control.options[0], "happy_select_first_option")
+            return ("", "happy_select_no_options_skip")
         # Generic text / search / name / etc.
         if control.maxlength is not None and control.maxlength > 0:
             base = "MonkeyLM"
@@ -2999,6 +3022,9 @@ def generate_form_payload(control: FormControlRecord, strategy: str) -> Tuple[st
 
     if kind == "textarea":
         return ("\n\n\n" + "\u003cscript\u003ealert(1)\u003c/script\u003e", "fuzz_textarea_newline_and_xss")
+
+    if kind == "select":
+        return ("__monkeylm_invalid_option__", "fuzz_select_invalid_option")
 
     # Generic text fuzz
     return random.choice([
@@ -3114,6 +3140,53 @@ def apply_state_aware_policy(
                 action_plan["target"] = f"[id={id_match.group(1)}]"
     return action_plan
 
+
+def _extract_all_target_ids(elements: List[str]) -> List[str]:
+    """Return all [id=N] selector strings found in the serialized element list."""
+    ids: List[str] = []
+    for el in elements:
+        for match in re.finditer(r'\[id=(\d+)\]', el):
+            ids.append(f"[id={match.group(1)}]")
+    return ids
+
+
+def _break_action_loop(
+    action_plan: Dict[str, Any],
+    snapshot: PageSnapshot,
+    worker_label: str,
+) -> Dict[str, Any]:
+    """Force exploration variance when the model repeats the same action/target.
+
+    Prefers a completely different input/clickable selector from the current
+    snapshot pool; falls back to a random layout-level action if no alternative
+    target is available.
+    """
+    current_target = str(action_plan.get("target", ""))
+    all_targets = _extract_all_target_ids(snapshot.elements)
+    alternatives = [t for t in all_targets if t != current_target]
+
+    if alternatives:
+        chosen_target = random.choice(alternatives)
+        # Decide whether to click or type based on the chosen element's tag.
+        chosen_element = next(
+            (el for el in snapshot.elements if chosen_target in el),
+            "",
+        )
+        chosen_action = "type" if any(tag in chosen_element.upper() for tag in {"<INPUT", "<TEXTAREA", "<SELECT"}) else "click"
+        print(f"   -> 🔄 {worker_label} loop break: switching to {chosen_action} on {chosen_target}")
+        return {
+            "action": chosen_action,
+            "target": chosen_target,
+            "value": "",
+            "action_strategy": "",
+            "input_payloads": [],
+        }
+
+    # No alternative selector available: use a random layout-level action.
+    fallback = random.choice(["scroll", "random_jump", "restart_target"])
+    print(f"   -> 🔄 {worker_label} loop break: no alternative selectors; using {fallback}")
+    return {"action": fallback, "target": "", "value": "", "action_strategy": "", "input_payloads": []}
+
 def _compute_action_path_hash(
     domain: str,
     route: str,
@@ -3225,6 +3298,35 @@ def _draw_red_box_arrow(
         return False
 
 
+def _extract_box_from_prose(content: str) -> Optional[List[float]]:
+    """Attempt to recover a normalized [ymin, xmin, ymax, xmax] box from raw prose.
+
+    Returns None if no valid normalized quadruple (all values 0.0-1.0) is found.
+    """
+    if not isinstance(content, str) or not content:
+        return None
+
+    # Try bracketed array schemas first, then looser comma/space separated quadruples.
+    patterns = [
+        r"\[\s*(\d+\.?\d*)\s*,\s*(\d+\.?\d*)\s*,\s*(\d+\.?\d*)\s*,\s*(\d+\.?\d*)\s*\]",
+        r"\[\s*(\d+\.?\d*)\s+\d+\.?\d*\s+\d+\.?\d*\s+(\d+\.?\d*)\s*\]",
+        r"(\d+\.?\d*)\s*[, ]\s*(\d+\.?\d*)\s*[, ]\s*(\d+\.?\d*)\s*[, ]\s*(\d+\.?\d*)",
+    ]
+
+    for pattern in patterns:
+        for match in re.finditer(pattern, content):
+            try:
+                values = [float(match.group(i)) for i in range(1, 5)]
+            except Exception:
+                continue
+            if all(0.0 <= v <= 1.0 for v in values):
+                return values
+    return None
+
+
+DEFAULT_VISION_BOX: List[float] = [0.45, 0.45, 0.55, 0.55]
+
+
 async def annotate_relevant_screenshot(image_path: str, context_issue: str) -> str:
     """
     Send a screenshot to a configured vision model (cloud or local), ask it to locate
@@ -3266,11 +3368,24 @@ async def annotate_relevant_screenshot(image_path: str, context_issue: str) -> s
         )
 
         content = response.get("message", {}).get("content", "")
-        parsed = json.loads(content)
-        box = parsed.get("box_2d") or parsed.get("box", [0.0, 0.0, 0.0, 0.0])
-        if not isinstance(box, (list, tuple)) or len(box) != 4:
-            _local_service_log(f"Vision annotation returned invalid box schema for {image_path}: {str(parsed)}")
-            return image_path
+        box: Optional[List[float]] = None
+        try:
+            parsed = json.loads(content)
+            box = parsed.get("box_2d") or parsed.get("box")
+            if not isinstance(box, (list, tuple)) or len(box) != 4:
+                box = None
+        except json.JSONDecodeError:
+            box = _extract_box_from_prose(content)
+            if box is not None:
+                _local_service_log(
+                    f"Vision annotation JSON parse failed for {image_path}; recovered box from prose: {box}"
+                )
+
+        if box is None:
+            _local_service_log(
+                f"Vision annotation returned no usable box for {image_path}; using zero-centered default"
+            )
+            box = DEFAULT_VISION_BOX
 
         if all(float(v) == 0.0 for v in box):
             return image_path
@@ -3289,6 +3404,60 @@ async def annotate_relevant_screenshot(image_path: str, context_issue: str) -> s
         return image_path
 
 
+async def _resolve_interaction_mode(locator: Any) -> str:
+    """Inspect the resolved element and return the safe interaction mode."""
+    if locator is None:
+        return "unsupported"
+    try:
+        tag_name = await locator.evaluate("el => el.tagName.toLowerCase()")
+        input_type = await locator.evaluate("el => (el.type || '').toLowerCase()")
+    except Exception:
+        return "unsupported"
+
+    if tag_name == "select":
+        return "select"
+    if tag_name == "textarea":
+        return "text_input"
+    if tag_name == "input":
+        if input_type in {"checkbox", "radio"}:
+            return "checkbox_radio"
+        if input_type in {"file", "hidden", "submit", "button", "image", "reset"}:
+            return "unsupported"
+        return "text_input"
+    return "unsupported"
+
+
+async def _fill_select_option(
+    page: Page,
+    locator: Any,
+    payload_value: str,
+    control_options: List[str],
+    strategy: str,
+) -> Tuple[str, str]:
+    """Safely mutate a \u003cselect\u003e element using Playwright's select_option.
+
+    Returns (value_used, reason).
+    """
+    if payload_value and payload_value in control_options:
+        await locator.select_option(value=payload_value)
+        return payload_value, "select_model_provided_option"
+
+    if control_options:
+        if strategy == "EDGE_CASE_FUZZ":
+            invalid_value = "__monkeylm_invalid_option__"
+            try:
+                await locator.select_option(value=invalid_value)
+            except Exception as exc:
+                return invalid_value, f"fuzz_select_invalid_option_rejected:{type(exc).__name__}"
+            return invalid_value, "fuzz_select_invalid_option_accepted"
+
+        chosen = control_options[0]
+        await locator.select_option(value=chosen)
+        return chosen, "happy_select_first_option"
+
+    return "", "select_no_options_available"
+
+
 async def execute_action(
     page: Page,
     action_plan: Dict[str, Any],
@@ -3299,6 +3468,7 @@ async def execute_action(
     perf_monitor: PerformanceMonitor,
     log_sink: Optional[List[Dict[str, Any]]] = None,
     persistence_engine: Optional["PersistenceEngine"] = None,
+    worker_id: int = 0,
 ) -> Tuple[Optional[PageSnapshot], Dict[str, Any]]:
     action = action_plan.get("action", "scroll")
     target = action_plan.get("target", "")
@@ -3322,13 +3492,18 @@ async def execute_action(
     # Cross-worker action-path deduplication: try to claim a Redis lock for
     # this (domain, route, action, target) combination. If another worker has
     # already claimed it within the TTL window, fall back to a safe scroll.
-    if persistence_engine is not None and action in {
-        "click", "type", "submit_form", "handle_modal", "random_jump", "back", "restart_target"
-    }:
+    # Global navigation fallbacks and targetless actions are exempt from this
+    # deduplication so workers cannot block their own structural routines.
+    worker_label = f"worker-{worker_id:02d}"
+    if (
+        persistence_engine is not None
+        and target.strip()
+        and action in {"click", "type", "submit_form", "handle_modal"}
+    ):
         domain = split_domain_and_route(page.url)[0]
         route = split_domain_and_route(page.url)[1]
         path_hash = _compute_action_path_hash(domain, route, action, target)
-        if not await persistence_engine.claim_action_path_lock(path_hash):
+        if not await persistence_engine.claim_action_path_lock(path_hash, worker_label):
             print(
                 f"🤖 Step {step_num}: action path '{action}/{target}' already claimed by another worker; skipping."
             )
@@ -3391,17 +3566,51 @@ async def execute_action(
                 payload_reason = payload.get("reason", "")
                 locator = await _locator_for_target_id(page, payload_target)
                 if locator:
-                    tag_name = (await locator.evaluate("el => el.tagName.toLowerCase()"))
-                    if tag_name in {"input", "textarea", "select"}:
-                        try:
+                    mode = await _resolve_interaction_mode(locator)
+                    control_options: List[str] = []
+                    parsed_id = _extract_target_id(payload_target)
+                    if parsed_id is not None:
+                        control = next(
+                            (fc for fc in before_snapshot.form_controls if fc.control_id == parsed_id),
+                            None,
+                        )
+                        if control is not None:
+                            control_options = control.options
+
+                    try:
+                        if mode == "text_input":
                             await locator.fill(payload_value)
                             filled_payloads.append({
                                 "target": payload_target,
                                 "value": payload_value[:120],
                                 "reason": payload_reason,
                             })
-                        except Exception as fill_exc:
-                            _local_service_log(f"Step {step_num}: failed to fill {payload_target}: {fill_exc}")
+                        elif mode == "select":
+                            chosen, reason = await _fill_select_option(
+                                page,
+                                locator,
+                                payload_value,
+                                control_options,
+                                action_strategy,
+                            )
+                            filled_payloads.append({
+                                "target": payload_target,
+                                "value": chosen[:120],
+                                "reason": reason,
+                            })
+                        elif mode == "checkbox_radio":
+                            await locator.check()
+                            filled_payloads.append({
+                                "target": payload_target,
+                                "value": "checked",
+                                "reason": payload_reason or "happy_checkbox_radio_check",
+                            })
+                        else:
+                            _local_service_log(
+                                f"Step {step_num}: unsupported interaction mode '{mode}' for target {payload_target}; skipping"
+                            )
+                    except Exception as fill_exc:
+                        _local_service_log(f"Step {step_num}: failed to mutate {payload_target}: {fill_exc}")
 
             log_entry["input_payloads"] = filled_payloads
 
@@ -3438,38 +3647,80 @@ async def execute_action(
                     break
 
             locator = await _locator_for_target_id(page, target)
+            mode = "unsupported"
+            control_options: List[str] = []
             if locator:
-                tag_name = (await locator.evaluate("el => el.tagName.toLowerCase()"))
-                if tag_name not in {"input", "textarea", "select"}:
-                    locator = None
-            if locator is None:
-                # Fallback: find any visible input
-                locator = page.locator("input:visible, textarea:visible").first
-            
-            if await locator.count() > 0:
-                payload = payload_value or fuzzer.next_payload()
-                await locator.fill(payload)
-                log_entry["value"] = payload[:120]
-                log_entry["input_payloads"] = [{
-                    "target": target,
-                    "value": payload[:120],
-                    "reason": payload_reason or "fallback_fuzzer",
-                }]
-
-                # Heuristic logging for high-risk payload paths.
-                if any(marker in payload.lower() for marker in ["<script", "onerror", " or 1=1", "drop table"]):
-                    defects.add(
-                        "security_risks",
-                        {
-                            "step": step_num,
-                            "type": "fuzz-payload-injected",
-                            "target": target,
-                            "payload_preview": payload[:200],
-                            "url": page.url,
-                        },
+                mode = await _resolve_interaction_mode(locator)
+                parsed_id = _extract_target_id(target)
+                if parsed_id is not None:
+                    control = next(
+                        (fc for fc in before_snapshot.form_controls if fc.control_id == parsed_id),
+                        None,
                     )
+                    if control is not None:
+                        control_options = control.options
+            if mode == "unsupported":
+                # Fallback: find any visible input or select
+                locator = page.locator("input:visible, textarea:visible, select:visible").first
+                if await locator.count() > 0:
+                    mode = await _resolve_interaction_mode(locator)
+                    control_options = []
+                    try:
+                        fallback_options = await locator.evaluate(
+                            "el => Array.from(el.options).map(o => o.value || o.textContent.trim()).filter(v => v)"
+                        )
+                        if isinstance(fallback_options, list):
+                            control_options = [str(o) for o in fallback_options]
+                    except Exception:
+                        pass
+
+            if await locator.count() > 0 and mode != "unsupported":
+                payload = payload_value or fuzzer.next_payload()
+                if mode == "select":
+                    chosen, reason = await _fill_select_option(
+                        page,
+                        locator,
+                        payload,
+                        control_options,
+                        action_strategy,
+                    )
+                    log_entry["value"] = chosen[:120]
+                    log_entry["input_payloads"] = [{
+                        "target": target,
+                        "value": chosen[:120],
+                        "reason": reason,
+                    }]
+                elif mode == "checkbox_radio":
+                    await locator.check()
+                    log_entry["value"] = "checked"
+                    log_entry["input_payloads"] = [{
+                        "target": target,
+                        "value": "checked",
+                        "reason": payload_reason or "happy_checkbox_radio_check",
+                    }]
+                else:
+                    await locator.fill(payload)
+                    log_entry["value"] = payload[:120]
+                    log_entry["input_payloads"] = [{
+                        "target": target,
+                        "value": payload[:120],
+                        "reason": payload_reason or "fallback_fuzzer",
+                    }]
+
+                    # Heuristic logging for high-risk payload paths.
+                    if any(marker in payload.lower() for marker in ["<script", "onerror", " or 1=1", "drop table"]):
+                        defects.add(
+                            "security_risks",
+                            {
+                                "step": step_num,
+                                "type": "fuzz-payload-injected",
+                                "target": target,
+                                "payload_preview": payload[:200],
+                                "url": page.url,
+                            },
+                        )
             else:
-                raise Exception(f"Input '{target}' not found")
+                raise Exception(f"Input or selectable target '{target}' not found")
 
         try:
             await page.wait_for_load_state("networkidle", timeout=5000)
@@ -4177,6 +4428,7 @@ async def run_worker(
     worker_logs: List[Dict[str, Any]] = []
     visited_states: Dict[str, int] = {}
     seen_click_targets: set = set()
+    recent_model_plans: List[Tuple[str, str]] = []
     completed_steps = 0
 
     worker_data_dir = build_worker_user_data_dir(worker_id)
@@ -4253,6 +4505,16 @@ async def run_worker(
 
             plan = await decide_next_action(state, memory_store=worker_memory)
             retrieval_telemetry = worker_memory.consume_last_search_telemetry()
+
+            # Anti-loop heuristic: detect three consecutive identical model choices
+            # and force the worker to explore a different path.
+            plan_signature = (plan.get("action", "scroll"), plan.get("target", ""))
+            if len(recent_model_plans) >= 3 and all(p == plan_signature for p in recent_model_plans[-3:]):
+                print(f"🔄 Loop detected for {worker_label}; forcing path exploration variance.")
+                plan = _break_action_loop(plan, snapshot, worker_label)
+            recent_model_plans.append(plan_signature)
+            recent_model_plans = recent_model_plans[-3:]
+
             plan = apply_state_aware_policy(plan, snapshot, visited_states, seen_click_targets)
             if plan.get("action") == "click" and plan.get("target"):
                 seen_click_targets.add(plan.get("target"))
@@ -4267,6 +4529,7 @@ async def run_worker(
                 worker_perf_monitor,
                 log_sink=worker_logs,
                 persistence_engine=persistence_engine,
+                worker_id=worker_id,
             )
             log_entry["worker_id"] = worker_id
             log_entry["memory_retrieval"] = retrieval_telemetry
