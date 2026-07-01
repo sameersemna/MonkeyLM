@@ -428,6 +428,24 @@ class MonkeyAgentAdvancedTests(unittest.TestCase):
         self.assertIn("## Memory Logs of Previous Vibe Changes", prompt)
         self.assertIn("Vibe-Code-Regression-Missing-Component", prompt)
 
+    def test_build_decision_prompt_json_example_survives_fstring_interpolation(self) -> None:
+        """Regression test for the f-string brace crash in build_decision_prompt.
+
+        The JSON example block contains literal curly braces. When the prompt is
+        built as an f-string, those braces must be escaped so Python does not try
+        to interpret them as replacement fields / format specifiers.
+        """
+        page_state = "URL: https://example.com/\nTitle: Example\nElements:\n[id=0] <BUTTON text=\"Save\" />"
+        prompt = m.build_decision_prompt(page_state, memory_logs=[])
+
+        # These literals must appear verbatim in the final prompt text.
+        self.assertIn('"target": "[id=1]"', prompt)
+        self.assertIn('"value": "valid@example.com"', prompt)
+        self.assertIn('"reason": "happy_valid_email"', prompt)
+        # The outer JSON braces should be rendered as single braces for the LLM.
+        self.assertIn('"input_payloads": [', prompt)
+        self.assertIn(']', prompt)
+
     def test_qdrant_parse_rerank_response(self) -> None:
         store = m.QdrantMemoryStore()
         parsed = store._parse_rerank_response('{"ranked_indices": [2, 0, 1]}')

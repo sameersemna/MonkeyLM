@@ -303,9 +303,9 @@ ALLOWED_ACTIONS = {
 }
 
 
-def normalize_action_plan(raw_plan: Any) -> Dict[str, str]:
+def normalize_action_plan(raw_plan: Any) -> Dict[str, Any]:
     if not isinstance(raw_plan, dict):
-        return {"action": "scroll", "target": "", "value": ""}
+        return {"action": "scroll", "target": "", "value": "", "action_strategy": "", "input_payloads": []}
 
     action = str(raw_plan.get("action", "scroll")).strip().lower()
     if action not in ALLOWED_ACTIONS:
@@ -318,10 +318,28 @@ def normalize_action_plan(raw_plan: Any) -> Dict[str, str]:
     if value is None:
         value = ""
 
+    strategy = str(raw_plan.get("action_strategy", "")).strip().upper()
+    if strategy not in {"HAPPY_UPSERT", "EDGE_CASE_FUZZ"}:
+        strategy = ""
+
+    payloads = raw_plan.get("input_payloads", [])
+    if not isinstance(payloads, list):
+        payloads = []
+    normalized_payloads = []
+    for p in payloads:
+        if isinstance(p, dict):
+            normalized_payloads.append({
+                "target": str(p.get("target", "")),
+                "value": str(p.get("value", "")),
+                "reason": str(p.get("reason", "")),
+            })
+
     return {
         "action": action,
         "target": str(target),
         "value": str(value),
+        "action_strategy": strategy,
+        "input_payloads": normalized_payloads,
     }
 
 
@@ -631,6 +649,45 @@ def build_redis_key(base_key: str) -> str:
 
 
 @dataclass
+class FormControlRecord:
+    """Structured metadata for a single form control extracted from the DOM."""
+
+    control_id: int
+    form_id: Optional[str]
+    tag_name: str
+    input_type: str
+    name_attr: str
+    id_attr: str
+    placeholder: str
+    aria_label: str
+    aria_labelledby: str
+    required: bool
+    disabled: bool
+    readonly: bool
+    minlength: Optional[int]
+    maxlength: Optional[int]
+    pattern: str
+    min_value: str
+    max_value: str
+    step: str
+    resolved_label: str
+    label_confidence: float
+    semantic_kind: str
+    visible: bool = True
+
+
+@dataclass
+class FormRecord:
+    """Structured metadata for a single form and its associated controls."""
+
+    form_id: str
+    action: str
+    method: str
+    control_ids: List[int] = field(default_factory=list)
+    submit_candidate_id: Optional[int] = None
+
+
+@dataclass
 class PageSnapshot:
     """Normalized, lightweight representation of page state used for diffing and planning."""
 
@@ -645,6 +702,8 @@ class PageSnapshot:
     disabled_controls: int = 0
     screenshot_path: str = ""
     timestamp: float = 0.0
+    form_controls: List[FormControlRecord] = field(default_factory=list)
+    forms: List[FormRecord] = field(default_factory=list)
 
 
 class DefectTracker:
@@ -1073,7 +1132,7 @@ class PerformanceMonitor:
 def _local_service_log(message: str) -> None:
     timestamp = datetime.now().isoformat(timespec="seconds")
     log_line = f"[{timestamp}] {message}"
-    print(f"⚠️ {log_line}")
+    print("⚠️", log_line)
     try:
         log_path = os.path.join(OUTPUT_DIR, "service_connectivity.log")
         with open(log_path, "a", encoding="utf-8") as f:
@@ -2166,16 +2225,49 @@ class QdrantMemoryStore:
 
 
 def state_to_prompt(snapshot: PageSnapshot) -> str:
-    return (
-        f"URL: {snapshot.url}\n"
-        f"Title: {snapshot.title}\n"
-        f"DOMHash: {snapshot.dom_hash}\n"
-        f"Modals: {snapshot.modal_count}\n"
-        f"Spinners: {snapshot.spinner_count}\n"
-        f"DisabledControls: {snapshot.disabled_controls}\n"
-        "Elements:\n"
-        + "\n".join(snapshot.elements)
-    )
+    lines = [
+        f"URL: {snapshot.url}",
+        f"Title: {snapshot.title}",
+        f"DOMHash: {snapshot.dom_hash}",
+        f"Modals: {snapshot.modal_count}",
+        f"Spinners: {snapshot.spinner_count}",
+        f"DisabledControls: {snapshot.disabled_controls}",
+        "Elements:",
+    ]
+    lines.extend(snapshot.elements)
+
+    if snapshot.forms:
+        lines.append("\nForms:")
+        for form in snapshot.forms:
+            control_summaries = []
+            for fc in snapshot.form_controls:
+                if fc.control_id in form.control_ids:
+                    attrs = []
+                    if fc.required:
+                        attrs.append("required")
+                    if fc.input_type:
+                        attrs.append(f"type={fc.input_type}")
+                    if fc.minlength is not None:
+                        attrs.append(f"minlength={fc.minlength}")
+                    if fc.maxlength is not None:
+                        attrs.append(f"maxlength={fc.maxlength}")
+                    if fc.pattern:
+                        attrs.append(f"pattern={fc.pattern}")
+                    if fc.min_value:
+                        attrs.append(f"min={fc.min_value}")
+                    if fc.max_value:
+                        attrs.append(f"max={fc.max_value}")
+                    attr_str = ",".join(attrs)
+                    label_part = f" label=\"{fc.resolved_label}\"" if fc.resolved_label else ""
+                    control_summaries.append(
+                        f"  [id={fc.control_id}] {fc.tag_name}{attr_str}{label_part}"
+                    )
+            lines.append(f"- form_id={form.form_id} method={form.method} controls={len(form.control_ids)}")
+            lines.extend(control_summaries)
+            if form.submit_candidate_id is not None:
+                lines.append(f"  submit_candidate=[id={form.submit_candidate_id}]")
+
+    return "\n".join(lines)
 
 
 def _extract_target_id(target: Any) -> Optional[int]:
@@ -2343,6 +2435,106 @@ async def capture_dom_and_layout(page: Page) -> Dict[str, Any]:
                 return txt;
             };
 
+            const normalizeAttr = (el, name) => {
+                const v = el.getAttribute(name);
+                return (v === null || v === undefined) ? '' : String(v).trim();
+            };
+
+            const isVisible = (el) => {
+                const rect = el.getBoundingClientRect();
+                return rect.width > 0 && rect.height > 0;
+            };
+
+            const resolveLabel = (el) => {
+                let labelText = '';
+                let confidence = 0.0;
+
+                // 1. Explicit <label for="id">
+                if (el.id) {
+                    const explicitLabel = document.querySelector(`label[for="${el.id}"]`);
+                    if (explicitLabel) {
+                        labelText = explicitLabel.innerText?.trim() || '';
+                        confidence = 1.0;
+                    }
+                }
+
+                // 2. aria-labelledby
+                if (!labelText) {
+                    const labelledBy = el.getAttribute('aria-labelledby');
+                    if (labelledBy) {
+                        const refs = labelledBy.split(/\\s+/).map(id => document.getElementById(id)).filter(Boolean);
+                        if (refs.length > 0) {
+                            labelText = refs.map(ref => ref.innerText?.trim() || ref.getAttribute('aria-label') || '').join(' ').trim();
+                            confidence = 0.95;
+                        }
+                    }
+                }
+
+                // 3. Wrapping <label> ancestor
+                if (!labelText) {
+                    let ancestor = el.parentElement;
+                    while (ancestor && ancestor.tagName !== 'LABEL' && ancestor.tagName !== 'FORM') {
+                        ancestor = ancestor.parentElement;
+                    }
+                    if (ancestor && ancestor.tagName === 'LABEL') {
+                        labelText = ancestor.innerText?.trim() || '';
+                        confidence = 0.9;
+                    }
+                }
+
+                // 4. Previous sibling text heuristic
+                if (!labelText) {
+                    const prev = el.previousElementSibling;
+                    if (prev && /^(label|span|div|p)$/i.test(prev.tagName)) {
+                        const txt = prev.innerText?.trim() || '';
+                        if (txt.length > 0 && txt.length < 120) {
+                            labelText = txt;
+                            confidence = 0.7;
+                        }
+                    }
+                }
+
+                // 5. Placeholder fallback
+                if (!labelText && el.placeholder) {
+                    labelText = el.placeholder.trim();
+                    confidence = 0.5;
+                }
+
+                // 6. name/id token humanization fallback
+                if (!labelText) {
+                    const token = el.getAttribute('name') || el.id || '';
+                    if (token) {
+                        labelText = token.replace(/[_-]+/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2').trim();
+                        confidence = 0.4;
+                    }
+                }
+
+                if (labelText.length > 80) labelText = labelText.slice(0, 80) + '...';
+                return { text: labelText, confidence };
+            };
+
+            const computeSemanticKind = (el) => {
+                const tag = el.tagName.toLowerCase();
+                if (tag === 'select') return 'select';
+                if (tag === 'textarea') return 'textarea';
+                if (tag === 'input') {
+                    const type = (el.type || 'text').toLowerCase();
+                    if (type === 'email') return 'email';
+                    if (type === 'password') return 'password';
+                    if (type === 'tel') return 'phone';
+                    if (type === 'number' || type === 'range') return 'numeric';
+                    if (type === 'search') return 'search';
+                    if (type === 'url') return 'url';
+                    if (type === 'date' || type === 'datetime-local' || type === 'time') return 'datetime';
+                    if (type === 'checkbox') return 'checkbox';
+                    if (type === 'radio') return 'radio';
+                    if (type === 'file') return 'file';
+                    if (type === 'hidden') return 'hidden';
+                    return 'text';
+                }
+                return 'generic';
+            };
+
             const interactives = Array.from(document.querySelectorAll(
                 'button, a, input, select, textarea, [role="button"], [onclick], form'
             ));
@@ -2350,9 +2542,11 @@ async def capture_dom_and_layout(page: Page) -> Dict[str, Any]:
             const anchors = {};
             let visibleIndex = 0;
 
+            // First pass: assign visible indices to all interactive elements (backward compatible).
+            const elementIdMap = new Map();
             interactives.forEach((el) => {
-                const rect = el.getBoundingClientRect();
-                if (rect.width <= 0 || rect.height <= 0) return;
+                if (!isVisible(el)) return;
+                elementIdMap.set(el, visibleIndex);
                 const itemId = visibleIndex;
                 visibleIndex += 1;
                 const text = collectText(el);
@@ -2360,20 +2554,94 @@ async def capture_dom_and_layout(page: Page) -> Dict[str, Any]:
                 if (el.tagName === 'INPUT') typeInfo = `INPUT[type=${el.type}]`;
                 tags.push(`[id=${itemId}] <${typeInfo} text="${text}" />`);
 
-                // Use a deterministic anchor key to track layout shifts across actions.
                 const idPart = el.id ? `#${el.id}` : '';
                 const clsPart = (el.className && typeof el.className === 'string')
                     ? '.' + el.className.split(/\\s+/).slice(0, 2).join('.')
                     : '';
                 const key = `${itemId}::${el.tagName}${idPart}${clsPart}::${text.slice(0, 20)}`;
+                const rect = el.getBoundingClientRect();
                 anchors[key] = { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
             });
 
-            const modals = Array.from(document.querySelectorAll('[role="dialog"], .modal, .popup, .alert'))
-                .filter(el => {
-                    const r = el.getBoundingClientRect();
-                    return r.width > 0 && r.height > 0;
+            // Second pass: extract structured form controls.
+            const formControls = [];
+            const formInputs = Array.from(document.querySelectorAll('input, select, textarea'));
+            formInputs.forEach((el) => {
+                if (!isVisible(el)) return;
+                const controlId = elementIdMap.get(el);
+                if (controlId === undefined) return;
+
+                const labelInfo = resolveLabel(el);
+                const semanticKind = computeSemanticKind(el);
+                const formEl = el.closest('form');
+                const formId = formEl ? (formEl.id || `form_${Array.from(document.querySelectorAll('form')).indexOf(formEl)}`) : null;
+
+                formControls.push({
+                    control_id: controlId,
+                    form_id: formId,
+                    tag_name: el.tagName.toLowerCase(),
+                    input_type: el.type ? String(el.type).toLowerCase() : '',
+                    name_attr: normalizeAttr(el, 'name'),
+                    id_attr: normalizeAttr(el, 'id'),
+                    placeholder: normalizeAttr(el, 'placeholder'),
+                    aria_label: normalizeAttr(el, 'aria-label'),
+                    aria_labelledby: normalizeAttr(el, 'aria-labelledby'),
+                    required: el.required === true,
+                    disabled: el.disabled === true,
+                    readonly: el.readOnly === true,
+                    minlength: el.minLength ? parseInt(el.minLength, 10) : null,
+                    maxlength: el.maxLength ? parseInt(el.maxLength, 10) : null,
+                    pattern: normalizeAttr(el, 'pattern'),
+                    min_value: normalizeAttr(el, 'min'),
+                    max_value: normalizeAttr(el, 'max'),
+                    step: normalizeAttr(el, 'step'),
+                    resolved_label: labelInfo.text,
+                    label_confidence: labelInfo.confidence,
+                    semantic_kind: semanticKind,
+                    visible: true,
                 });
+            });
+
+            // Third pass: group controls into forms.
+            const forms = [];
+            const allForms = Array.from(document.querySelectorAll('form'));
+            allForms.forEach((formEl, idx) => {
+                if (!isVisible(formEl)) return;
+                const fid = formEl.id || `form_${idx}`;
+                const controlIds = formControls
+                    .filter(fc => fc.form_id === fid)
+                    .map(fc => fc.control_id);
+
+                // Find submit candidate inside this form.
+                let submitCandidateId = null;
+                const submitBtn = formEl.querySelector('button[type="submit"], input[type="submit"]');
+                if (submitBtn && isVisible(submitBtn)) {
+                    submitCandidateId = elementIdMap.get(submitBtn);
+                }
+
+                forms.push({
+                    form_id: fid,
+                    action: normalizeAttr(formEl, 'action'),
+                    method: normalizeAttr(formEl, 'method') || 'get',
+                    control_ids: controlIds,
+                    submit_candidate_id: submitCandidateId,
+                });
+            });
+
+            // Also collect form-like fieldsets / loose control groups not wrapped in <form>.
+            const looseControls = formControls.filter(fc => fc.form_id === null);
+            if (looseControls.length > 0) {
+                forms.push({
+                    form_id: 'loose_controls',
+                    action: '',
+                    method: '',
+                    control_ids: looseControls.map(fc => fc.control_id),
+                    submit_candidate_id: null,
+                });
+            }
+
+            const modals = Array.from(document.querySelectorAll('[role="dialog"], .modal, .popup, .alert'))
+                .filter(el => isVisible(el));
 
             const spinnerSel = '[aria-busy="true"], .spinner, .loading, [data-testid*="spinner" i]';
             const spinnerCount = document.querySelectorAll(spinnerSel).length;
@@ -2392,9 +2660,21 @@ async def capture_dom_and_layout(page: Page) -> Dict[str, Any]:
                 modalCount: modals.length,
                 spinnerCount,
                 disabledControls,
+                formControls,
+                forms,
             };
         }"""
     )
+
+
+def _normalize_form_control_raw(raw_control: Dict[str, Any]) -> Dict[str, Any]:
+    """Convert browser default sentinel values into clean Python semantics."""
+    normalized = dict(raw_control)
+    for key in ("minlength", "maxlength"):
+        val = normalized.get(key)
+        if val is None or val == -1:
+            normalized[key] = None
+    return normalized
 
 
 async def get_page_state(page: Page, step_num: int, phase: str = "before") -> PageSnapshot:
@@ -2450,6 +2730,8 @@ async def get_page_state(page: Page, step_num: int, phase: str = "before") -> Pa
         disabled_controls=raw.get("disabledControls", 0),
         screenshot_path=screenshot_path,
         timestamp=time.time(),
+        form_controls=[FormControlRecord(**_normalize_form_control_raw(fc)) for fc in raw.get("formControls", [])],
+        forms=[FormRecord(**f) for f in raw.get("forms", [])],
     )
 
 
@@ -2614,6 +2896,120 @@ async def decide_next_action(page_state: str, memory_store: Optional[QdrantMemor
     return normalize_action_plan({"action": "scroll", "target": "", "value": ""})
 
 
+def generate_form_payload(control: FormControlRecord, strategy: str) -> Tuple[str, str]:
+    """Return (payload, reason) for a form control based on the chosen strategy.
+
+    strategy is either "HAPPY_UPSERT" (valid semantic data) or "EDGE_CASE_FUZZ"
+    (boundary/invalid data designed to exercise validation).
+    """
+    kind = control.semantic_kind
+    input_type = control.input_type
+
+    if strategy == "HAPPY_UPSERT":
+        if kind == "email":
+            return ("monkey.test@example.com", "happy_valid_email")
+        if kind == "phone":
+            return ("+15551234567", "happy_valid_phone")
+        if kind == "url":
+            return ("https://example.com/monkey-test", "happy_valid_url")
+        if kind == "numeric":
+            try:
+                lo = float(control.min_value) if control.min_value else 0.0
+                hi = float(control.max_value) if control.max_value else max(lo + 100.0, 100.0)
+                val = lo + (hi - lo) * 0.5
+                # Use integer when the control is a number input without step decimal.
+                if input_type == "number" and (not control.step or float(control.step) == 1.0):
+                    return (str(int(val)), "happy_mid_range_integer")
+                return (f"{val:.2f}", "happy_mid_range_number")
+            except Exception:
+                return ("42", "happy_default_number")
+        if kind == "datetime":
+            return ("2026-07-01T12:00", "happy_valid_datetime")
+        if kind == "checkbox" or kind == "radio":
+            return ("true", "happy_checked")
+        if kind == "password":
+            return ("MonkeyP@ssw0rd!2026", "happy_valid_password")
+        if kind == "textarea":
+            return ("A concise happy-path description for MonkeyLM testing.", "happy_textarea")
+        # Generic text / search / name / etc.
+        if control.maxlength is not None and control.maxlength > 0:
+            base = "MonkeyLM"
+            return (base[: control.maxlength], f"happy_text_within_maxlength_{control.maxlength}")
+        return ("MonkeyLM happy path text", "happy_default_text")
+
+    # EDGE_CASE_FUZZ branch
+    if kind == "numeric":
+        try:
+            lo = float(control.min_value) if control.min_value else None
+            hi = float(control.max_value) if control.max_value else None
+            choices = []
+            if lo is not None:
+                choices.append((str(lo - 1), "fuzz_below_min"))
+            if hi is not None:
+                choices.append((str(hi + 1), "fuzz_above_max"))
+            choices.extend([
+                ("not-a-number", "fuzz_string_in_number_field"),
+                ("-999999999", "fuzz_large_negative"),
+                ("1e309", "fuzz_numeric_overflow"),
+            ])
+            return random.choice(choices)
+        except Exception:
+            return ("not-a-number", "fuzz_string_in_number_field")
+
+    if kind == "email":
+        return random.choice([
+            ("not-an-email", "fuzz_invalid_email_format"),
+            ("a@b", "fuzz_too_short_email"),
+            ("test@.com", "fuzz_malformed_domain"),
+        ])
+
+    if kind == "url":
+        return random.choice([
+            ("not-a-url", "fuzz_invalid_url"),
+            ("ftp://missing", "fuzz_partial_url"),
+        ])
+
+    if kind == "phone":
+        return random.choice([
+            ("abc-def-ghij", "fuzz_letters_in_phone"),
+            ("", "fuzz_empty_phone"),
+        ])
+
+    if kind == "datetime":
+        return random.choice([
+            ("not-a-date", "fuzz_invalid_datetime"),
+            ("0000-00-00T00:00", "fuzz_zero_date"),
+        ])
+
+    if control.required and kind in {"text", "textarea", "search", "password"}:
+        return random.choice([
+            ("", "fuzz_empty_required_field"),
+            ("   ", "fuzz_whitespace_only"),
+        ])
+
+    if control.pattern:
+        return random.choice([
+            ("!!!INVALID!!!", "fuzz_pattern_mismatch"),
+            ("", "fuzz_empty_against_pattern"),
+        ])
+
+    if control.maxlength is not None and control.maxlength > 0:
+        overflow = "A" * (control.maxlength + 10)
+        return (overflow, f"fuzz_maxlength_overflow_{control.maxlength}")
+
+    if kind == "textarea":
+        return ("\n\n\n" + "\u003cscript\u003ealert(1)\u003c/script\u003e", "fuzz_textarea_newline_and_xss")
+
+    # Generic text fuzz
+    return random.choice([
+        ("' OR 1=1 --", "fuzz_sql_fragment"),
+        ("\u003cscript\u003ealert('xss')\u003c/script\u003e", "fuzz_xss_payload"),
+        ("A" * 12000, "fuzz_large_string_blob"),
+        ("\u0000\u0001\u0002", "fuzz_control_chars"),
+        ("日本語テスト🐵", "fuzz_unicode"),
+    ])
+
+
 def build_decision_prompt(page_state: str, memory_logs: Optional[List[Dict[str, Any]]] = None) -> str:
     memory_logs = memory_logs or []
     memory_json = json.dumps(memory_logs, ensure_ascii=True, indent=2)
@@ -2628,24 +3024,43 @@ Current Page State:
 
 Choose ONE action from this list:
 1. "click": Click a button or link.
-2. "type": Type random text into an input field.
-3. "submit_form": Find a form and submit it (trigger a 'submit' button or press Enter).
+2. "type": Type a single value into one input field.
+3. "submit_form": Fill a form and submit it. Use this when a form is present.
 4. "handle_modal": If a modal/dialog is detected, try to close it (click 'X', 'Cancel', 'Close') or accept it.
 5. "scroll": Scroll the page.
+
+When you choose "submit_form" or "type" on a form control, you MUST also choose an action_strategy:
+- "HAPPY_UPSERT": Generate valid, realistic data that should be accepted (e.g., proper emails, numbers within bounds).
+- "EDGE_CASE_FUZZ": Generate data designed to break validation for that specific control type:
+  * number fields: strings, negative values, values above max.
+  * email/url/phone fields: malformed schemas.
+  * required text/textarea fields: empty strings or whitespace only.
+  * fields with maxlength/pattern: overflow or mismatch.
+  * textarea: newlines, XSS fragments, large blobs.
 
 Rules:
 - If you see a <FORM>, prioritize "submit_form" or "type" inside it.
 - If you see a <MODAL>, prioritize "handle_modal".
-- For "type", generate a random string like "test_123".
 - Each element line starts with [id=N]. Use that numeric id for target selection.
 - For actions that need a target, return "target" as [id=N] (example: [id=3]).
 - Never return raw text labels as target.
+- For "submit_form", include "input_payloads": a list of objects with "target" ([id=N]), "value", and "reason".
+- The "action_strategy" field must be either "HAPPY_UPSERT" or "EDGE_CASE_FUZZ" and explain why you chose that payload block.
 
-Respond ONLY with JSON: {{"action": "...", "target": "...", "value": "..."}}
+Respond ONLY with JSON:
+{{
+  "action": "submit_form",
+  "target": "[id=0]",
+  "value": "",
+  "action_strategy": "HAPPY_UPSERT",
+  "input_payloads": [
+    {{"target": "[id=1]", "value": "valid@example.com", "reason": "happy_valid_email"}}
+  ]
+}}
 """
 
 
-def parse_action_plan_response(raw_content: Any) -> Optional[Dict[str, str]]:
+def parse_action_plan_response(raw_content: Any) -> Optional[Dict[str, Any]]:
     if not isinstance(raw_content, str):
         return None
 
@@ -2854,7 +3269,7 @@ async def annotate_relevant_screenshot(image_path: str, context_issue: str) -> s
         parsed = json.loads(content)
         box = parsed.get("box_2d") or parsed.get("box", [0.0, 0.0, 0.0, 0.0])
         if not isinstance(box, (list, tuple)) or len(box) != 4:
-            _local_service_log(f"Vision annotation returned invalid box schema for {image_path}: {parsed}")
+            _local_service_log(f"Vision annotation returned invalid box schema for {image_path}: {str(parsed)}")
             return image_path
 
         if all(float(v) == 0.0 for v in box):
@@ -2888,6 +3303,10 @@ async def execute_action(
     action = action_plan.get("action", "scroll")
     target = action_plan.get("target", "")
     value = action_plan.get("value", "")
+    action_strategy = action_plan.get("action_strategy", "")
+    input_payloads = action_plan.get("input_payloads", [])
+    if not isinstance(input_payloads, list):
+        input_payloads = []
 
     before_snapshot = await get_page_state(page, step_num, phase="before")
     perf_before = await perf_monitor.snapshot(page)
@@ -2895,6 +3314,8 @@ async def execute_action(
     log_entry = {
         "step": step_num, "action": action, "target": target,
         "value": value if action == "type" else None,
+        "action_strategy": action_strategy,
+        "input_payloads": input_payloads,
         "status": "SUCCESS", "error": None, "screenshot": None, "url": page.url
     }
 
@@ -2962,15 +3383,34 @@ async def execute_action(
                     print("   -> Sent Escape key to close modal")
                     
         elif action == "submit_form":
-            # Find any visible form
+            # Fill any provided input_payloads first, then submit the form.
+            filled_payloads = []
+            for payload in input_payloads:
+                payload_target = payload.get("target", "")
+                payload_value = payload.get("value", "")
+                payload_reason = payload.get("reason", "")
+                locator = await _locator_for_target_id(page, payload_target)
+                if locator:
+                    tag_name = (await locator.evaluate("el => el.tagName.toLowerCase()"))
+                    if tag_name in {"input", "textarea", "select"}:
+                        try:
+                            await locator.fill(payload_value)
+                            filled_payloads.append({
+                                "target": payload_target,
+                                "value": payload_value[:120],
+                                "reason": payload_reason,
+                            })
+                        except Exception as fill_exc:
+                            _local_service_log(f"Step {step_num}: failed to fill {payload_target}: {fill_exc}")
+
+            log_entry["input_payloads"] = filled_payloads
+
             form = page.locator("form:visible").first
             if await form.count() > 0:
-                # Try to find a submit button inside
                 submit_btn = form.locator("button[type='submit'], input[type='submit']").first
                 if await submit_btn.count() > 0:
                     await submit_btn.click(timeout=3000)
                 else:
-                    # No submit button? Press Enter on the last input
                     inputs = form.locator("input:visible, textarea:visible")
                     if await inputs.count() > 0:
                         await inputs.last.press("Enter")
@@ -2988,19 +3428,33 @@ async def execute_action(
                 raise Exception(f"Element '{target}' not found")
                 
         elif action == "type":
+            payload_value = value
+            payload_reason = action_strategy
+            # If the model supplied a structured payload matching this target, prefer it.
+            for payload in input_payloads:
+                if payload.get("target") == target:
+                    payload_value = payload.get("value", value)
+                    payload_reason = payload.get("reason", action_strategy)
+                    break
+
             locator = await _locator_for_target_id(page, target)
             if locator:
                 tag_name = (await locator.evaluate("el => el.tagName.toLowerCase()"))
-                if tag_name not in {"input", "textarea"}:
+                if tag_name not in {"input", "textarea", "select"}:
                     locator = None
             if locator is None:
                 # Fallback: find any visible input
                 locator = page.locator("input:visible, textarea:visible").first
             
             if await locator.count() > 0:
-                payload = value or fuzzer.next_payload()
+                payload = payload_value or fuzzer.next_payload()
                 await locator.fill(payload)
                 log_entry["value"] = payload[:120]
+                log_entry["input_payloads"] = [{
+                    "target": target,
+                    "value": payload[:120],
+                    "reason": payload_reason or "fallback_fuzzer",
+                }]
 
                 # Heuristic logging for high-risk payload paths.
                 if any(marker in payload.lower() for marker in ["<script", "onerror", " or 1=1", "drop table"]):
