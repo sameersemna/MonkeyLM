@@ -1,0 +1,156 @@
+# FireAI API/MCP
+
+## Product vision
+
+Build a local-first service that can send prompts to a Firefox sidebar AI chat, receive replies, and expose that workflow through a clean HTTP API and an MCP interface for LLM clients and agents. The initial target models are Copilot and Gemini, with a browser-automation layer as the fallback integration strategy when no direct model API is available. [github](https://github.com/fastmcp-me/fastmcp-python)
+
+The product should be designed as a reusable automation platform rather than a one-off script. It must separate browser control, chat orchestration, provider adapters, API serving, and MCP tooling so each layer can evolve independently. [selenium](https://www.selenium.dev/documentation/webdriver/browsers/firefox/)
+
+## Problem statement
+
+Many AI assistants are easiest to access in browser side panels, but they are not always exposed through official programmatic APIs. That makes them hard to integrate into workflows, yet users still want structured access, automation, and agent-friendly interfaces. [engadget](https://www.engadget.com/firefox-starts-letting-you-use-ai-chatbots-in-the-sidebar-144218734.html)
+
+A browser automation approach can bridge that gap, but only if it is wrapped in a durable service with observability, retries, session handling, and clear provider abstractions. FastAPI and MCP are a good fit for this kind of service architecture. [github](https://github.com/jlowin/fastmcp)
+
+## Goals
+
+- Support headless or headed Firefox automation against the side panel UI.
+- Accept prompts over REST and MCP.
+- Return assistant responses in a structured, machine-readable format.
+- Support multiple providers, starting with Copilot and Gemini.
+- Provide safe session isolation, retries, and timeouts.
+- Be extensible for future providers and future non-browser backends. [fastapi.tiangolo](https://fastapi.tiangolo.com/tutorial/)
+
+## Non-goals
+
+- No attempt to bypass authentication, paywalls, rate limits, or user consent.
+- No scraping of private data outside the active assistant conversation.
+- No guarantee of UI stability across browser releases without maintenance.
+- No dependency on a single browser vendor feature for long-term business continuity. [stackoverflow](https://stackoverflow.com/questions/23092446/is-there-a-way-or-a-tool-to-do-ui-automated-testing-on-firefox-sidebar)
+
+## Users and use cases
+
+Primary users are developers, automation engineers, and agent builders who want an AI assistant accessible from scripts, pipelines, or other agents. A common use case is “send a prompt, wait for completion, and capture the reply” in a reproducible way. [github](https://github.com/jlowin/fastmcp)
+
+A second use case is orchestration: another agent calls the MCP server or REST API and treats the browser assistant as a tool. That makes the system useful in multi-agent stacks where model access and browser context matter. [github](https://github.com/modelcontextprotocol/python-sdk)
+
+## Functional requirements
+
+### Browser automation
+
+The system must automate Firefox using Selenium WebDriver and support Firefox-specific capabilities where needed. It must be able to launch, attach to, or reuse a browser session, navigate to the relevant assistant UI, open the side panel, inject prompts, and capture replies. [selenium](https://www.selenium.dev/selenium/docs/api/py/selenium_webdriver_firefox/selenium.webdriver.firefox.webdriver.html)
+
+It must support at least two execution modes: a headless mode for servers and CI, and a visible mode for debugging and selector maintenance. It should wait for responses by monitoring DOM state, text changes, or streaming response markers rather than sleeping blindly. [selenium](https://www.selenium.dev/blog/2023/headless-is-going-away/)
+
+### Provider adapters
+
+The system must support a provider abstraction for Copilot and Gemini as first-class integrations. Each provider adapter should define how to open the right UI, locate prompt input, detect completion, and normalize output metadata. [github](https://github.com/fastmcp-me/fastmcp-python)
+
+The abstraction should allow future additions without changing the API contract. Provider-specific selectors, session initialization steps, and response extraction logic should live in isolated modules. [fastapi.tiangolo](https://fastapi.tiangolo.com/tutorial/)
+
+### REST API
+
+The product must expose a FastAPI service with predictable endpoints, automatic OpenAPI docs, typed request/response models, and built-in validation. FastAPI’s design and auto-generated docs make it a good fit for this service layer. [fastapi.tiangolo](https://fastapi.tiangolo.com/reference/openapi/docs/)
+
+Core endpoints should include:
+- `POST /v1/chat/send`.
+- `GET /v1/chat/{conversation_id}`.
+- `POST /v1/sessions`.
+- `DELETE /v1/sessions/{session_id}`.
+- `GET /healthz`.
+- `GET /readyz`. [fastapi.tiangolo](https://fastapi.tiangolo.com/reference/openapi/docs/)
+
+### MCP interface
+
+The product must also expose the same capabilities as MCP tools so LLM clients can call the assistant through a standard tool protocol. FastMCP and the official MCP ecosystem are intended for exactly this kind of agent-tool integration. [github](https://github.com/modelcontextprotocol/python-sdk)
+
+At minimum, the MCP server should provide tools like `send_prompt`, `get_conversation`, `list_providers`, and `health_check`. It should also surface structured errors and metadata so downstream agents can reason about retryability and provider state. [github](https://github.com/jlowin/fastmcp)
+
+## System architecture
+
+The architecture should have five layers: browser driver, provider adapters, orchestration service, API/MCP interfaces, and persistence/telemetry. The browser driver owns Selenium interaction, while orchestration handles retries, message correlation, and provider selection. [selenium](https://www.selenium.dev/selenium/docs/api/py/selenium_webdriver_firefox/selenium.webdriver.firefox.webdriver.html)
+
+A recommended implementation stack is:
+- Python 3.12+.
+- Selenium for browser automation.
+- Firefox/geckodriver for the browser runtime.
+- FastAPI for REST.
+- FastMCP or the official MCP Python SDK for agent tooling.
+- Pydantic models for schema enforcement.
+- Optional Redis or SQLite for job and session tracking. [selenium](https://www.selenium.dev/documentation/webdriver/browsers/firefox/)
+
+## Data model
+
+The service should define entities for `Session`, `Conversation`, `Message`, `PromptRequest`, `PromptResponse`, `ProviderConfig`, and `Job`. Each entity should include timestamps, status fields, provider identifiers, trace IDs, and error metadata. [fastapi.tiangolo](https://fastapi.tiangolo.com/tutorial/)
+
+A minimal response payload should include:
+- `conversation_id`.
+- `provider`.
+- `request_id`.
+- `status`.
+- `assistant_text`.
+- `raw_artifacts` or references.
+- `latency_ms`.
+- `error` if applicable. [fastapi.tiangolo](https://fastapi.tiangolo.com/reference/openapi/docs/)
+
+## API contract
+
+Requests must be validated with Pydantic and responses must be deterministic and typed. The `/v1/chat/send` endpoint should accept provider, prompt, optional conversation state, timeout budget, and output preferences such as plain text versus structured extraction. [fastapi.tiangolo](https://fastapi.tiangolo.com/reference/openapi/docs/)
+
+The API should support both synchronous and asynchronous operation. For long-running browser sessions, an immediate `202 Accepted` with polling or webhook completion is preferable to a blocking request. FastAPI background tasks can help for lightweight post-processing, but a proper job queue is better for larger workloads. [fastapi.tiangolo](https://fastapi.tiangolo.com/tutorial/)
+
+## MCP contract
+
+The MCP server should wrap the same orchestration layer used by REST, not duplicate logic. That means the MCP tools should simply call the internal service and map outputs to protocol-friendly tool results. [github](https://github.com/modelcontextprotocol/python-sdk)
+
+The MCP design should include resource descriptions for provider capabilities and conversation histories, plus tools for sending prompts and reading state. This makes it easier for agent frameworks to discover and use the service consistently. [github](https://github.com/jlowin/fastmcp)
+
+## Reliability requirements
+
+The system must include explicit timeouts, retries, and selector fallback strategies. It should detect common failure modes such as UI changes, login expiry, empty replies, rate limits, and browser crashes. [stackoverflow](https://stackoverflow.com/questions/23092446/is-there-a-way-or-a-tool-to-do-ui-automated-testing-on-firefox-sidebar)
+
+Each request should have a bounded execution budget and a clear terminal state: success, provider timeout, browser failure, auth failure, or unsupported feature. Logs should contain enough context to reproduce failures without storing sensitive message content by default. [fastapi.tiangolo](https://fastapi.tiangolo.com/reference/openapi/docs/)
+
+## Security and compliance
+
+The product must require explicit user-provided credentials or authenticated browser sessions and must not attempt to evade provider controls. Secrets should be stored in environment variables, encrypted files, or secret managers, never in logs or source code. [engadget](https://www.engadget.com/firefox-starts-letting-you-use-ai-chatbots-in-the-sidebar-144218734.html)
+
+Because browser automation can expose personal data, the system should implement redaction, audit logging, and per-session isolation. A safe-default posture is important if the API is exposed beyond localhost. [github](https://github.com/jlowin/fastmcp)
+
+## Observability
+
+The service should emit structured logs, per-request trace IDs, browser lifecycle events, provider transition events, and success/failure counters. At minimum, it should record latency, retry count, completion state, and selector version for each request. [fastapi.tiangolo](https://fastapi.tiangolo.com/tutorial/)
+
+A metrics layer should track provider uptime, response time distribution, and automation breakage rate. Those metrics will tell you quickly when a browser update or UI redesign has broken the automation. [selenium](https://www.selenium.dev/documentation/webdriver/browsers/firefox/)
+
+## Testing strategy
+
+The project should include unit tests for schema validation and orchestration logic, integration tests for Selenium interaction, and contract tests for API and MCP endpoints. Because browser automation is brittle, selector tests should run in CI with screenshots or DOM snapshots whenever possible. [selenium](https://www.selenium.dev/selenium/docs/api/py/selenium_webdriver_firefox/selenium.webdriver.firefox.webdriver.html)
+
+A dedicated regression suite should replay known provider flows against a pinned browser version. This is especially important for headless Firefox and any sidebar UI behavior that may change over time. [engadget](https://www.engadget.com/firefox-starts-letting-you-use-ai-chatbots-in-the-sidebar-144218734.html)
+
+## Milestones
+
+1. Build the Selenium browser driver and a single-provider prototype.
+2. Add a FastAPI wrapper with typed request and response models.
+3. Add MCP exposure through FastMCP or the MCP Python SDK.
+4. Add provider abstraction for Copilot and Gemini.
+5. Add persistence, retries, observability, and test coverage.
+6. Harden for production with containerization, secrets management, and CI. [github](https://github.com/modelcontextprotocol/python-sdk)
+
+## Acceptance criteria
+
+- A prompt can be sent to at least one provider and a reply returned as structured JSON.
+- The same capability is available via REST and MCP.
+- Headless execution works in CI for supported flows.
+- The architecture supports multiple providers without changing public APIs.
+- Failures are surfaced clearly and are diagnosable from logs and traces. [selenium](https://www.selenium.dev/documentation/webdriver/browsers/firefox/)
+
+## Suggested tech stack
+
+- Browser automation: Selenium + Firefox.
+- API layer: FastAPI.
+- Agent layer: FastMCP or the official MCP Python SDK.
+- Models: Pydantic.
+- Runtime: Python 3.12+, uvicorn, optional Redis.
+- Packaging: Docker for reproducible browser environments. [selenium](https://www.selenium.dev/selenium/docs/api/py/selenium_webdriver_firefox/selenium.webdriver.firefox.webdriver.html)

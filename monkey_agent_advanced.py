@@ -707,6 +707,83 @@ class PageSnapshot:
     forms: List[FormRecord] = field(default_factory=list)
 
 
+def _normalize_defect(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize any ad-hoc defect payload into the canonical five-field schema.
+
+    Canonical keys:
+        selector           - CSS selector or element identifier
+        html_snippet       - Raw HTML context of the offending element
+        failure_reason     - Human-readable description of what went wrong
+        remediation_advice - Actionable fix instructions
+        screenshot_path    - Basename of an annotated/error screenshot (optional)
+
+    Existing keys are preserved so downstream consumers that depend on them
+    (e.g., results.json, markdown report) continue to work unchanged.
+    """
+    out = dict(payload)  # shallow copy -- preserve original keys
+
+    # --- selector --------------------------------------------------------
+    if "selector" not in out or not out["selector"]:
+        for candidate_key in ("target", "broken_selectors"):
+            val = out.get(candidate_key)
+            if isinstance(val, list) and val:
+                out["selector"] = ", ".join(str(v) for v in val[:5])
+                break
+            elif isinstance(val, str) and val.strip():
+                out["selector"] = val.strip()
+                break
+    if not out.get("selector"):
+        out["selector"] = "(none)"
+
+    # --- html_snippet ----------------------------------------------------
+    if "html_snippet" not in out or not out["html_snippet"]:
+        for candidate_key in ("payload_preview",):
+            val = out.get(candidate_key)
+            if isinstance(val, str) and val.strip():
+                out["html_snippet"] = val.strip()
+                break
+    if not out.get("html_snippet"):
+        out["html_snippet"] = ""
+
+    # --- failure_reason --------------------------------------------------
+    if "failure_reason" not in out or not out["failure_reason"]:
+        for candidate_key in ("description", "message", "error"):
+            val = out.get(candidate_key)
+            if isinstance(val, str) and val.strip():
+                out["failure_reason"] = val.strip()
+                break
+    # Fallback: compose from type + severity
+    if not out.get("failure_reason"):
+        parts: List[str] = []
+        if out.get("type"):
+            parts.append(str(out["type"]))
+        if out.get("severity"):
+            parts.append(str(out["severity"]))
+        out["failure_reason"] = ": ".join(parts) if parts else "defect detected"
+
+    # --- remediation_advice ----------------------------------------------
+    if "remediation_advice" not in out or not out["remediation_advice"]:
+        for candidate_key in ("remediation", "help", "failureSummary"):
+            val = out.get(candidate_key)
+            if isinstance(val, str) and val.strip():
+                out["remediation_advice"] = val.strip()
+                break
+    if not out.get("remediation_advice"):
+        out["remediation_advice"] = "Manual review required."
+
+    # --- screenshot_path (optional, may be backfilled later) -------------
+    if "screenshot_path" not in out or not out["screenshot_path"]:
+        for candidate_key in ("diff_image",):
+            val = out.get(candidate_key)
+            if isinstance(val, str) and val.strip():
+                out["screenshot_path"] = val.strip()
+                break
+    if not out.get("screenshot_path"):
+        out["screenshot_path"] = ""
+
+    return out
+
+
 class DefectTracker:
     """Centralized defect tracker to keep reporting deterministic and CI-friendly."""
 
@@ -724,7 +801,7 @@ class DefectTracker:
     def add(self, category: str, payload: Dict[str, Any]) -> None:
         collection = getattr(self, category, None)
         if collection is not None:
-            collection.append(payload)
+            collection.append(_normalize_defect(payload))
 
     def merge_from(self, other: "DefectTracker") -> None:
         categories = [
@@ -3212,17 +3289,28 @@ def _compute_action_path_hash(
 
 
 def _step_defects_summary(step_num: int, defects: DefectTracker) -> List[str]:
-    """Collect short human-readable reasons why a step is considered annotation-worthy."""
+    """Collect short human-readable reasons why a step is considered annotation-worthy.
+
+    Covers all nine DefectTracker categories so every defect type triggers
+    vision-model screenshot annotation when PDF_GENERATE is enabled.
+    """
     reasons: List[str] = []
-    for item in defects.security_risks:
-        if int(item.get("step", -1)) == step_num:
-            reasons.append(f"security_risk:{item.get('type', 'unknown')}")
-    for item in defects.visual_regressions:
-        if int(item.get("step", -1)) == step_num:
-            reasons.append(f"visual_regression:{item.get('type', 'unknown')}")
-    for item in defects.layout_instability:
-        if int(item.get("step", -1)) == step_num:
-            reasons.append(f"layout_instability:{item.get('type', 'unknown')}")
+    category_names = [
+        ("security_risks", "security_risk"),
+        ("visual_regressions", "visual_regression"),
+        ("layout_instability", "layout_instability"),
+        ("accessibility_violations", "a11y_violation"),
+        ("performance_bottlenecks", "perf_bottleneck"),
+        ("regression_findings", "regression"),
+        ("console_findings", "console_finding"),
+        ("race_findings", "race_condition"),
+        ("boundary_drift", "boundary_drift"),
+    ]
+    for attr_name, label in category_names:
+        for item in getattr(defects, attr_name, []):
+            if int(item.get("step", -1)) == step_num:
+                dtype = item.get("type", item.get("severity", "unknown"))
+                reasons.append(f"{label}:{dtype}")
     return reasons
 
 
@@ -3811,13 +3899,51 @@ async def execute_action(
         log_entry["status"] = "FAILED"
         log_entry["error"] = error_msg
         print(f"💥 Error: {error_msg}")
-        
+
         screenshot_name = f"error_step_{step_num}.png"
         try:
             await page.screenshot(path=os.path.join(OUTPUT_DIR, screenshot_name))
             log_entry["screenshot"] = screenshot_name
         except:
             pass
+
+        # ── Structured functional-failure defect for PDF remediation cards ──
+        action_remediation: Dict[str, str] = {
+            "click": "Ensure the target element is visible, not obscured by overlays, and has a stable selector. Add explicit wait conditions if the element loads asynchronously.",
+            "type": "Verify the input field is enabled and accepts keyboard events. Check for readonly/disabled attributes or CSS pointer-events blocking interaction.",
+            "submit_form": "Ensure form wrappers properly enclose all input targets, submit buttons are visible and not disabled, and required fields have valid values before submission.",
+            "handle_modal": "Confirm the modal/dialog is present in the DOM and accessible. Add a wait for the modal overlay before attempting interaction.",
+            "scroll": "Check that the page body has sufficient height to scroll. The page may have finished loading with minimal content.",
+            "back": "Verify browser history has a previous entry. The page may have been opened without prior navigation.",
+            "random_jump": "Ensure the target URL is reachable and returns a valid HTTP response. Check for redirects or authentication requirements.",
+            "restart_target": "Confirm the target URL is valid and the server is responding. Network connectivity or DNS resolution may be failing.",
+        }
+        remediation_text = action_remediation.get(action, "Investigate the step failure context. Review the error message and annotated screenshot for clues about the root cause.")
+
+        # Try to extract a brief HTML snippet of the target element for the report.
+        html_context = ""
+        try:
+            if target.strip():
+                locator = await _locator_for_target_id(page, target)
+                if locator:
+                    html_context = await locator.evaluate("el => el.outerHTML", timeout=2000) or ""
+        except Exception:
+            pass
+
+        defects.add(
+            "console_findings",
+            {
+                "step": step_num,
+                "type": f"functional-failure:{action}",
+                "severity": "error",
+                "selector": target if target.strip() else "(none)",
+                "html_snippet": html_context[:500] if html_context else "",
+                "failure_reason": error_msg[:300],
+                "remediation_advice": remediation_text,
+                "screenshot_path": screenshot_name if log_entry.get("screenshot") == screenshot_name else "",
+                "url": page.url,
+            },
+        )
 
     # Selective vision annotation: only for FAILED/CRASH steps or steps with
     # security/visual/layout defects. Benign/successful steps are skipped.
@@ -4248,207 +4374,244 @@ def generate_pdf_report(start_time: datetime, end_time: datetime) -> None:
         story.append(summary_table)
         story.append(Spacer(1, 0.3 * inch))
 
-        # Defect Logs
-        story.append(Paragraph("Defect Logs", styles["Heading2"]))
-        story.append(Spacer(1, 0.1 * inch))
+        # ─── Unified Defect Audit Cards with Inline Screenshots ──────────
 
-        defect_sections = [
+        card_width = 7.8 * inch  # Full usable page width (letter minus margins)
+
+        # Shared ParagraphStyles for all audit cards
+        header_critical_style = ParagraphStyle(
+            "auditHeaderCritical", parent=styles["BodyText"],
+            fontName="Helvetica-Bold", textColor=colors.whitesmoke,
+            fontSize=10, leading=13,
+        )
+        header_serious_style = ParagraphStyle(
+            "auditHeaderSerious", parent=styles["BodyText"],
+            fontName="Helvetica-Bold", textColor=colors.whitesmoke,
+            fontSize=10, leading=13,
+        )
+        header_warning_style = ParagraphStyle(
+            "auditHeaderWarning", parent=styles["BodyText"],
+            fontName="Helvetica-Bold", textColor=colors.whitesmoke,
+            fontSize=10, leading=13,
+        )
+        header_info_style = ParagraphStyle(
+            "auditHeaderInfo", parent=styles["BodyText"],
+            fontName="Helvetica-Bold", textColor=colors.whitesmoke,
+            fontSize=10, leading=13,
+        )
+        selector_style = ParagraphStyle(
+            "auditSelector", parent=styles["BodyText"],
+            fontName="Courier", fontSize=8, leading=11,
+            textColor=colors.HexColor("#2c3e50"),
+        )
+        code_block_style = ParagraphStyle(
+            "auditCodeBlock", parent=styles["BodyText"],
+            fontName="Courier", fontSize=7.5, leading=9,
+            wordWrap="CJK",  # Character-level wrapping prevents right-margin overflow
+            textColor=colors.HexColor("#333333"),
+        )
+        remediation_style = ParagraphStyle(
+            "auditRemediation", parent=styles["BodyText"],
+            fontName="Helvetica", fontSize=9, leading=12,
+            textColor=colors.HexColor("#27ae60"),
+        )
+        description_style = ParagraphStyle(
+            "auditDescription", parent=styles["BodyText"],
+            fontName="Helvetica-Oblique", fontSize=8.5, leading=11,
+            textColor=colors.HexColor("#555555"),
+        )
+        metrics_style = ParagraphStyle(
+            "auditMetrics", parent=styles["BodyText"],
+            fontName="Courier", fontSize=8, leading=10,
+            textColor=colors.HexColor("#7f8c8d"),
+        )
+
+        def _xml_escape(text: str) -> str:
+            """Escape XML-like characters that would break ReportLab Paragraph rendering."""
+            return (
+                text.replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace('"', "&quot;")
+                .replace("'", "&#39;")
+            )
+
+        def _severity_color(severity: str) -> tuple:
+            """Return (header_style, header_bg_color) based on severity string."""
+            sev = (severity or "").lower()
+            if sev in {"critical", "error"}:
+                return header_critical_style, colors.HexColor("#c0392b")
+            if sev in {"serious", "high", "failed", "crash"}:
+                return header_serious_style, colors.HexColor("#d35400")
+            if sev in {"warning", "moderate"}:
+                return header_warning_style, colors.HexColor("#f39c12")
+            return header_info_style, colors.HexColor("#2c3e50")
+
+        def _build_audit_card(item: Dict[str, Any], category_label: str) -> tuple:
+            """Build a styled audit-card Table and return (table_flowable, screenshot_basename).
+
+            Every card follows the same four-row structure:
+              Row 1 – Bold title banner (category + step number + severity)
+              Row 2 – Target selector path + route URL
+              Row 3 – Offending HTML snippet in gray-tinted monospace box
+              Row 4 – Remediation task with explicit fix instructions
+            """
+            step = item.get("step", "n/a")
+            item_type = item.get("type", "unknown")
+            severity = item.get("severity", "info")
+            selector = item.get("selector", "(none)")
+            html_snippet = item.get("html_snippet", "")
+            failure_reason = item.get("failure_reason", "")
+            remediation_advice = item.get("remediation_advice", "Manual review required.")
+            url = item.get("url", "")
+            screenshot_basename = item.get("screenshot_path", "")
+
+            header_style, header_bg = _severity_color(severity)
+            header_text = f"[{severity.upper()}] {category_label}: Step {step} — {item_type}"
+
+            row_specs: List[Tuple[Any, Any]] = []
+
+            # ── Row 1: Bold title banner ────────────────────────────────
+            row_specs.append((Paragraph(header_text, header_style), header_bg))
+
+            # ── Row 2: Selector path + URL ──────────────────────────────
+            selector_line_parts = [f"Selector: {_xml_escape(selector)}"]
+            if url:
+                selector_line_parts.append(f"URL: {_xml_escape(url)}")
+            row_specs.append((
+                Paragraph(" | ".join(selector_line_parts), selector_style),
+                colors.white,
+            ))
+
+            # ── Row 3: HTML snippet (gray monospace box) ────────────────
+            if html_snippet:
+                truncated_html = _xml_escape(html_snippet[:400])
+                if len(html_snippet) > 400:
+                    truncated_html += " ... (truncated)"
+                row_specs.append((
+                    Paragraph(truncated_html, code_block_style),
+                    colors.HexColor("#f0f0f0"),
+                ))
+
+            # ── Row 3b: Failure reason (if no HTML but has reason) ──────
+            if not html_snippet and failure_reason:
+                row_specs.append((
+                    Paragraph(_xml_escape(failure_reason[:300]), description_style),
+                    colors.HexColor("#fafafa"),
+                ))
+
+            # ── Row 4: Remediation task ─────────────────────────────────
+            if remediation_advice and remediation_advice != "Manual review required.":
+                row_specs.append((
+                    Paragraph(f"\U0001f6e0\ufe0f REMEDIATION TASK: {remediation_advice}", remediation_style),
+                    colors.HexColor("#f0fff4"),
+                ))
+
+            # Assemble the card Table
+            card_rows = [[cell] for cell, _ in row_specs]
+            ticket_table = Table(card_rows, colWidths=[card_width], repeatRows=0)
+
+            style_cmds = [
+                ("BOX", (0, 0), (-1, -1), 1.0, colors.HexColor("#bdc3c7")),
+                ("INNERGRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#d5dbdb")),
+                ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+                ("TOPPADDING", (0, 0), (-1, -1), 5),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ]
+            for row_idx, (_cell, bg_color) in enumerate(row_specs):
+                style_cmds.append(("BACKGROUND", (0, row_idx), (0, row_idx), bg_color))
+
+            ticket_table.setStyle(TableStyle(style_cmds))
+            return ticket_table, screenshot_basename
+
+        def _build_scaled_image(basename: str, max_width: float = 6.5) -> Optional[Any]:
+            """Load and scale an image to fit within page margins.
+
+            Returns a ReportLab Image flowable or None if the file is missing/corrupt.
+            """
+            if not basename:
+                return None
+            image_path = os.path.join(OUTPUT_DIR, basename)
+            if not os.path.exists(image_path):
+                return None
+
+            try:
+                img_width = max_width * inch
+                img_height = 4.0 * inch
+                if Image is not None:
+                    with Image.open(image_path) as img:
+                        orig_w, orig_h = img.size
+                        aspect = orig_h / max(1, orig_w)
+                        img_height = min(img_width * aspect, 3.5 * inch)
+                return RLImage(image_path, width=img_width, height=img_height)
+            except Exception:
+                return None
+
+        # Track which screenshot basenames are embedded inline so Visual Proof Plates can skip them.
+        embedded_screenshots: set = set()
+
+        # ── All nine defect categories rendered as audit cards ──────────
+        all_defect_sections = [
             ("Security Risks", DEFECTS.security_risks),
+            ("Accessibility Violations", DEFECTS.accessibility_violations),
             ("Performance Bottlenecks", DEFECTS.performance_bottlenecks),
             ("Baseline Regressions", DEFECTS.regression_findings),
             ("Visual Regressions", DEFECTS.visual_regressions),
             ("Layout Instability", DEFECTS.layout_instability),
-            # Accessibility Violations is rendered separately with a dedicated ticket layout below
             ("Race Findings", DEFECTS.race_findings),
             ("Console Findings", DEFECTS.console_findings),
             ("Boundary Drift", DEFECTS.boundary_drift),
         ]
 
-        for title, items in defect_sections:
+        any_defects = False
+        for category_label, items in all_defect_sections:
             if not items:
                 continue
-            story.append(Paragraph(title, styles["Heading3"]))
-            for item in items[:50]:  # cap to keep PDF size reasonable
-                step = item.get("step", "n/a")
-                item_type = item.get("type", item.get("severity", "unknown"))
-                url = item.get("url", "")
-                detail = item.get("error", "")
-                if not detail:
-                    detail = item.get("message", "")
-                line = f"Step {step}: {item_type}"
-                if url:
-                    line += f" at {url}"
-                if detail:
-                    line += f" — {str(detail)[:120]}"
-                story.append(Paragraph(line, styles["BodyText"]))
-            story.append(Spacer(1, 0.1 * inch))
-
-        # Accessibility Violations — Structured Engineering Ticket Cards
-        if DEFECTS.accessibility_violations:
-            story.append(Paragraph("Accessibility Violations", styles["Heading3"]))
+            any_defects = True
+            story.append(Paragraph(category_label, styles["Heading3"]))
             story.append(Spacer(1, 0.05 * inch))
 
-            # ── Card dimensions & shared styles ──────────────────────────
-            card_width = 7.8 * inch  # Full usable page width (letter minus margins)
-
-            header_critical_style = ParagraphStyle(
-                "a11yHeaderCritical",
-                parent=styles["BodyText"],
-                fontName="Helvetica-Bold",
-                textColor=colors.whitesmoke,
-                fontSize=10,
-                leading=13,
-            )
-            header_serious_style = ParagraphStyle(
-                "a11yHeaderSerious",
-                parent=styles["BodyText"],
-                fontName="Helvetica-Bold",
-                textColor=colors.whitesmoke,
-                fontSize=10,
-                leading=13,
-            )
-            selector_style = ParagraphStyle(
-                "a11ySelector",
-                parent=styles["BodyText"],
-                fontName="Courier",
-                fontSize=8,
-                leading=11,
-                textColor=colors.HexColor("#2c3e50"),
-            )
-            code_block_style = ParagraphStyle(
-                "a11yCodeBlock",
-                parent=styles["BodyText"],
-                fontName="Courier",
-                fontSize=7.5,
-                leading=9,
-                wordWrap="CJK",  # Character-level wrapping prevents right-margin overflow
-                textColor=colors.HexColor("#333333"),
-            )
-            remediation_style = ParagraphStyle(
-                "a11yRemediation",
-                parent=styles["BodyText"],
-                fontName="Helvetica",
-                fontSize=9,
-                leading=12,
-                textColor=colors.HexColor("#27ae60"),
-            )
-            description_style = ParagraphStyle(
-                "a11yDescription",
-                parent=styles["BodyText"],
-                fontName="Helvetica-Oblique",
-                fontSize=8.5,
-                leading=11,
-                textColor=colors.HexColor("#555555"),
-            )
-
-            def _xml_escape(text: str) -> str:
-                """Escape XML-like characters that would break ReportLab Paragraph rendering."""
-                return (
-                    text.replace("&", "&amp;")
-                    .replace("<", "&lt;")
-                    .replace(">", "&gt;")
-                    .replace('"', "&quot;")
-                    .replace("'", "&#39;")
-                )
-
-            # ── Build one card per violation ─────────────────────────────
-            for item in DEFECTS.accessibility_violations[:50]:
-                severity = (item.get("severity") or "unknown").lower()
-                rule_id = item.get("id", "unknown")
-                description = item.get("description", "")
-                selector = item.get("selector", "(unknown)")
-                html_snippet = item.get("html_snippet", "")
-                remediation = item.get("remediation", "")
-                step = item.get("step", "n/a")
-
-                # Header text & style based on severity
-                if severity == "critical":
-                    header_text = f"[CRITICAL] Rule: {rule_id} at Step {step}"
-                    header_style = header_critical_style
-                    header_bg = colors.HexColor("#c0392b")  # Dark red
-                else:
-                    header_text = f"[SERIOUS] Rule: {rule_id} at Step {step}"
-                    header_style = header_serious_style
-                    header_bg = colors.HexColor("#d35400")  # Dark orange
-
-                # Build card rows with explicit (row_content, background_color) pairs
-                row_specs = []  # List of (Paragraph, bg_color) tuples
-
-                # Row 0: Severity header
-                row_specs.append((Paragraph(header_text, header_style), header_bg))
-
-                # Row 1 (optional): Rule description
-                if description:
-                    row_specs.append((
-                        Paragraph(description, description_style),
-                        colors.HexColor("#fafafa"),
-                    ))
-
-                # Selector row — monospace path
-                row_specs.append((
-                    Paragraph(f"Selector Path: {_xml_escape(selector)}", selector_style),
-                    colors.white,
-                ))
-
-                # Code block row — truncated HTML with CJK word-wrap
-                if html_snippet:
-                    truncated_html = _xml_escape(html_snippet[:250])
-                    if len(html_snippet) > 250:
-                        truncated_html += " ... (truncated)"
-                    row_specs.append((
-                        Paragraph(truncated_html, code_block_style),
-                        colors.HexColor("#f0f0f0"),
-                    ))
-
-                # Remediation row — fix instructions
-                if remediation:
-                    row_specs.append((
-                        Paragraph(f"How to fix: {remediation}", remediation_style),
-                        colors.HexColor("#f0fff4"),
-                    ))
-
-                # Assemble the card Table from row specs
-                card_rows = [cell for cell, _ in row_specs]
-
-                ticket_table = Table(
-                    [[row] for row in card_rows],
-                    colWidths=[card_width],
-                    repeatRows=0,
-                )
-
-                # Build TableStyle commands — per-row backgrounds from specs
-                style_cmds = [
-                    # Global: borders and padding
-                    ("BOX", (0, 0), (-1, -1), 1.0, colors.HexColor("#bdc3c7")),
-                    ("INNERGRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#d5dbdb")),
-                    ("LEFTPADDING", (0, 0), (-1, -1), 8),
-                    ("RIGHTPADDING", (0, 0), (-1, -1), 8),
-                    ("TOPPADDING", (0, 0), (-1, -1), 5),
-                    ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ]
-                for row_idx, (_cell, bg_color) in enumerate(row_specs):
-                    style_cmds.append(("BACKGROUND", (0, row_idx), (0, row_idx), bg_color))
-
-                ticket_table.setStyle(TableStyle(style_cmds))
+            for item in items[:50]:  # cap per category to keep PDF size reasonable
+                ticket_table, screenshot_basename = _build_audit_card(item, category_label)
                 story.append(ticket_table)
 
-                # Card separator
+                # ── Inline screenshot insertion beneath the card ────────
+                if screenshot_basename:
+                    embedded_screenshots.add(screenshot_basename)
+                    img_flowable = _build_scaled_image(screenshot_basename)
+                    if img_flowable is not None:
+                        story.append(Spacer(1, 0.05 * inch))
+                        story.append(img_flowable)
+
                 story.append(Spacer(1, 0.1 * inch))
 
             story.append(Spacer(1, 0.15 * inch))
 
-        # Visual Proof Plates
+        if not any_defects:
+            story.append(Paragraph("Defect Logs", styles["Heading2"]))
+            story.append(Spacer(1, 0.1 * inch))
+            story.append(Paragraph("No defects detected during this run.", styles["BodyText"]))
+            story.append(Spacer(1, 0.2 * inch))
+
+        # ── Visual Proof Plates (chronological execution evidence) ──────
+        # Only include screenshots NOT already embedded in audit cards above.
         annotated_logs = [
             log for log in test_logs
             if log.get("screenshot_annotated") or str(log.get("screenshot", "")).endswith("_annotated.png")
         ]
-        if annotated_logs:
+        proof_plate_logs = [
+            log for log in annotated_logs
+            if log.get("screenshot", "") not in embedded_screenshots
+        ]
+
+        if proof_plate_logs:
             story.append(PageBreak())
             story.append(Paragraph("Visual Proof Plates", styles["Heading2"]))
             story.append(Spacer(1, 0.1 * inch))
 
-            for log in annotated_logs:
+            for log in proof_plate_logs:
                 screenshot_name = log.get("screenshot", "")
                 if not screenshot_name:
                     continue
@@ -4465,18 +4628,11 @@ def generate_pdf_report(start_time: datetime, end_time: datetime) -> None:
                 if error:
                     story.append(Paragraph(f"<font color='red'>Error:</font> {error[:200]}", styles["BodyText"]))
 
-                # Scale image to fit page width while preserving aspect ratio
-                img_width = 6.5 * inch
-                img_height = 4.0 * inch
-                if Image is not None:
-                    try:
-                        with Image.open(image_path) as img:
-                            orig_w, orig_h = img.size
-                            aspect = orig_h / max(1, orig_w)
-                            img_height = img_width * aspect
-                    except Exception:
-                        pass
-                story.append(RLImage(image_path, width=img_width, height=img_height))
+                img_flowable = _build_scaled_image(screenshot_name)
+                if img_flowable is not None:
+                    story.append(img_flowable)
+                else:
+                    story.append(Paragraph("⚠️ Screenshot not available", styles["BodyText"]))
                 story.append(Spacer(1, 0.15 * inch))
 
         doc.build(story)
