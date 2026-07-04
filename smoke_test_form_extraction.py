@@ -5,7 +5,7 @@ import sys
 sys.path.insert(0, "/home/sameer/Public/Shared/Work/Projects/MonkeyLM")
 
 from playwright.async_api import async_playwright
-from monkey_agent_advanced import capture_dom_and_layout, get_page_state, _normalize_form_control_raw
+from monkeylm.browser import capture_dom_and_layout, get_page_state, _normalize_form_control_raw
 
 
 HTML = """

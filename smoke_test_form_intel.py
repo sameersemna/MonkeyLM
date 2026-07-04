@@ -1,15 +1,10 @@
-"""Smoke test for the new form intelligence layer in monkey_agent_advanced.py."""
+"""Smoke test for the new form intelligence layer in monkeylm/ package."""
 
 import sys
 sys.path.insert(0, "/home/sameer/Public/Shared/Work/Projects/MonkeyLM")
 
-from monkey_agent_advanced import (
-    FormControlRecord,
-    FormRecord,
-    generate_form_payload,
-    normalize_action_plan,
-    parse_action_plan_response,
-)
+from monkeylm.config import FormControlRecord, FormRecord, normalize_action_plan
+from monkeylm.models import generate_form_payload, parse_action_plan_response
 
 
 def test_payload_generator():
