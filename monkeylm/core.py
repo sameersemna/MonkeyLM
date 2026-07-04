@@ -571,8 +571,8 @@ def _register_graceful_shutdown_signals() -> None:
     """Register SIGINT/SIGTERM handlers for graceful shutdown."""
     loop = asyncio.get_running_loop()
     try:
-        loop.add_signal_handler(signal.SIGINT, _request_graceful_shutdown)
-        loop.add_signal_handler(signal.SIGTERM, _request_graceful_shutdown)
+        loop.add_signal_handler(signal.SIGINT, lambda: _request_graceful_shutdown(signal.SIGINT, None))
+        loop.add_signal_handler(signal.SIGTERM, lambda: _request_graceful_shutdown(signal.SIGTERM, None))
     except NotImplementedError:
         signal.signal(signal.SIGINT, _request_graceful_shutdown)
         try:

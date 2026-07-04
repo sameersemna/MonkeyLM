@@ -405,6 +405,9 @@ def generate_pdf_report(
         styles = getSampleStyleSheet()
         story: List[Any] = []
 
+        def _xml_escape(text: str) -> str:
+            return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;").replace("'", "&#39;")
+
         accountability = summarize_vibe_coding_accountability(defects)
         duration_seconds = (end_time - start_time).total_seconds()
         total_steps = len(test_logs)
@@ -414,8 +417,8 @@ def generate_pdf_report(
         # Header Block
         story.append(Paragraph("MonkeyLM Executive Quality Audit", styles["Title"]))
         story.append(Spacer(1, 0.15 * inch))
-        story.append(Paragraph(f"<b>Target URL:</b> {settings.target_url}", styles["Normal"]))
-        story.append(Paragraph(f"<b>Execution Seed:</b> {settings.active_seed or 'none'}", styles["Normal"]))
+        story.append(Paragraph(f"<b>Target URL:</b> {_xml_escape(settings.target_url)}", styles["Normal"]))
+        story.append(Paragraph(f"<b>Execution Seed:</b> {_xml_escape(settings.active_seed or 'none')}", styles["Normal"]))
         story.append(Paragraph(f"<b>Run Date:</b> {start_time.strftime('%Y-%m-%d %H:%M:%S')}", styles["Normal"]))
         story.append(Paragraph(f"<b>Duration:</b> {duration_seconds:.2f} seconds", styles["Normal"]))
         story.append(Spacer(1, 0.2 * inch))
@@ -488,9 +491,6 @@ def generate_pdf_report(
             textColor=colors.HexColor("#555555"),
         )
 
-        def _xml_escape(text: str) -> str:
-            return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;").replace("'", "&#39;")
-
         def _severity_color(severity: str) -> tuple:
             sev = (severity or "").lower()
             if sev in {"critical", "error"}:
@@ -537,7 +537,7 @@ def generate_pdf_report(
             if remediation_advice and remediation_advice != "Manual review required.":
                 row_specs.append(
                     (
-                        Paragraph(f"\U0001f6e0\ufe0f REMEDIATION TASK: {remediation_advice}", remediation_style),
+                        Paragraph(f"\U0001f6e0\ufe0f REMEDIATION TASK: {_xml_escape(remediation_advice)}", remediation_style),
                         colors.HexColor("#f0fff4"),
                     )
                 )
@@ -647,10 +647,10 @@ def generate_pdf_report(
                 target = log.get("target", "")
                 error = log.get("error", "")
                 story.append(
-                    Paragraph(f"Step {step}: {action} on '{target}' — status {status}", styles["Heading3"])
+                    Paragraph(f"Step {step}: {_xml_escape(action)} on '{_xml_escape(target)}' — status {status}", styles["Heading3"])
                 )
                 if error:
-                    story.append(Paragraph(f"<font color='red'>Error:</font> {error[:200]}", styles["BodyText"]))
+                    story.append(Paragraph(f"<font color='red'>Error:</font> {_xml_escape(error[:200])}", styles["BodyText"]))
 
                 img_flowable = _build_scaled_image(screenshot_name)
                 if img_flowable is not None:
