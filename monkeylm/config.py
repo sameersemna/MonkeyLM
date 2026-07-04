@@ -138,6 +138,17 @@ ALLOWED_ACTIONS = {
 # ── Environment helpers ────────────────────────────────────────────────────────
 
 
+def _env_to_bool(value: Any, default: bool = False) -> bool:
+    """Convert a value (string, bool, or None) to boolean."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
 def _env_bool(name: str, default: bool = False) -> bool:
     value = os.getenv(name)
     if value is None:
@@ -446,35 +457,35 @@ def load_settings(cli_args: Optional[argparse.Namespace] = None) -> Settings:
         0, int(env_vars.get("WORKER_BOUNDARY_RECOVERY_RETRIES", s.worker_boundary_recovery_retries))
     )
     s.retry_base_delay_seconds = max(0.1, float(env_vars.get("RETRY_BASE_DELAY_SECONDS", s.retry_base_delay_seconds)))
-    s.headless = _env_bool("HEADLESS", default=bool(env_vars.get("HEADLESS", s.headless)))
+    s.headless = _env_bool("HEADLESS", default=_env_to_bool(env_vars.get("HEADLESS"), s.headless))
     s.browser_window_size = _normalize_window_size(env_vars.get("BROWSER_WINDOW_SIZE", os.getenv("BROWSER_WINDOW_SIZE", s.browser_window_size)))
-    s.no_viewport = _env_bool("NO_VIEWPORT", default=bool(env_vars.get("NO_VIEWPORT", s.no_viewport)))
+    s.no_viewport = _env_bool("NO_VIEWPORT", default=_env_to_bool(env_vars.get("NO_VIEWPORT"), s.no_viewport))
     s.postgres_dsn = _env_str("POSTGRES_DSN", env_vars.get("POSTGRES_DSN", s.postgres_dsn))
     s.redis_url = _env_str("REDIS_URL", env_vars.get("REDIS_URL", s.redis_url))
     s.redis_prefix = _env_str("REDIS_PREFIX", env_vars.get("REDIS_PREFIX", s.redis_prefix))
     s.redis_path_lock_ttl_seconds = max(1, int(env_vars.get("REDIS_PATH_LOCK_TTL_SECONDS", s.redis_path_lock_ttl_seconds)))
     s.golden_baseline_mode = _env_str("GOLDEN_BASELINE_MODE", env_vars.get("GOLDEN_BASELINE_MODE", s.golden_baseline_mode)).lower()
-    s.strict_persistence = _env_bool("STRICT_PERSISTENCE", default=env_vars.get("STRICT_PERSISTENCE", s.strict_persistence))
+    s.strict_persistence = _env_bool("STRICT_PERSISTENCE", default=_env_to_bool(env_vars.get("STRICT_PERSISTENCE"), s.strict_persistence))
     s.redis_state_ttl_seconds = max(60, int(env_vars.get("REDIS_STATE_TTL_SECONDS", s.redis_state_ttl_seconds)))
     s.qdrant_url = _env_str("QDRANT_URL", env_vars.get("QDRANT_URL", s.qdrant_url))
     s.qdrant_collection = _env_str("QDRANT_COLLECTION", env_vars.get("QDRANT_COLLECTION", s.qdrant_collection))
     s.qdrant_vector_size = max(64, int(env_vars.get("QDRANT_VECTOR_SIZE", s.qdrant_vector_size)))
-    s.qdrant_enable_reads = _env_bool("QDRANT_ENABLE_READS", default=env_vars.get("QDRANT_ENABLE_READS", s.qdrant_enable_reads))
-    s.qdrant_enable_writes = _env_bool("QDRANT_ENABLE_WRITES", default=env_vars.get("QDRANT_ENABLE_WRITES", s.qdrant_enable_writes))
+    s.qdrant_enable_reads = _env_bool("QDRANT_ENABLE_READS", default=_env_to_bool(env_vars.get("QDRANT_ENABLE_READS"), s.qdrant_enable_reads))
+    s.qdrant_enable_writes = _env_bool("QDRANT_ENABLE_WRITES", default=_env_to_bool(env_vars.get("QDRANT_ENABLE_WRITES"), s.qdrant_enable_writes))
     s.qdrant_embedding_provider = _env_str("QDRANT_EMBEDDING_PROVIDER", env_vars.get("QDRANT_EMBEDDING_PROVIDER", s.qdrant_embedding_provider)).lower()
     s.qdrant_embedding_model = _env_str("QDRANT_EMBEDDING_MODEL", env_vars.get("QDRANT_EMBEDDING_MODEL", s.qdrant_embedding_model))
     s.qdrant_admin_action = _env_str("QDRANT_ADMIN_ACTION", env_vars.get("QDRANT_ADMIN_ACTION", "")).lower()
-    s.qdrant_rerank_enabled = _env_bool("QDRANT_RERANK_ENABLED", default=env_vars.get("QDRANT_RERANK_ENABLED", s.qdrant_rerank_enabled))
+    s.qdrant_rerank_enabled = _env_bool("QDRANT_RERANK_ENABLED", default=_env_to_bool(env_vars.get("QDRANT_RERANK_ENABLED"), s.qdrant_rerank_enabled))
     s.qdrant_rerank_model = _env_str("QDRANT_RERANK_MODEL", env_vars.get("QDRANT_RERANK_MODEL", s.qdrant_rerank_model))
     s.qdrant_candidate_limit = max(3, int(env_vars.get("QDRANT_CANDIDATE_LIMIT", s.qdrant_candidate_limit)))
-    s.pdf_generate = _env_bool("PDF_GENERATE", default=env_vars.get("PDF_GENERATE", s.pdf_generate))
+    s.pdf_generate = _env_bool("PDF_GENERATE", default=_env_to_bool(env_vars.get("PDF_GENERATE"), s.pdf_generate))
     s.pdf_vision_model = _env_str("PDF_VISION_MODEL", env_vars.get("PDF_VISION_MODEL", s.pdf_vision_model))
     s.vision_model = _env_str("VISION_MODEL", env_vars.get("VISION_MODEL", s.vision_model))
     s.pdf_vision_timeout_seconds = max(
         1.0, float(env_vars.get("PDF_VISION_TIMEOUT_SECONDS", s.pdf_vision_timeout_seconds))
     )
-    s.strict_sandbox = _env_bool("STRICT_SANDBOX", default=_env_bool("STRICT_SANDBOX", s.strict_sandbox))
-    s.allow_no_sandbox_fallback = _env_bool("ALLOW_NO_SANDBOX_FALLBACK", default=_env_bool("ALLOW_NO_SANDBOX_FALLBACK", s.allow_no_sandbox_fallback))
+    s.strict_sandbox = _env_bool("STRICT_SANDBOX", default=_env_to_bool(env_vars.get("STRICT_SANDBOX"), s.strict_sandbox))
+    s.allow_no_sandbox_fallback = _env_bool("ALLOW_NO_SANDBOX_FALLBACK", default=_env_to_bool(env_vars.get("ALLOW_NO_SANDBOX_FALLBACK"), s.allow_no_sandbox_fallback))
 
     # ── Apply CLI overrides ─────────────────────────────────────────────
     if cli_args is not None:

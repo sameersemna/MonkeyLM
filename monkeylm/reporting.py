@@ -386,7 +386,7 @@ def generate_pdf_report(
     end_time: datetime,
 ) -> None:
     """Build a sleek executive PDF audit report using ReportLab."""
-    if os.environ.get("PDF_GENERATE") != "true":
+    if not settings.pdf_generate:
         return
     if not _REPORTLAB_AVAILABLE:
         print("⚠️ PDF_GENERATE=true but reportlab is not installed; skipping PDF audit report.")
