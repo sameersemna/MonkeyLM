@@ -1177,6 +1177,9 @@ async def execute_action(
             if log_entry.get("error"):
                 context_issue += f"; error={log_entry['error'][:120]}"
             try:
+                # Log which vision model is being used for annotation
+                active_vision_model = settings.vision_model or settings.pdf_vision_model
+                print(f"   └─ 📸 Annotating screenshot with {active_vision_model}...")
                 original_path = os.path.join(settings.output_dir, log_entry["screenshot"])
                 annotated_path = await annotate_relevant_screenshot(settings, original_path, context_issue)
                 if annotated_path != original_path:

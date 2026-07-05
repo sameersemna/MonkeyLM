@@ -778,6 +778,9 @@ class QdrantMemoryStore:
             }
 
         try:
+            # Log which model is being used for reranking
+            print(f"   └─ 🧠 Reranking memories with {self.rerank_model} (limit={final_limit})")
+            
             prompt = self._build_rerank_prompt(query_text, candidates, final_limit)
             response = await asyncio.to_thread(
                 ollama.chat,

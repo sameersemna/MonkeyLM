@@ -623,8 +623,12 @@ def generate_pdf_report(
             story.append(Spacer(1, 0.2 * inch))
 
         # ── Visual Proof Plates ──────────────────────────────────────────
+        # Only include screenshots for non-SUCCESS status (errors/problems/issues)
+        # to keep the audit report focused on items that need attention.
         annotated_logs = [
-            log for log in test_logs if log.get("screenshot_annotated") or str(log.get("screenshot", "")).endswith("_annotated.png")
+            log for log in test_logs 
+            if (log.get("screenshot_annotated") or str(log.get("screenshot", "")).endswith("_annotated.png"))
+            and log.get("status", "UNKNOWN") != "SUCCESS"
         ]
         proof_plate_logs = [log for log in annotated_logs if log.get("screenshot", "") not in embedded_screenshots]
 

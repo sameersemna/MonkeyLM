@@ -552,17 +552,44 @@ def _request_graceful_shutdown(signum: int, frame: Optional[Any]) -> None:
     """Signal handler that requests a graceful shutdown."""
     global GRACEFUL_SHUTDOWN_REQUESTED
     if GRACEFUL_SHUTDOWN_REQUESTED:
-        signal.default_int_handler(signum, frame)
+        # Second Ctrl+C during graceful shutdown - just ignore, let shutdown complete
         return
 
     GRACEFUL_SHUTDOWN_REQUESTED = True
     print(f"\n\U0001f6d1 Graceful shutdown requested (signal {signum}). Finishing in-flight steps...")
+    _remove_graceful_shutdown_signals()  # Remove handlers to prevent further interrupts
     try:
         loop = asyncio.get_event_loop()
         loop.call_soon_threadsafe(SHUTDOWN_EVENT.set)
     except Exception:
         try:
             SHUTDOWN_EVENT.set()
+        except Exception:
+            pass
+
+
+def _remove_graceful_shutdown_signals() -> None:
+    """Remove signal handlers to prevent further interrupts during graceful shutdown."""
+    try:
+        # Try to use asyncio's signal handler removal if loop is still running
+        loop = asyncio.get_running_loop()
+        try:
+            loop.remove_signal_handler(signal.SIGINT)
+        except (NotImplementedError, KeyError, ValueError, RuntimeError):
+            # RuntimeError can occur if loop is being destroyed
+            pass
+        try:
+            loop.remove_signal_handler(signal.SIGTERM)
+        except (NotImplementedError, KeyError, ValueError, RuntimeError):
+            pass
+    except Exception:
+        # Fallback to signal.signal() if asyncio removal fails
+        try:
+            signal.signal(signal.SIGINT, signal.default_int_handler)
+        except Exception:
+            pass
+        try:
+            signal.signal(signal.SIGTERM, signal.default_int_handler)
         except Exception:
             pass
 
@@ -882,6 +909,8 @@ async def main(settings: Settings) -> None:
     active_vision_model = settings.vision_model or settings.pdf_vision_model
     vision_tier = "cloud" if _is_cloud_vision_model(active_vision_model) else "local"
     print(f"📸 Visual Auditor initialized with: {active_vision_model} ({vision_tier} tier)")
+    print(f"   └─ Vision model (settings.vision_model): {settings.vision_model}")
+    print(f"   └─ PDF vision model (settings.pdf_vision_model): {settings.pdf_vision_model}")
 
     allocations = allocate_worker_steps(settings.max_steps, settings.workers, settings.max_steps_per_worker)
     active_allocations = [(idx + 1, count) for idx, count in enumerate(allocations) if count > 0]

@@ -44,6 +44,9 @@ async def _ollama_chat_with_retry(
     max_retries: int = 3,
 ) -> Optional[Dict[str, Any]]:
     """Call ollama.chat asynchronously with a strict timeout and exponential backoff on overload."""
+    # Log which model is being used for this inference
+    print(f"   └─ 🤖 Calling {model} (timeout={timeout_seconds}s, retries={max_retries})")
+    
     base_delay = 1.0
     last_exc: Optional[Exception] = None
 

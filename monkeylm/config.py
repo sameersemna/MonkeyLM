@@ -149,6 +149,23 @@ def _env_to_bool(value: Any, default: bool = False) -> bool:
     return bool(value)
 
 
+def _env_to_float(value: Any, default: float) -> float:
+    """Convert a value (string, float, or None) to float."""
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except Exception:
+            return default
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
 def _env_bool(name: str, default: bool = False) -> bool:
     value = os.getenv(name)
     if value is None:
@@ -292,7 +309,7 @@ def parse_cli_args() -> argparse.Namespace:
     parser.add_argument(
         "--vision-model",
         help="Vision model name for screenshot annotation (cloud or local)",
-        default=DEFAULT_VISION_MODEL,
+        default=None,
     )
     parser.add_argument(
         "--ollama-timeout-seconds",
@@ -441,7 +458,7 @@ def load_settings(cli_args: Optional[argparse.Namespace] = None) -> Settings:
     s.target_url = env_vars.get("TARGET_URL", os.getenv("TARGET_URL", s.target_url))
     s.ollama_model = env_vars.get("OLLAMA_MODEL", os.getenv("OLLAMA_MODEL", s.ollama_model))
     ollama_timeout = _env_float("OLLAMA_TIMEOUT_SECONDS", s.ollama_timeout_seconds)
-    s.ollama_timeout_seconds = max(1.0, ollama_timeout)
+    s.ollama_timeout_seconds = max(1.0, _env_to_float(env_vars.get("OLLAMA_TIMEOUT_SECONDS"), ollama_timeout))
     
     s.max_steps = max(1, int(env_vars.get("MAX_STEPS", s.max_steps)))
     
