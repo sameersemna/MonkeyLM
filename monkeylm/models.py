@@ -144,9 +144,26 @@ def parse_action_plan_response(raw_content: Any) -> Optional[Dict[str, Any]]:
     return normalized
 
 
-def build_decision_prompt(page_state: str, memory_logs: Optional[List[Dict[str, Any]]] = None) -> str:
+def build_decision_prompt(
+    page_state: str,
+    memory_logs: Optional[List[Dict[str, Any]]] = None,
+    has_valid_forms: bool = False,
+) -> str:
     memory_logs = memory_logs or []
     memory_json = json.dumps(memory_logs, ensure_ascii=True, indent=2)
+
+    # Build action list based on whether valid form hierarchies exist
+    base_actions = [
+        '1. "click": Click a button or link.',
+        '2. "type": Type a single value into one input field.',
+        '4. "handle_modal": If a modal/dialog is detected, try to close it (click \'X\', \'Cancel\', \'Close\') or accept it.',
+        '5. "scroll": Scroll the page.',
+    ]
+    if has_valid_forms:
+        base_actions.insert(2, '3. "submit_form": Fill a form and submit it. Use this when a valid <form> with a submit button is present.')
+
+    actions_text = "\n".join(base_actions)
+
     return f"""
 You are an Advanced Monkey Testing Agent. Your goal is to deeply test the app by filling forms, submitting data, and handling modals.
 
@@ -157,11 +174,7 @@ Current Page State:
 {memory_json}
 
 Choose ONE action from this list:
-1. "click": Click a button or link.
-2. "type": Type a single value into one input field.
-3. "submit_form": Fill a form and submit it. Use this when a form is present.
-4. "handle_modal": If a modal/dialog is detected, try to close it (click 'X', 'Cancel', 'Close') or accept it.
-5. "scroll": Scroll the page.
+{actions_text}
 
 When you choose "submit_form" or "type" on a form control, you MUST also choose an action_strategy:
 - "HAPPY_UPSERT": Generate valid, realistic data that should be accepted (e.g., proper emails, numbers within bounds).
@@ -173,7 +186,7 @@ When you choose "submit_form" or "type" on a form control, you MUST also choose 
   * textarea: newlines, XSS fragments, large blobs.
 
 Rules:
-- If you see a <FORM>, prioritize "submit_form" or "type" inside it.
+- Only use "submit_form" when the page contains a valid <form> element that has an <input type="submit">, <input type="image">, or <button type="submit"> inside it.
 - If you see a <MODAL>, prioritize "handle_modal".
 - Each element line starts with [id=N]. Use that numeric id for target selection.
 - For actions that need a target, return "target" as [id=N] (example: [id=3]).
@@ -198,6 +211,7 @@ async def decide_next_action(
     settings: Settings,
     page_state: str,
     memory_store: Any = None,
+    snapshot: Optional["PageSnapshot"] = None,  # noqa: F821 - imported at runtime
 ) -> dict:
     """Call the LLM to decide the next monkey-testing action.
 
@@ -205,12 +219,25 @@ async def decide_next_action(
         settings: Runtime configuration.
         page_state: Serialized PageSnapshot text.
         memory_store: QdrantMemoryStore instance (required; no global fallback).
+        snapshot: Optional PageSnapshot object to check for valid form hierarchies.
     """
     if memory_store is None:
         raise ValueError("memory_store must be provided to decide_next_action")
 
+    # Determine if there's at least one valid form hierarchy on the page
+    has_valid_forms = False
+    if snapshot is not None:
+        from monkeylm.config import PageSnapshot as PS  # avoid circular import
+        
+        for form in snapshot.forms:
+            # A valid form must be inside a <form> element (not loose_controls) 
+            # and contain an actual submit-capable button/input
+            if form.form_id != "loose_controls" and form.submit_candidate_id is not None:
+                has_valid_forms = True
+                break
+
     memory_logs = await memory_store.search_similar_layouts(page_state, limit=3)
-    prompt = build_decision_prompt(page_state, memory_logs)
+    prompt = build_decision_prompt(page_state, memory_logs, has_valid_forms=has_valid_forms)
 
     response = await _ollama_chat_with_retry(
         settings=settings,
@@ -407,13 +434,55 @@ def _extract_all_target_ids(elements: List[str]) -> List[str]:
 
 
 def _break_action_loop(
-    action_plan: Dict[str, Any], snapshot: Any, worker_label: str
+    action_plan: Dict[str, Any],
+    snapshot: Any,
+    worker_label: str,
+    loop_state: Optional[Dict[str, Any]] = None,
+    blacklist_expiry_steps: int = 5,
 ) -> Dict[str, Any]:
-    """Force exploration variance when the model repeats the same action/target."""
-    current_target = str(action_plan.get("target", ""))
-    all_targets = _extract_all_target_ids(snapshot.elements)
-    alternatives = [t for t in all_targets if t != current_target]
+    """Force exploration variance when the model repeats the same action/target.
 
+    On each loop trigger:
+    - Blacklist the element/action that caused the loop for N steps (default 5)
+    - Clear short-term execution memory to break repetitive patterns
+    - Select a truly different action target from available alternatives
+    """
+    current_target = str(action_plan.get("target", ""))
+    current_action = action_plan.get("action", "click")
+
+    # Initialize or update loop detection state
+    if loop_state is None:
+        loop_state = {
+            "blacklist": {},  # target -> expiry_step mapping
+            "loop_count": 0,
+        }
+    loop_state["loop_count"] += 1
+
+    # Expire expired blacklist entries using current global step
+    from monkeylm.core import CURRENT_GLOBAL_STEP
+
+    loop_state["blacklist"] = {
+        tgt: exp for tgt, exp in loop_state["blacklist"].items() if exp > CURRENT_GLOBAL_STEP
+    }
+
+    # Blacklist the element/action that caused this loop
+    blacklist_key = f"{current_action}:{current_target}"
+    loop_state["blacklist"][blacklist_key] = CURRENT_GLOBAL_STEP + blacklist_expiry_steps
+    print(f"   └─ ⛓ Blacklisted '{blacklist_key}' for {blacklist_expiry_steps} steps (loop #{loop_state['loop_count']})")
+
+    # Get all available targets excluding blacklisted ones
+    all_targets = _extract_all_target_ids(snapshot.elements)
+    blacklisted_targets = set()
+    for bl_key in loop_state["blacklist"]:
+        parts = bl_key.split(":", 1)
+        if len(parts) == 2:
+            _, tgt = parts
+            if tgt in all_targets:
+                blacklisted_targets.add(tgt)
+
+    alternatives = [t for t in all_targets if t != current_target and t not in blacklisted_targets]
+
+    # Also blacklist repeating actions on the same target
     if alternatives:
         chosen_target = random.choice(alternatives)
         chosen_element = next((el for el in snapshot.elements if chosen_target in el), "")
@@ -422,7 +491,7 @@ def _break_action_loop(
             if any(tag in chosen_element.upper() for tag in {"<INPUT", "<TEXTAREA", "<SELECT"})
             else "click"
         )
-        print(f"   -> 🔄 {worker_label} loop break: switching to {chosen_action} on {chosen_target}")
+        print(f"   -> 🔄 {worker_label} loop break: switching to {chosen_action} on {chosen_target} (excluding {len(blacklisted_targets)} blacklisted targets)")
         return {
             "action": chosen_action,
             "target": chosen_target,

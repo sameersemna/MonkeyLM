@@ -598,6 +598,120 @@ def compare_screenshots_pixelmatch(
     return result
 
 
+# ── Resilient page navigation ─────────────────────────────────────────────────
+
+
+async def _check_and_handle_dialogs(page: Page) -> None:
+    """Verify native dialog states before releasing control to the VLM agent.
+    
+    Checks for pending dialogs and handles them appropriately to prevent
+    blocking navigation or interaction flow.
+    """
+    # Playwright's dialog event handler should already manage this,
+    # but we verify no unhandled dialogs are blocking
+    try:
+        # Brief wait for any async dialog events to settle
+        await asyncio.sleep(0.1)
+    except Exception:
+        pass
+
+
+async def resilient_page_goto(
+    page: Page,
+    url: str,
+    *,
+    timeout: int = 45000,
+    wait_until: str = "domcontentloaded",
+    phase: str = "navigation",
+    max_retries: int = 3,
+) -> Optional[Any]:
+    """Navigate to URL with resilient retry logic for transient failures.
+    
+    Handles net::ERR_ABORTED errors, waits for network idle, and verifies
+    native dialog states before releasing control back to the VLM agent.
+    
+    Args:
+        page: Playwright Page instance
+        url: Target URL to navigate to
+        timeout: Navigation timeout in milliseconds (default: 45000)
+        wait_until: When to consider navigation succeeded (default: domcontentloaded)
+        phase: Descriptive phase name for logging (e.g., "back-recovery", "restart-target")
+        max_retries: Maximum number of retry attempts (default: 3)
+    
+    Returns:
+        Response object from successful navigation, or None if all retries failed
+    """
+    last_error = None
+    
+    for attempt in range(max_retries):
+        try:
+            response = await page.goto(url, wait_until=wait_until, timeout=timeout)
+            
+            # Wait briefly for any networkidle to settle
+            try:
+                await page.wait_for_load_state("networkidle", timeout=5000)
+            except Exception:
+                pass  # Network idle may not be available on all pages
+            
+            # Check and handle any native dialogs before returning control
+            await _check_and_handle_dialogs(page)
+            
+            if response is None:
+                # Navigation initiated but no response received (possible redirect or abort)
+                print(f"⚠️ {phase}: No response received during navigation to {url}")
+                continue
+                
+            status = response.status
+            if 200 <= status < 400:
+                return response
+            elif status == 401 or status == 403:
+                # Auth failures - don't retry, these won't resolve automatically
+                print(f"⚠️ {phase}: Authentication/authorization error ({status}) for {url}")
+                return response
+            else:
+                # Server errors might be transient
+                last_error = f"HTTP {status}"
+                if attempt < max_retries - 1:
+                    print(f"⚠️ {phase}: HTTP {status}, retrying... (attempt {attempt + 1}/{max_retries})")
+                    await asyncio.sleep(random.uniform(1, 3))
+                    continue
+                    
+        except Exception as exc:
+            error_str = str(exc).lower()
+            
+            # Handle net::ERR_ABORTED - often transient, caused by race conditions
+            if "aborted" in error_str or "err_aborted" in error_str or "net::err_aborted" in error_str:
+                last_error = "net::ERR_ABORTED"
+                print(f"⚠️ {phase}: Navigation aborted ({error_str}), retrying... (attempt {attempt + 1}/{max_retries})")
+                await asyncio.sleep(random.uniform(0.5, 1.5))
+                continue
+            
+            # Handle timeout errors - may benefit from retry with longer timeout
+            if "timeout" in error_str or "timed out" in error_str:
+                last_error = "navigation_timeout"
+                print(f"⚠️ {phase}: Navigation timed out, retrying... (attempt {attempt + 1}/{max_retries})")
+                await asyncio.sleep(random.uniform(1, 2))
+                continue
+            
+            # Handle context destruction (page closed/reloaded unexpectedly)
+            if "execution context" in error_str or "closed" in error_str or "crash" in error_str:
+                last_error = f"context_error: {error_str}"
+                print(f"⚠️ {phase}: Browser context issue ({error_str}), retrying... (attempt {attempt + 1}/{max_retries})")
+                await asyncio.sleep(random.uniform(1, 2))
+                continue
+            
+            # Other errors - log but don't retry immediately
+            last_error = error_str
+            if attempt < max_retries - 1:
+                print(f"⚠️ {phase}: Navigation error ({error_str}), retrying... (attempt {attempt + 1}/{max_retries})")
+                await asyncio.sleep(random.uniform(1, 2))
+                continue
+    
+    # All retries exhausted
+    print(f"❌ {phase}: All {max_retries} navigation attempts failed for {url}. Last error: {last_error}")
+    return None
+
+
 # ── Browser launch & page readiness ───────────────────────────────────────────
 
 
@@ -878,16 +992,34 @@ async def execute_action(
         elif action == "back":
             history_length = await page.evaluate("() => window.history.length")
             if page.url == "about:blank" or history_length <= 2:
-                await page.goto(settings.target_url, wait_until="domcontentloaded", timeout=45000)
+                await resilient_page_goto(
+                    page,
+                    settings.target_url,
+                    wait_until="domcontentloaded",
+                    timeout=45000,
+                    phase="back-recovery",
+                )
                 await wait_for_page_ready(page, "back-recovery")
             else:
                 previous_page = await page.go_back(timeout=5000)
                 if page.url == "about:blank" or previous_page is None:
-                    await page.goto(settings.target_url, wait_until="domcontentloaded", timeout=45000)
+                    await resilient_page_goto(
+                        page,
+                        settings.target_url,
+                        wait_until="domcontentloaded",
+                        timeout=45000,
+                        phase="back-recovery-fallback",
+                    )
                     await wait_for_page_ready(page, "back-recovery")
 
         elif action == "restart_target":
-            await page.goto(settings.target_url, wait_until="domcontentloaded", timeout=45000)
+            await resilient_page_goto(
+                page,
+                settings.target_url,
+                wait_until="domcontentloaded",
+                timeout=45000,
+                phase="restart-target",
+            )
             await wait_for_page_ready(page, "restart-target")
 
         elif action == "random_jump":

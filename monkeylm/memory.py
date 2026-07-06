@@ -5,10 +5,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
+import os
 import random
 import re
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import parse_qs, urlparse, urlunparse, urlencode
 
 import ollama
 from playwright.async_api import Page
@@ -22,6 +26,111 @@ from monkeylm.config import (
     redis_asyncio,
     split_domain_and_route,
 )
+
+# Structured logger for baseline operations
+_baseline_logger = logging.getLogger("monkeylm.baseline")
+if not _baseline_logger.handlers:
+    _baseline_logger.setLevel(logging.INFO)
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("%(asctime)s [BASELINE] %(message)s"))
+    _baseline_logger.addHandler(_handler)
+
+
+# ── URL normalization for baseline lookup ─────────────────────────────────────
+
+
+def _normalize_url_for_baseline_lookup(url: str, preserve_routes: Optional[List[str]] = None) -> str:
+    """Normalize a URL for baseline lookup by stripping variable query parameters.
+
+    Strips non-deterministic params (session IDs, CSRF tokens, timestamps, UTM tracking,
+    random nonce values) while preserving route structure and intentional query params
+    like locale/language settings.
+
+    Args:
+        url: The raw URL to normalize.
+        preserve_routes: Optional list of query param names to always preserve
+                        (e.g., ['lang', 'locale', 'language']).
+
+    Returns:
+        Normalized URL string with only deterministic query parameters preserved.
+    """
+    if not url or url == "about:blank":
+        return "/"
+
+    parsed = urlparse(url)
+    path = parsed.path or "/"
+
+    # Strip trailing slashes except for root
+    if path != "/" and path.endswith("/"):
+        path = path.rstrip("/")
+
+    query_params = parse_qs(parsed.query, keep_blank_values=True)
+    preserved_routes = preserve_routes or []
+
+    # Query params to always strip (non-deterministic/tracking)
+    strip_patterns = [
+        r"^session_",
+        r"^csrf_",
+        r"^_token$",
+        r"^nonce$",
+        r"^timestamp$",
+        r"^__r$",
+        r"^utm_",
+        r"^gclid$",
+        r"^fbclid$",
+        r"^srchid$",
+        r"^gs_lcp$",
+        r"^source$",
+        r"^ref$",
+    ]
+
+    stripped_count = 0
+    filtered_params: Dict[str, List[str]] = {}
+
+    for key, values in query_params.items():
+        # Preserve intentional route params (case-insensitive match)
+        if key.lower() in [p.lower() for p in preserved_routes]:
+            filtered_params[key] = values
+            continue
+
+        # Strip non-deterministic params matching patterns
+        should_strip = False
+        for pattern in strip_patterns:
+            if re.search(pattern, key, re.IGNORECASE):
+                should_strip = True
+                stripped_count += 1
+                break
+
+        if not should_strip:
+            filtered_params[key] = values
+
+    # Rebuild query string
+    if filtered_params:
+        new_query = urlencode(filtered_params, doseq=True)
+    else:
+        new_query = ""
+
+    normalized = urlunparse(("", "", path, parsed.params, new_query, parsed.fragment))
+    return normalized if normalized else "/"
+
+
+def _baseline_lookup_path(domain: str, route: str) -> str:
+    """Compute the canonical lookup path for baseline data.
+
+    Args:
+        domain: The domain name (e.g., 'example.com').
+        route: The normalized route path (e.g., '/login').
+
+    Returns:
+        Absolute directory path in reports/{domain}/data/ structure.
+    """
+    # Sanitize domain and route for filesystem safety
+    safe_domain = re.sub(r'[^a-zA-Z0-9._-]', '_', domain)
+    safe_route = re.sub(r'[^a-zA-Z0-9._-]', '_', route or "") or "root"
+
+    base_dir = os.environ.get("MONKEYLM_REPORTS_DIR", "reports")
+    lookup_path = os.path.join(base_dir, safe_domain, "baseline", safe_route)
+    return os.path.abspath(lookup_path)
 
 
 # ── Hash-based embedding helpers ───────────────────────────────────────────────
@@ -374,7 +483,8 @@ class PersistenceEngine:
         """Analyze current route against golden baseline for component regressions.
 
         Import extract_component_manifest and diff_component_manifests lazily to avoid
-        circular imports with browser.py.
+        circular imports with browser.py. Uses URL normalization for robust baseline lookups
+        that ignore variable query parameters (session IDs, CSRF tokens, UTM params, etc.).
         """
         from monkeylm.browser import diff_component_manifests, extract_component_manifest
 
@@ -382,16 +492,35 @@ class PersistenceEngine:
         if not domain:
             return
 
+        # Normalize URL for consistent baseline lookup across varying query params
+        normalized_route = _normalize_url_for_baseline_lookup(
+            page_route, preserve_routes=["lang", "locale", "language", "currency"]
+        )
+
+        # Structured logging for exact lookup path
+        lookup_dir = _baseline_lookup_path(domain, normalized_route)
+        if page_route != normalized_route:
+            _baseline_logger.info(
+                "Normalization: %s → %s (stripped variable query params)",
+                page_route, normalized_route,
+            )
+        _baseline_logger.info(
+            "Baseline lookup: domain=%s, original_route=%s, normalized_route=%s, search_dir=%s",
+            domain, page_route, normalized_route, lookup_dir,
+        )
+
         component_manifest = await extract_component_manifest(page)
+
+        # Upsert current snapshot using the *normalized* route for consistency
         await self._upsert_baseline(
             domain=domain,
-            page_route=page_route,
+            page_route=normalized_route,
             dom_structure_hash=snapshot.structure_hash,
             component_manifest=component_manifest,
             is_golden_standard=False,
         )
 
-        golden = await self._fetch_golden_baseline(domain, page_route)
+        golden = await self._fetch_golden_baseline(domain, normalized_route)
         if golden is None:
             if self.settings.golden_baseline_mode == "auto_upsert":
                 await self._upsert_baseline(

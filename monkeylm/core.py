@@ -27,6 +27,11 @@ from monkeylm.config import (
 )
 
 
+# ── Global step counter for loop detection blacklisting ───────────────────────
+
+CURRENT_GLOBAL_STEP: int = 0
+
+
 # ── Defect tracker ────────────────────────────────────────────────────────────
 
 
@@ -107,17 +112,48 @@ class Fuzzer:
 
 
 class A11yChecker:
-    """Injects axe-core and executes periodic scans to surface high-severity a11y defects."""
+    """Injects axe-core and executes periodic scans to surface high-severity a11y defects.
+
+    axe-core is proactively baked into the page lifecycle via add_init_script()
+    so it is available before any navigation or script execution occurs.
+    The legacy ensure_injected() remains as a fallback for already-opened pages.
+    """
 
     def __init__(self, defects: DefectTracker) -> None:
         self.injected_pages: set[int] = set()
         self.defects = defects
 
-    async def ensure_injected(self, page: Page) -> None:
+    async def inject_init_script(self, page: Page) -> None:
+        """Bake axe-core into the page lifecycle before first navigation."""
         page_id = id(page)
         if page_id in self.injected_pages:
             return
         try:
+            await page.add_init_script(url=AXE_CDN_URL)
+            self.injected_pages.add(page_id)
+        except Exception as exc:
+            self.defects.add(
+                "console_findings",
+                {
+                    "step": -1,
+                    "type": "axe-init-script-warning",
+                    "severity": "warning",
+                    "message": f"Unable to add axe-core init script (likely CSP/network): {exc}",
+                    "url": page.url,
+                },
+            )
+
+    async def ensure_injected(self, page: Page) -> None:
+        """Legacy fallback for pages that were already opened before init script injection.
+        
+        Attempts add_script_tag as a last resort; init scripts are preferred via
+        inject_init_script() called during browser context setup.
+        """
+        page_id = id(page)
+        if page_id in self.injected_pages:
+            return
+        try:
+            # Try add_script_tag for pages already open at injection time
             await page.add_script_tag(url=AXE_CDN_URL)
             self.injected_pages.add(page_id)
         except Exception as exc:
@@ -666,6 +702,13 @@ async def run_worker(
     recent_model_plans: List[Tuple[str, str]] = []
     completed_steps = 0
 
+    # Enhanced loop detection state - shared across steps for blacklisting
+    loop_detection_state: Dict[str, Any] = {
+        "blacklist": {},  # target -> expiry_step mapping
+        "loop_count": 0,
+        "recent_actions": [],  # short-term memory buffer to clear on loop
+    }
+
     worker_data_dir = build_worker_user_data_dir(settings, worker_id)
 
     context = None
@@ -701,6 +744,9 @@ async def run_worker(
                 )
 
         page.on("console", _console_listener)
+
+        # Bake axe-core into the page lifecycle BEFORE any navigation
+        await worker_a11y_checker.inject_init_script(page)
 
         print(f"\U0001f680 Starting {worker_label} on {settings.target_url} with {allocated_steps} steps...")
         await with_retry_backoff(
@@ -739,14 +785,27 @@ async def run_worker(
                 print(f"   -> \U0001f6a8 {worker_label} failed to get state: {exc}. Skipping step.")
                 continue
 
-            plan = await decide_next_action(settings, state, memory_store=worker_memory)
+            plan = await decide_next_action(settings, state, memory_store=worker_memory, snapshot=snapshot)
             retrieval_telemetry = worker_memory.consume_last_search_telemetry()
 
-            # Anti-loop heuristic
+            # Update global step counter for loop detection blacklisting
+            CURRENT_GLOBAL_STEP = step
+
+            # Enhanced anti-loop heuristic with memory clearing & blacklist
             plan_signature = (plan.get("action", "scroll"), plan.get("target", ""))
             if len(recent_model_plans) >= 3 and all(p == plan_signature for p in recent_model_plans[-3:]):
                 print(f"\U0001f504 Loop detected for {worker_label}; forcing path exploration variance.")
-                plan = _break_action_loop(plan, snapshot, worker_label)
+
+                # Clear short-term execution memory to break repetitive patterns
+                loop_detection_state["recent_actions"] = []
+                print(f"   \u251c\u2500 \u26d4 Cleared short-term action history for {worker_label}")
+
+                # Use enhanced _break_action_loop with blacklist state
+                plan = _break_action_loop(
+                    plan, snapshot, worker_label,
+                    loop_state=loop_detection_state,
+                    blacklist_expiry_steps=settings.max_steps // 3,
+                )
             recent_model_plans.append(plan_signature)
             recent_model_plans = recent_model_plans[-3:]
 
