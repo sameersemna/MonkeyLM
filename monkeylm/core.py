@@ -15,7 +15,6 @@ from playwright.async_api import Page, Route, async_playwright
 
 from monkeylm.config import (
     ACTION_COOLDOWN_SECONDS,
-    AXE_CDN_URL,
     Faker,
     Settings,
     WorkerRunResult,
@@ -25,6 +24,8 @@ from monkeylm.config import (
     is_in_scope,
     SHUTDOWN_EVENT,
 )
+
+from monkeylm.resources import AXE_CORE_PATH
 
 
 # ── Global step counter for loop detection blacklisting ───────────────────────
@@ -114,22 +115,46 @@ class Fuzzer:
 class A11yChecker:
     """Injects axe-core and executes periodic scans to surface high-severity a11y defects.
 
-    axe-core is proactively baked into the page lifecycle via add_init_script()
-    so it is available before any navigation or script execution occurs.
-    The legacy ensure_injected() remains as a fallback for already-opened pages.
+    FIX (Layer 1 - Framework Fix):
+        Uses a locally bundled axe-core.min.js via add_init_script(path=...)
+        instead of the broken CDN URL approach. No outbound network request
+        is needed — bypassing CORS and strict CSP blocks entirely.
+
+    GUARDRAIL (Layer 2 - Self-Healing Runtime Check):
+        Inside scan(), if page.evaluate("typeof window.axe !== 'undefined'")
+        returns False (meaning a hard navigation or strict CSP cleared the
+        init script), the method re-injects the raw JS string directly into
+        the frame via page.evaluate(axe_raw_js_string) before invoking axe.run().
+        This completely eliminates "axe_missing" loop exceptions.
+
+    REPORTING (Layer 3 - Structured Findings):
+        Violations are structured with full metadata: rule id, description,
+        helpUrl, impact level, CSS selector chain, HTML snippet, and the
+        axe failureSummary remediation guidance. The DefectTracker collection
+        is then processed by reporting.py into deduplicated compiled reports.
     """
 
     def __init__(self, defects: DefectTracker) -> None:
         self.injected_pages: set[int] = set()
         self.defects = defects
+        # Cache for raw JS string (populated on first re-injection attempt)
+        self._cached_raw_axe: Optional[str] = None
 
     async def inject_init_script(self, page: Page) -> None:
-        """Bake axe-core into the page lifecycle before first navigation."""
+        """Bake axe-core into every navigation via local file path.
+
+        Playwright's add_init_script(path=...) reads the bundle from disk
+        and serialises it into each frame before any page script runs —
+        this is immune to CSP <meta> tags or network blocks.
+        
+        FIX: Uses 'path=' instead of 'url=' (CDN URL fails under CSP).
+        """
         page_id = id(page)
         if page_id in self.injected_pages:
             return
+
         try:
-            await page.add_init_script(url=AXE_CDN_URL)
+            await page.add_init_script(path=str(AXE_CORE_PATH))
             self.injected_pages.add(page_id)
         except Exception as exc:
             self.defects.add(
@@ -138,23 +163,18 @@ class A11yChecker:
                     "step": -1,
                     "type": "axe-init-script-warning",
                     "severity": "warning",
-                    "message": f"Unable to add axe-core init script (likely CSP/network): {exc}",
-                    "url": page.url,
+                    "message": f"Unable to add axe-core init script (path={AXE_CORE_PATH!r}): {exc}",
+                    "url": getattr(page, "url", "(no page)"),
                 },
             )
 
     async def ensure_injected(self, page: Page) -> None:
-        """Legacy fallback for pages that were already opened before init script injection.
-        
-        Attempts add_script_tag as a last resort; init scripts are preferred via
-        inject_init_script() called during browser context setup.
-        """
+        """Legacy fallback for pages already opened before the init-script hook."""
         page_id = id(page)
         if page_id in self.injected_pages:
             return
         try:
-            # Try add_script_tag for pages already open at injection time
-            await page.add_script_tag(url=AXE_CDN_URL)
+            await page.add_script_tag(path=str(AXE_CORE_PATH))
             self.injected_pages.add(page_id)
         except Exception as exc:
             self.defects.add(
@@ -163,32 +183,76 @@ class A11yChecker:
                     "step": -1,
                     "type": "axe-injection-warning",
                     "severity": "warning",
-                    "message": f"Unable to inject axe-core (likely CSP/network): {exc}",
-                    "url": page.url,
+                    "message": f"Unable to inject axe-core (path={AXE_CORE_PATH!r}): {exc}",
+                    "url": getattr(page, "url", "(no page)"),
                 },
             )
 
-    async def scan(self, page: Page, step_num: int) -> List[Dict[str, Any]]:
-        await self.ensure_injected(page)
+    async def _reinject_via_evaluate(self, page: Page) -> bool:
+        """Re-inject axe-core raw source when the execution context is wiped.
+
+        This is the self-healing path: if a hard navigation or strict CSP
+        clears `window.axe`, we re-load the full minified bundle by passing
+        its text content to page.evaluate(), which runs it as an inline script
+        in the target frame.  No file-path resolution needed at runtime —
+        we cache the string after first read to avoid repeated I/O.
+
+        Returns True if injection appeared successful, False otherwise.
+        """
         try:
-            results = await page.evaluate(
-                """async () => {
-                    try {
-                        if (!window.axe) return { error: 'axe_missing', violations: [] };
-                        const result = await window.axe.run(document, {
-                            resultTypes: ['violations'],
-                            runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'best-practice'] }
-                        });
-                        return result;
-                    } catch (err) {
-                        return {
-                            error: 'axe_runtime_error',
-                            errorMessage: String(err || 'unknown axe error'),
-                            violations: []
-                        };
-                    }
-                }"""
+            # Read and cache the local file once; cache on subsequent calls
+            if self._cached_raw_axe is None:
+                self._cached_raw_axe = AXE_CORE_PATH.read_text(encoding="utf-8")
+
+            await page.evaluate(self._cached_raw_axe)
+            return True
+        except Exception as exc:
+            self.defects.add(
+                "console_findings",
+                {
+                    "step": -1,
+                    "type": "axe-reinject-failure",
+                    "severity": "error",
+                    "message": f"Self-healing re-injection failed: {exc}",
+                    "url": getattr(page, "url", "(no page)"),
+                },
             )
+            return False
+
+    async def scan(self, page: Page, step_num: int) -> List[Dict[str, Any]]:
+        """Run an axe-core audit; collect critical / serious violations.
+
+        GUARDRAIL FLOW:
+            1. Ensure axe is present (via add_init_script path or legacy fallback).
+            2. Evaluate the axe.run() query.
+            3. If results.error == 'axe_missing', run _reinject_via_evaluate(page)
+               and retry the scan once.
+            4. Extract full metadata (id, description, helpUrl, impact, selector, 
+               html_snippet, remediation) for structured reporting downstream.
+        """
+        await self.ensure_injected(page)
+
+        def _axe_run_eval() -> str:
+            return """async () => {
+                try {
+                    if (!window.axe) return { error: 'axe_missing', violations: [] };
+                    const result = await window.axe.run(document, {
+                        resultTypes: ['violations'],
+                        runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'best-practice'] }
+                    });
+                    return result;
+                } catch (err) {
+                    return {
+                        error: 'axe_runtime_error',
+                        errorMessage: String(err || 'unknown axe error'),
+                        violations: []
+                    };
+                }
+            }"""
+
+        results: Dict[str, Any] = {}
+        try:
+            results = await page.evaluate(_axe_run_eval())
         except Exception as exc:
             self.defects.add(
                 "console_findings",
@@ -201,6 +265,37 @@ class A11yChecker:
                 },
             )
             return []
+
+        # ── Self-heal if axe was wiped (e.g. hard navigation / CSP) ───────
+        if results.get("error") == "axe_missing":
+            success = await self._reinject_via_evaluate(page)
+            if not success:
+                self.defects.add(
+                    "console_findings",
+                    {
+                        "step": step_num,
+                        "type": "axe-runtime-warning",
+                        "severity": "warning",
+                        "message": "Re-injection failed; axe-core unavailable on this page.",
+                        "url": page.url,
+                    },
+                )
+                return []
+            # Retry after re-injection
+            try:
+                results = await page.evaluate(_axe_run_eval())
+            except Exception as exc2:
+                self.defects.add(
+                    "console_findings",
+                    {
+                        "step": step_num,
+                        "type": "axe-runtime-warning",
+                        "severity": "warning",
+                        "message": f"Retry after re-injection failed: {exc2}",
+                        "url": page.url,
+                    },
+                )
+                return []
 
         if results.get("error"):
             self.defects.add(
@@ -215,31 +310,40 @@ class A11yChecker:
             )
             return []
 
+        # ── Extract violations with full metadata ─────────────────────────
         filtered: List[Dict[str, Any]] = []
         for violation in results.get("violations", []):
             impact = (violation.get("impact") or "").lower()
             if impact not in {"critical", "serious"}:
                 continue
+
             rule_id = violation.get("id")
             description = violation.get("description")
             help_text = violation.get("help")
+            help_url = violation.get("helpUrl", "")
+
             for node in violation.get("nodes", []):
                 targets = node.get("target", [])
                 selector = ", ".join(targets) if targets else "(unknown)"
+
                 finding: Dict[str, Any] = {
                     "step": step_num,
-                    "severity": impact,
-                    "id": rule_id,
-                    "description": description,
-                    "help": help_text,
-                    "selector": selector,
+                    "severity": impact,                  # critical | serious
+                    "id": rule_id,                       # e.g. "color-contrast"
+                    "description": description,          # Human-readable rule name
+                    "help": help_text,                   # Axe guidance text
+                    "helpUrl": help_url,                 # MDN / axe docs link
+                    "impact": impact,
+                    "selector": selector,                # CSS chain: "main > nav > ul"
                     "html_snippet": node.get("html", ""),
                     "remediation": node.get("failureSummary", ""),
                     "url": page.url,
                 }
                 filtered.append(finding)
+
         for finding in filtered:
             self.defects.add("accessibility_violations", finding)
+
         return filtered
 
 
@@ -1047,5 +1151,12 @@ async def main(settings: Settings) -> None:
     # Generate reports
     generate_markdown_report(settings, merged_defects, merged_logs, browser_launch_info, start_time, end_time)
     generate_json_summary(settings, merged_defects, merged_logs, browser_launch_info, [], GRACEFUL_SHUTDOWN_REQUESTED, start_time, end_time)
+    # Generate interactive HTML accessibility dashboard (if violations exist)
+    try:
+        if getattr(merged_defects, "accessibility_violations", None):
+            from monkeylm.reporting import generate_interactive_html_report
+            generate_interactive_html_report(settings, merged_defects, merged_logs, start_time, end_time)
+    except Exception as exc:
+        print(f"⚠️ HTML accessibility report generation failed: {exc}")
     if settings.pdf_generate:
         generate_pdf_report(settings, merged_defects, merged_logs, start_time, end_time)
