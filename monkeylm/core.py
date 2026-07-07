@@ -790,7 +790,7 @@ async def run_worker(
         handle_dialog,
         execute_action,
     )
-    from monkeylm.models import decide_next_action, apply_state_aware_policy, _break_action_loop
+    from monkeylm.models import decide_next_action, apply_state_aware_policy, _break_action_loop, run_application_discovery
     from monkeylm.memory import QdrantMemoryStore
 
     worker_label = f"worker-{worker_id:02d}"
@@ -870,6 +870,15 @@ async def run_worker(
             initial_delay_seconds=settings.retry_base_delay_seconds,
         )
 
+        # ── Application Discovery: analyze landing page and build testing strategy ──
+        testing_strategy = None
+        try:
+            discovery_snapshot = await get_page_state(page, -1, phase="plan", output_dir=settings.output_dir)
+            discovery_state = state_to_prompt(discovery_snapshot)
+            testing_strategy = await run_application_discovery(settings, discovery_state)
+        except Exception as exc:
+            _local_service_log(f"{worker_label} Application Discovery failed: {exc}; proceeding without strategy.", settings.output_dir)
+
         for idx in range(allocated_steps):
             if SHUTDOWN_EVENT.is_set():
                 print(f"\n\U0001f6d1 {worker_label} stopping early due to graceful shutdown request.")
@@ -889,7 +898,7 @@ async def run_worker(
                 print(f"   -> \U0001f6a8 {worker_label} failed to get state: {exc}. Skipping step.")
                 continue
 
-            plan = await decide_next_action(settings, state, memory_store=worker_memory, snapshot=snapshot)
+            plan = await decide_next_action(settings, state, memory_store=worker_memory, snapshot=snapshot, testing_strategy=testing_strategy)
             retrieval_telemetry = worker_memory.consume_last_search_telemetry()
 
             # Update global step counter for loop detection blacklisting

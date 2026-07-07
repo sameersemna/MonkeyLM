@@ -218,7 +218,9 @@ def _normalize_window_size(raw: str, fallback: str = DEFAULT_WINDOW_SIZE) -> str
     return f"{width},{height}"
 
 
-# ── Cognitive Testing Persona dataclasses ─────────────────────────────────────
+# ── Settings & Cognitive Testing Persona dataclasses ──────────────────────────
+
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -246,11 +248,6 @@ class TestingStrategy:
     edge_cases_to_test: List[str]  # specific edge cases to explore
     security_focus: List[str]  # security concerns to probe
     strategy_summary: str = ""  # one-line summary of the overall approach
-
-
-# ── Settings dataclass ─────────────────────────────────────────────────────────
-
-from dataclasses import dataclass, field
 
 
 @dataclass

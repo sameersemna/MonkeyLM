@@ -18,6 +18,9 @@ from monkeylm.config import (
     ImageDraw,
     OLLAMA_DECISION_OPTIONS,
     Settings,
+    TestingStrategy,
+    PersonaGoal,
+    CriticalFlow,
     _local_service_log,
     normalize_action_plan,
 )
@@ -148,6 +151,7 @@ def build_decision_prompt(
     page_state: str,
     memory_logs: Optional[List[Dict[str, Any]]] = None,
     has_valid_forms: bool = False,
+    testing_strategy: Optional["TestingStrategy"] = None,
 ) -> str:
     memory_logs = memory_logs or []
     memory_json = json.dumps(memory_logs, ensure_ascii=True, indent=2)
@@ -164,9 +168,46 @@ def build_decision_prompt(
 
     actions_text = "\n".join(base_actions)
 
+    # Build cognitive persona context block when a testing strategy is available
+    persona_context = ""
+    if testing_strategy is not None:
+        personas_summary = "; ".join(
+            f"{p.name} ({p.description})" for p in testing_strategy.primary_personas[:3]
+        )
+        flows_summary = "; ".join(
+            f"{f.name}: {f.description}" for f in testing_strategy.critical_flows[:3]
+        )
+        security_summary = "; ".join(testing_strategy.security_focus[:5])
+        edge_cases_summary = "; ".join(testing_strategy.edge_cases_to_test[:5])
+        persona_context = f"""
+## Cognitive Testing Strategy (Application Discovery)
+Application Domain: {testing_strategy.app_domain}
+Strategy: {testing_strategy.strategy_summary}
+
+Active Personas (embody one per action):
+{personas_summary}
+
+Critical Flows to Exercise:
+{flows_summary}
+
+Edge Cases to Target:
+{edge_cases_summary}
+
+Security Concerns to Probe:
+{security_summary}
+
+When choosing your action, ADOPT one of the personas above. Declare:
+- "persona_intent": A one-sentence description of what this persona is trying to accomplish and WHY they would take this exact action (e.g., "Rush User double-clicking Submit to skip client-side validation").
+- "expected_reaction": What the application SHOULD do in response (e.g., "Form should reject and show validation error on email field").
+"""
+
+    persona_fields = ""
+    if testing_strategy is not None:
+        persona_fields = '\n  "persona_intent": "Rush User submitting form twice to expose race conditions",\n  "expected_reaction": "Server should deduplicate and return 409 Conflict",'
+
     return f"""
 You are an Advanced Monkey Testing Agent. Your goal is to deeply test the app by filling forms, submitting data, and handling modals.
-
+{persona_context}
 Current Page State:
 {page_state}
 
@@ -199,7 +240,7 @@ Respond ONLY with JSON:
   "action": "submit_form",
   "target": "[id=0]",
   "value": "",
-  "action_strategy": "HAPPY_UPSERT",
+  "action_strategy": "HAPPY_UPSERT",{persona_fields}
   "input_payloads": [
     {{"target": "[id=1]", "value": "valid@example.com", "reason": "happy_valid_email"}}
   ]
@@ -207,11 +248,146 @@ Respond ONLY with JSON:
 """
 
 
+# ── Application Discovery ─────────────────────────────────────────────────────
+
+
+def _build_discovery_prompt(page_state: str) -> str:
+    """Build the initial Application Discovery prompt.
+
+    Asks the LLM to analyze the landing page state and return a structured
+    JSON TestingStrategy that will guide the entire action loop.
+    """
+    return f"""
+You are a senior QA analyst performing application reconnaissance before executing automated tests.
+
+Analyze the following page state and infer the application's domain, user personas, critical flows, edge cases, and security concerns.
+
+Current Page State:
+{page_state}
+
+Return ONLY a JSON object with this exact schema:
+{{
+  "app_domain": "short description, e.g. 'e-commerce checkout' or 'user authentication portal'",
+  "strategy_summary": "one-sentence plan for the testing session",
+  "primary_personas": [
+    {{
+      "name": "Persona Name",
+      "description": "what this user wants / their motivation",
+      "behaviors": ["behavior 1", "behavior 2"]
+    }}
+  ],
+  "critical_flows": [
+    {{
+      "name": "flow_identifier",
+      "description": "what this flow achieves",
+      "steps": ["step1", "step2", "step3"]
+    }}
+  ],
+  "edge_cases_to_test": ["edge case 1", "edge case 2", "edge case 3"],
+  "security_focus": ["concern 1", "concern 2", "concern 3"]
+}}
+
+Include 2-4 personas, 2-3 critical flows, 3-5 edge cases, and 3-5 security concerns.
+Personas should cover: normal user, power user, malicious/adversarial user, and accessibility-impaired user where applicable.
+"""
+
+
+def _parse_testing_strategy(raw_content: Any) -> Optional[TestingStrategy]:
+    """Parse an LLM response into a TestingStrategy dataclass."""
+    if not isinstance(raw_content, str):
+        return None
+
+    content = raw_content.replace("```json", "").replace("```", "").strip()
+    if not content:
+        return None
+
+    try:
+        data = json.loads(content)
+    except Exception:
+        match = re.search(r"\{.*\}", content, re.DOTALL)
+        if not match:
+            return None
+        try:
+            data = json.loads(match.group(0))
+        except Exception:
+            return None
+
+    try:
+        personas = [
+            PersonaGoal(
+                name=str(p.get("name", "Unknown")),
+                description=str(p.get("description", "")),
+                behaviors=[str(b) for b in p.get("behaviors", [])],
+            )
+            for p in data.get("primary_personas", [])
+        ]
+        flows = [
+            CriticalFlow(
+                name=str(f.get("name", "unknown_flow")),
+                description=str(f.get("description", "")),
+                steps=[str(s) for s in f.get("steps", [])],
+            )
+            for f in data.get("critical_flows", [])
+        ]
+        return TestingStrategy(
+            app_domain=str(data.get("app_domain", "unknown")),
+            primary_personas=personas,
+            critical_flows=flows,
+            edge_cases_to_test=[str(e) for e in data.get("edge_cases_to_test", [])],
+            security_focus=[str(s) for s in data.get("security_focus", [])],
+            strategy_summary=str(data.get("strategy_summary", "")),
+        )
+    except Exception:
+        return None
+
+
+async def run_application_discovery(
+    settings: Settings,
+    page_state: str,
+) -> Optional[TestingStrategy]:
+    """Execute the Application Discovery step before the main action loop.
+
+    Calls the LLM once with the initial page state to generate a structured
+    TestingStrategy that will be injected into every subsequent decision prompt.
+
+    Returns None if the LLM call fails or the response cannot be parsed —
+    the caller should continue with persona-less prompts in that case.
+    """
+    print("   🔍 Running Application Discovery — analyzing app domain & generating testing strategy...")
+    prompt = _build_discovery_prompt(page_state)
+
+    response = await _ollama_chat_with_retry(
+        settings=settings,
+        model=settings.ollama_model,
+        messages=[{"role": "user", "content": prompt}],
+        timeout_seconds=settings.ollama_timeout_seconds,
+        max_retries=2,
+    )
+
+    if response is None:
+        _local_service_log("Application Discovery: LLM returned no response; continuing without strategy.", settings.output_dir)
+        return None
+
+    try:
+        content = response["message"]["content"]
+        strategy = _parse_testing_strategy(content)
+        if strategy is not None:
+            print(f"   ✅ Discovery complete — Domain: '{strategy.app_domain}' | Personas: {len(strategy.primary_personas)} | Flows: {len(strategy.critical_flows)}")
+            _local_service_log(f"Application Discovery: {strategy.strategy_summary}", settings.output_dir)
+            return strategy
+    except Exception as exc:
+        _local_service_log(f"Application Discovery: failed to parse strategy: {exc}", settings.output_dir)
+
+    _local_service_log("Application Discovery: could not parse strategy; continuing without it.", settings.output_dir)
+    return None
+
+
 async def decide_next_action(
     settings: Settings,
     page_state: str,
     memory_store: Any = None,
     snapshot: Optional["PageSnapshot"] = None,  # noqa: F821 - imported at runtime
+    testing_strategy: Optional[TestingStrategy] = None,
 ) -> dict:
     """Call the LLM to decide the next monkey-testing action.
 
@@ -220,6 +396,7 @@ async def decide_next_action(
         page_state: Serialized PageSnapshot text.
         memory_store: QdrantMemoryStore instance (required; no global fallback).
         snapshot: Optional PageSnapshot object to check for valid form hierarchies.
+        testing_strategy: Optional application discovery result to inject persona context.
     """
     if memory_store is None:
         raise ValueError("memory_store must be provided to decide_next_action")
@@ -237,7 +414,12 @@ async def decide_next_action(
                 break
 
     memory_logs = await memory_store.search_similar_layouts(page_state, limit=3)
-    prompt = build_decision_prompt(page_state, memory_logs, has_valid_forms=has_valid_forms)
+    prompt = build_decision_prompt(
+        page_state,
+        memory_logs,
+        has_valid_forms=has_valid_forms,
+        testing_strategy=testing_strategy,
+    )
 
     response = await _ollama_chat_with_retry(
         settings=settings,
