@@ -218,6 +218,36 @@ def _normalize_window_size(raw: str, fallback: str = DEFAULT_WINDOW_SIZE) -> str
     return f"{width},{height}"
 
 
+# ── Cognitive Testing Persona dataclasses ─────────────────────────────────────
+
+
+@dataclass
+class PersonaGoal:
+    """A single testing persona with intent and expected reactions."""
+    name: str  # e.g., "Rush User", "SQL Injection Attacker"
+    description: str  # human-like motivation
+    behaviors: List[str]  # example: ["double-clicks submit", "skips validation"]
+
+
+@dataclass
+class CriticalFlow:
+    """A critical user flow to test with persona-driven actions."""
+    name: str  # e.g., "user_registration"
+    description: str
+    steps: List[str]  # e.g., ["fill_form", "validate", "submit"]
+
+
+@dataclass
+class TestingStrategy:
+    """Application discovery output — LLM-generated testing strategy before the action loop."""
+    app_domain: str  # inferred domain, e.g., "e-commerce checkout"
+    primary_personas: List[PersonaGoal]  # target user personas for testing
+    critical_flows: List[CriticalFlow]  # key flows to exercise
+    edge_cases_to_test: List[str]  # specific edge cases to explore
+    security_focus: List[str]  # security concerns to probe
+    strategy_summary: str = ""  # one-line summary of the overall approach
+
+
 # ── Settings dataclass ─────────────────────────────────────────────────────────
 
 from dataclasses import dataclass, field
@@ -691,12 +721,22 @@ def normalize_action_plan(raw_plan: Any) -> Dict[str, Any]:
                 {"target": str(p.get("target", "")), "value": str(p.get("value", "")), "reason": str(p.get("reason", ""))}
             )
 
+    # Cognitive Testing Personas - optional fields (backward compatible)
+    persona_intent = raw_plan.get("persona_intent", "")
+    if persona_intent is None:
+        persona_intent = ""
+    expected_reaction = raw_plan.get("expected_reaction", "")
+    if expected_reaction is None:
+        expected_reaction = ""
+
     return {
         "action": action,
         "target": str(target),
         "value": str(value),
         "action_strategy": strategy,
         "input_payloads": normalized_payloads,
+        "persona_intent": str(persona_intent),
+        "expected_reaction": str(expected_reaction),
     }
 
 
