@@ -10,7 +10,7 @@ import re
 import subprocess
 from typing import Any, Dict, List, Optional, Tuple
 
-from playwright.async_api import Dialog, Page
+from playwright.async_api import Dialog, JSHandle, Page
 
 from monkeylm.config import (
     ACTION_COOLDOWN_SECONDS,
@@ -922,6 +922,104 @@ async def handle_dialog(dialog: Dialog) -> None:
         print("   -> Dismissed dialog")
 
 
+# ── Form boundary validation helper ───────────────────────────────────────────
+
+
+async def _resolve_form_boundary(
+    page: Page, target: str
+) -> Tuple[Optional[Any], str]:
+    """Resolve the form that contains or is the target element.
+
+    Returns (form_locator, reason):
+      - form_locator: Playwright Locator for the form (or None if not found)
+      - reason: human-readable string explaining the resolution outcome
+
+    Validation steps:
+      1. Find the target element via _locator_for_target_id
+      2. If target is a <form> tag, use it directly
+      3. Otherwise, traverse up via el.closest('form') in JS context
+      4. Validate the resolved form has non-zero bounding box (not hidden)
+    """
+    # Step 1: Resolve target element locator
+    target_locator = await _locator_for_target_id(page, target)
+    if target_locator is None:
+        return None, "target_element_not_found"
+
+    # Step 2: Check if target IS a form element
+    tag_name = await target_locator.evaluate("el => el.tagName.toLowerCase()")
+    if tag_name == "form":
+        bbox = await target_locator.bounding_box()
+        if bbox and bbox.get("width", 0) > 0 and bbox.get("height", 0) > 0:
+            return target_locator, "target_is_form"
+        return None, "target_is_form_but_invisible"
+
+    # Step 3: Traverse up via el.closest('form')
+    form_handle = await target_locator.evaluate_handle(
+        "el => el.closest('form')"
+    )
+
+    try:
+        # Check if a form ancestor exists (closest returns null when no match)
+        is_null = await form_handle.json_value() is None
+        if is_null:
+            return None, "no_form_ancestor_found"
+
+        # Convert JSHandle to Locator using the element's path-based selector approach
+        # We'll use page.evaluate to find the form by bounding-box correlation
+        target_bbox = await target_locator.bounding_box()
+        if not target_bbox:
+            return None, "target_element_has_no_bounding_box"
+
+        target_x = target_bbox.get("x", 0)
+        target_y = target_bbox.get("y", 0)
+
+        # Find form whose bounding box contains the target point (or is nearest)
+        forms_locator = page.locator("form:visible")
+        form_count = await forms_locator.count()
+
+        if form_count == 0:
+            return None, "no_visible_forms_on_page"
+
+        best_form_idx = None
+        best_distance_sq = float("inf")
+
+        for idx in range(form_count):
+            form_elem = forms_locator.nth(idx)
+            form_bbox = await form_elem.bounding_box()
+            if not form_bbox:
+                continue
+
+            # Check if target point is inside form bounding box (with small tolerance)
+            tol = 10.0
+            if (
+                target_x >= form_bbox["x"] - tol
+                and target_x <= form_bbox["x"] + form_bbox["width"] + tol
+                and target_y >= form_bbox["y"] - tol
+                and target_y <= form_bbox["y"] + form_bbox["height"] + tol
+            ):
+                return form_elem, "target_inside_form_bounds"
+
+            # Calculate distance squared for nearest-neighbor fallback
+            dx = (form_bbox["x"] + form_bbox["width"] / 2) - target_x
+            dy = (form_bbox["y"] + form_bbox["height"] / 2) - target_y
+            dist_sq = dx * dx + dy * dy
+            if dist_sq < best_distance_sq:
+                best_distance_sq = dist_sq
+                best_form_idx = idx
+
+        if best_form_idx is not None:
+            return (
+                forms_locator.nth(best_form_idx),
+                "nearest_form_by_bounding_box",
+            )
+
+        return None, "no_form_near_target"
+
+    finally:
+        # Ensure JSHandle is released to avoid memory leak
+        await form_handle.dispose()
+
+
 # ── Action execution (the big dispatcher) ─────────────────────────────────────
 
 
@@ -1044,62 +1142,69 @@ async def execute_action(
 
         elif action == "submit_form":
             filled_payloads = []
-            for payload in input_payloads:
-                payload_target = payload.get("target", "")
-                payload_value = payload.get("value", "")
-                payload_reason = payload.get("reason", "")
-                locator = await _locator_for_target_id(page, payload_target)
-                if locator:
-                    mode = await _resolve_interaction_mode(locator)
-                    control_options: List[str] = []
-                    parsed_id = _extract_target_id(payload_target)
-                    if parsed_id is not None:
-                        control = next(
-                            (fc for fc in before_snapshot.form_controls if fc.control_id == parsed_id), None
-                        )
-                        if control is not None:
-                            control_options = control.options
 
-                    try:
-                        if mode == "text_input":
-                            await locator.fill(payload_value)
-                            filled_payloads.append(
-                                {"target": payload_target, "value": payload_value[:120], "reason": payload_reason}
+            # Guard: resolve form boundary before any mutation
+            form_locator, form_reason = await _resolve_form_boundary(page, target)
+            if form_locator is None:
+                log_entry["status"] = "SKIPPED_NOT_FORM"
+                log_entry["error"] = f"form_boundary_not_resolved: {form_reason}"
+                print(
+                    f"   ⚠️ Step {step_num}: submit_form skipped — {form_reason} (target='{target}')"
+                )
+            else:
+                for payload in input_payloads:
+                    payload_target = payload.get("target", "")
+                    payload_value = payload.get("value", "")
+                    payload_reason = payload.get("reason", "")
+                    locator = await _locator_for_target_id(page, payload_target)
+                    if locator:
+                        mode = await _resolve_interaction_mode(locator)
+                        control_options: List[str] = []
+                        parsed_id = _extract_target_id(payload_target)
+                        if parsed_id is not None:
+                            control = next(
+                                (fc for fc in before_snapshot.form_controls if fc.control_id == parsed_id), None
                             )
-                        elif mode == "select":
-                            chosen, reason = await _fill_select_option(
-                                page, locator, payload_value, control_options, action_strategy
-                            )
-                            filled_payloads.append(
-                                {"target": payload_target, "value": chosen[:120], "reason": reason}
-                            )
-                        elif mode == "checkbox_radio":
-                            await locator.check()
-                            filled_payloads.append(
-                                {
-                                    "target": payload_target,
-                                    "value": "checked",
-                                    "reason": payload_reason or "happy_checkbox_radio_check",
-                                }
-                            )
-                    except Exception as fill_exc:
-                        _local_service_log(f"Step {step_num}: failed to mutate {payload_target}: {fill_exc}")
+                            if control is not None:
+                                control_options = control.options
 
-            log_entry["input_payloads"] = filled_payloads
+                        try:
+                            if mode == "text_input":
+                                await locator.fill(payload_value)
+                                filled_payloads.append(
+                                    {"target": payload_target, "value": payload_value[:120], "reason": payload_reason}
+                                )
+                            elif mode == "select":
+                                chosen, reason = await _fill_select_option(
+                                    page, locator, payload_value, control_options, action_strategy
+                                )
+                                filled_payloads.append(
+                                    {"target": payload_target, "value": chosen[:120], "reason": reason}
+                                )
+                            elif mode == "checkbox_radio":
+                                await locator.check()
+                                filled_payloads.append(
+                                    {
+                                        "target": payload_target,
+                                        "value": "checked",
+                                        "reason": payload_reason or "happy_checkbox_radio_check",
+                                    }
+                                )
+                        except Exception as fill_exc:
+                            _local_service_log(f"Step {step_num}: failed to mutate {payload_target}: {fill_exc}")
 
-            form = page.locator("form:visible").first
-            if await form.count() > 0:
-                submit_btn = form.locator("button[type='submit'], input[type='submit']").first
+                log_entry["input_payloads"] = filled_payloads
+
+                # Submit using the resolved form locator (not blind first-form)
+                submit_btn = form_locator.locator("button[type='submit'], input[type='submit']").first
                 if await submit_btn.count() > 0:
                     await submit_btn.click(timeout=3000)
                 else:
-                    inputs = form.locator("input:visible, textarea:visible")
+                    inputs = form_locator.locator("input:visible, textarea:visible")
                     if await inputs.count() > 0:
                         await inputs.last.press("Enter")
                     else:
                         raise Exception("Form found but no inputs or submit button")
-            else:
-                raise Exception("No visible form found to submit")
 
         elif action == "click":
             locator = await _locator_for_target_id(page, target)

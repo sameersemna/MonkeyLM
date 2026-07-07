@@ -325,7 +325,12 @@ class PersistenceEngine:
             return None
 
     async def claim_action_path_lock(self, path_hash: str, worker_label: str) -> bool:
-        """Try to claim a cross-worker action-path lock in Redis."""
+        """Try to claim a cross-worker action-path lock in Redis.
+
+        Returns True if the lock is acquired (or already owned by this worker).
+        Returns False if another worker owns the lock.
+        Swallows all exceptions so that lock failures never poison step validation.
+        """
         if self.redis_client is None:
             return True
 
@@ -343,12 +348,25 @@ class PersistenceEngine:
                     return True
 
                 current_owner = await self.redis_client.get(prefixed_key)
-                if current_owner and current_owner.decode("utf-8") == worker_label:
+                # decode_responses=True means get() already returns a str.
+                # Guard against the case where the library or connection settings change
+                # and start returning bytes again.
+                if isinstance(current_owner, bytes):
+                    current_owner = current_owner.decode("utf-8")
+                elif not isinstance(current_owner, str):
+                    current_owner = str(current_owner) if current_owner is not None else ""
+
+                if current_owner == worker_label:
                     return True
             return False
         except Exception as exc:
-            _local_service_log(f"Redis action-path lock claim failed: {exc}", self.settings.output_dir)
-            return True
+            _local_service_log(
+                f"Redis action-path lock claim failed for '{path_hash}': {exc}",
+                self.settings.output_dir,
+            )
+            # Return False to skip the action when Redis is unreachable.
+            # A silent True here would defeat cross-worker dedup entirely.
+            return False
 
     async def _fetch_golden_baseline(self, domain: str, page_route: str) -> Optional[Dict[str, Any]]:
         if self.pg_pool is None:
