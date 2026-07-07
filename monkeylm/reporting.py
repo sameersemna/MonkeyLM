@@ -891,7 +891,8 @@ def generate_interactive_html_report(
         moderate_rule = severity_dist.get("moderate", 0)
         minor_rule = severity_dist.get("minor", 0)
         rule_score = rule.get("impact_score_contribution", 0)
-        first_seen = rule.get("occurrence_steps", [{}])[0].get("step_number", "?") if rule.get("occurrence_steps") else "?"
+        # occurrence_steps is List[int] from _compile_accessibility_violations
+        first_seen = rule.get("occurrence_steps", [])[0] if rule.get("occurrence_steps") else "?"
 
         # Build selectors list
         selectors_html = ""
@@ -943,7 +944,8 @@ def generate_interactive_html_report(
         critical_rule = severity_dist.get("critical", 0)
         serious_rule = severity_dist.get("serious", 0)
         rule_score = rule.get("impact_score_contribution", 0)
-        first_seen = rule.get("occurrence_steps", [{}])[0].get("step_number", "?") if rule.get("occurrence_steps") else "?"
+        # occurrence_steps is List[int] from _compile_accessibility_violations
+        first_seen = rule.get("occurrence_steps", [])[0] if rule.get("occurrence_steps") else "?"
 
         table_rows += f'''<tr>
           <td><code>{rule_id}</code></td>
