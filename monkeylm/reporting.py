@@ -270,9 +270,30 @@ def summarize_vibe_coding_accountability(defects: Any) -> Dict[str, Any]:
         )
 
     drift_index = (float(total_missing) / float(total_expected) * 100.0) if total_expected > 0 else 0.0
-    run_summary_status = (
-        "FAILED: Structural Drift Detected" if drift_index > 0.0 else "PASSED: No Structural Drift Detected"
-    )
+
+    # ── Check for application defects across all categories ──────────
+    defect_categories = [
+        "security_risks", "context_anomalies", "ux_flow_freezes",
+        "validation_failures", "race_findings", "boundary_drift",
+        "console_findings", "performance_bottlenecks", "accessibility_violations",
+    ]
+    app_defect_count = 0
+    for cat in defect_categories:
+        collection = getattr(defects, cat, None)
+        if not collection:
+            continue
+        for d in collection:
+            severity = _derive_severity(cat, d)
+            if severity in ("CRITICAL", "HIGH", "MEDIUM"):
+                app_defect_count += 1
+
+    # Override run summary status based on application defects
+    if app_defect_count > 0:
+        run_summary_status = f"FAILED: {app_defect_count} Application Defects Detected"
+    elif drift_index > 0.0:
+        run_summary_status = "FAILED: Structural Drift Detected"
+    else:
+        run_summary_status = "PASSED: No Issues Detected"
 
     return {
         "regression_drift_index": round(drift_index, 3),
@@ -280,6 +301,7 @@ def summarize_vibe_coding_accountability(defects: Any) -> Dict[str, Any]:
         "total_expected_baseline_components": total_expected,
         "run_summary_status": run_summary_status,
         "drift_details": drift_details,
+        "app_defect_count": app_defect_count,
     }
 
 
@@ -704,10 +726,37 @@ def generate_markdown_report(
     """Generate test_report.md in the output directory."""
     duration_seconds = (end_time - start_time).total_seconds()
     total_steps = len(test_logs)
-    failed_steps = [log for log in test_logs if log["status"] in ["FAILED", "CRASH"]]
-    success_rate = ((total_steps - len(failed_steps)) / total_steps * 100) if total_steps > 0 else 0
 
     accountability = summarize_vibe_coding_accountability(defects)
+
+    # Collect step numbers with HIGH/MEDIUM/CRITICAL application defects
+    defect_step_numbers: set[int] = set()
+    defect_categories_for_steps = [
+        "security_risks", "context_anomalies", "ux_flow_freezes",
+        "validation_failures", "race_findings", "boundary_drift",
+        "console_findings", "accessibility_violations",
+    ]
+    for cat in defect_categories_for_steps:
+        collection = getattr(defects, cat, None)
+        if not collection:
+            continue
+        for d in collection:
+            severity = _derive_severity(cat, d)
+            if severity in ("CRITICAL", "HIGH", "MEDIUM"):
+                step_num = d.get("step")
+                if step_num is not None:
+                    defect_step_numbers.add(step_num)
+
+    # Failed steps = explicitly FAILED/CRASH + steps with app defects
+    failed_steps_set: set[int] = set()
+    for log in test_logs:
+        if log["status"] in ["FAILED", "CRASH"]:
+            failed_steps_set.add(log.get("step", 0))
+    failed_steps_set.update(defect_step_numbers)
+
+    failed_steps_count = len(failed_steps_set)
+    success_rate = ((total_steps - failed_steps_count) / total_steps * 100) if total_steps > 0 else 0
+    failed_steps_list = [log for log in test_logs if log["status"] in ["FAILED", "CRASH"]]
 
     md_content = f"""# Deep Inspection Monkey Test Report
 
@@ -716,7 +765,8 @@ def generate_markdown_report(
 **Duration:** {duration_seconds:.2f} seconds  
 **Total Steps:** {total_steps}  
 **Success Rate:** {success_rate:.2f}%  
-**Errors Found:** {len(failed_steps)}  
+**Errors Found:** {failed_steps_count}  
+**Application Defects (HIGH/MEDIUM/CRITICAL):** {accountability.get('app_defect_count', 0)}  
 **Sandbox Policy:** {"strict" if settings.strict_sandbox else "sandbox-first"}  
 **No-Sandbox Fallback:** {"enabled" if settings.allow_no_sandbox_fallback else "disabled"}  
 **Browser Launch Mode:** {browser_launch_info.get('mode', 'unknown')}  
@@ -730,9 +780,9 @@ The agent performed {total_steps} actions using **{settings.ollama_model}**.
 Actions included: Clicking, Typing, Form Submission, Modal Handling, and State Escapes.
 """
 
-    if failed_steps:
+    if failed_steps_list:
         md_content += "\n## Errors Detected\n"
-        for log in failed_steps:
+        for log in failed_steps_list:
             md_content += f"\n### Step {log['step']}: {log['action']} failed\n"
             md_content += f"- **Target:** `{log['target']}`\n"
             md_content += f"- **Error:** `{log['error']}`\n"
@@ -770,7 +820,13 @@ Actions included: Clicking, Typing, Form Submission, Modal Handling, and State E
         # Detailed ticket cards
         md_content += "\n---\n\n"
         for t in compiled_tickets:
-            md_content += t.to_markdown() + "\n\n---\n\n"
+            md_content += t.to_markdown() + "\n\n"
+            # Append machine-readable agent_context JSON block for significant defects
+            if t.severity in ("CRITICAL", "HIGH", "MEDIUM"):
+                md_content += "\n```json\n"
+                md_content += json.dumps(t.agent_context_block(), indent=2)
+                md_content += "\n```\n"
+            md_content += "\n---\n\n"
     else:
         md_content += "\n---\n\n# 🔧 Engineering Defect Tickets\n\n**No defects detected.** ✅\n\n---\n\n"
 
@@ -1003,6 +1059,7 @@ def generate_json_summary(
         "failed_steps": len([log for log in test_logs if log["status"] != "SUCCESS"]),
         "run_summary_status": accountability.get("run_summary_status"),
         "regression_drift_index": accountability.get("regression_drift_index"),
+        "app_defect_count": accountability.get("app_defect_count", 0),
         "browser_launch": browser_launch_info,
         "defects": {
             "security_risks": defects.security_risks,
@@ -1067,8 +1124,29 @@ def generate_pdf_report(
         accountability = summarize_vibe_coding_accountability(defects)
         duration_seconds = (end_time - start_time).total_seconds()
         total_steps = len(test_logs)
-        failed_steps = [log for log in test_logs if log["status"] in ["FAILED", "CRASH"]]
-        success_rate = ((total_steps - len(failed_steps)) / total_steps * 100) if total_steps > 0 else 0.0
+
+        # Collect step numbers with HIGH/MEDIUM/CRITICAL application defects
+        defect_step_numbers_pdf: set[int] = set()
+        for cat in ["security_risks", "context_anomalies", "ux_flow_freezes",
+                     "validation_failures", "race_findings", "boundary_drift",
+                     "console_findings", "accessibility_violations"]:
+            collection = getattr(defects, cat, None)
+            if not collection:
+                continue
+            for d in collection:
+                severity = _derive_severity(cat, d)
+                if severity in ("CRITICAL", "HIGH", "MEDIUM"):
+                    step_num = d.get("step")
+                    if step_num is not None:
+                        defect_step_numbers_pdf.add(step_num)
+
+        failed_pdf_set: set[int] = set()
+        for log in test_logs:
+            if log["status"] in ["FAILED", "CRASH"]:
+                failed_pdf_set.add(log.get("step", 0))
+        failed_pdf_set.update(defect_step_numbers_pdf)
+        failed_steps_count_pdf = len(failed_pdf_set)
+        success_rate = ((total_steps - failed_steps_count_pdf) / total_steps * 100) if total_steps > 0 else 0.0
 
         # Header Block
         story.append(Paragraph("MonkeyLM Executive Quality Audit", styles["Title"]))
@@ -1083,7 +1161,7 @@ def generate_pdf_report(
         summary_data = [
             ["Metric", "Value"],
             ["Total Steps", str(total_steps)],
-            ["Failed / Crashed Steps", str(len(failed_steps))],
+            ["Failed / Crashed Steps", str(failed_steps_count_pdf)],
             ["Success Rate", f"{success_rate:.2f}%"],
             ["Workers", str(settings.workers)],
             ["Regression Drift Index", f"{accountability.get('regression_drift_index', 0.0)}%"],

@@ -1029,6 +1029,56 @@ class DefectTicket:
 
         return "\n".join(lines)
 
+    def agent_context_block(self) -> Dict[str, Any]:
+        """Build the agent_context JSON block for HIGH/MEDIUM severity defects.
+
+        Produces the exact schema required for downstream coding agents:
+        defect_type, severity, target_url, target_selector, reproduction_action,
+        observed_error, and reremediation_instruction.
+        """
+        # Derive reproduction action from the defect's raw data or first step
+        action = "click"  # default
+        payload_used = ""
+        if self.reproduction_steps:
+            last_step = self.reproduction_steps[-1]
+            action = last_step.get("action", "").lower() or "click"
+            if last_step.get("value"):
+                payload_used = str(last_step["value"])[:200]
+            elif last_step.get("target"):
+                payload_used = str(last_step["target"])[:200]
+
+        # Extract observed error from raw defects
+        observed_error = ""
+        for rd in self.raw_defects:
+            err = rd.get("error", "") or rd.get("message", "") or rd.get("description", "")
+            if err:
+                observed_error = str(err)[:500]
+                break
+        if not observed_error and self.description:
+            observed_error = self.description[:500]
+
+        # Map action to valid categories
+        action_map = {"type": "type", "submit": "submit_form", "press": "click",
+                      "fill": "type", "check": "click"}
+        normalized_action = action_map.get(action, action) if action in action_map else (
+            "submit_form" if "form" in action or "submit" in action else "click"
+        )
+
+        return {
+            "agent_context": {
+                "defect_type": self.category,
+                "severity": self.severity,
+                "target_url": self.target_url,
+                "target_selector": self.target_selector,
+                "reproduction_action": {
+                    "action": normalized_action,
+                    "payload_used": payload_used,
+                },
+                "observed_error": observed_error,
+                "reremediation_instruction": self.remediation_instruction,
+            }
+        }
+
 
 # Ensure json.dumps is available for to_markdown()
 import json as _json_module
