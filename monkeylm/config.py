@@ -726,6 +726,20 @@ def normalize_action_plan(raw_plan: Any) -> Dict[str, Any]:
     if expected_reaction is None:
         expected_reaction = ""
 
+    # Structured Thinking Reasoning Fields (Phase B — Intent → Strategy Reference → Execution Target)
+    reasoning_obj = raw_plan.get("reasoning", {})
+    if not isinstance(reasoning_obj, dict):
+        reasoning_obj = {}
+    reasoning_intent = reasoning_obj.get("intent", "")
+    if reasoning_intent is None:
+        reasoning_intent = ""
+    reasoning_strategy_ref = reasoning_obj.get("strategy_reference", "")
+    if reasoning_strategy_ref is None:
+        reasoning_strategy_ref = ""
+    reasoning_target_justification = reasoning_obj.get("target_justification", "")
+    if reasoning_target_justification is None:
+        reasoning_target_justification = ""
+
     return {
         "action": action,
         "target": str(target),
@@ -734,6 +748,9 @@ def normalize_action_plan(raw_plan: Any) -> Dict[str, Any]:
         "input_payloads": normalized_payloads,
         "persona_intent": str(persona_intent),
         "expected_reaction": str(expected_reaction),
+        "reasoning_intent": str(reasoning_intent),
+        "reasoning_strategy_reference": str(reasoning_strategy_ref),
+        "reasoning_target_justification": str(reasoning_target_justification),
     }
 
 
@@ -829,6 +846,194 @@ class WorkerRunResult:
     defects: "DefectTracker"  # noqa: F821
     network_injections: List[Dict[str, Any]]
     launch_info: Dict[str, Any]
+
+
+# ── Defect Ticket for Remediation Blueprints ───────────────────────────────────
+
+
+@dataclass
+class DefectTicket:
+    """Structured engineering defect ticket with remediation blueprint.
+
+    Compiles raw defects into actionable cards optimized for both human review
+    (scannable Markdown/PDF) and machine ingestion by coding agents
+    (structured JSON spec blocks).
+    """
+
+    # Identity & severity
+    defect_uid: str  # e.g., "DEFECT-001"
+    category: str  # e.g., "security_risks", "context_anomalies"
+    severity: str  # CRITICAL, HIGH, MEDIUM, LOW
+    title: str  # concise human-readable defect name
+
+    # Narrative description
+    description: str = ""
+
+    # Context triangulation
+    target_url: str = ""
+    page_state_name: str = ""
+    target_selector: str = ""
+    html_snippet: str = ""
+
+    # Reproduction sequence (list of step dicts)
+    reproduction_steps: List[Dict[str, Any]] = field(default_factory=list)
+
+    # Visual proofs
+    before_screenshot: Optional[str] = None
+    after_screenshot: Optional[str] = None
+    expected_screenshot: Optional[str] = None
+
+    # Root cause & remediation
+    root_cause_analysis: str = ""
+    remediation_instruction: str = ""
+
+    # Raw defect payload (for reference)
+    raw_defects: List[Dict[str, Any]] = field(default_factory=list)
+
+    # Agent-discovered metadata
+    impact: str = ""  # e.g., "Security Risk / Data Pollution"
+    discovered_context_url: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Return a flat dictionary suitable for JSON serialization."""
+        return {
+            "defect_uid": self.defect_uid,
+            "category": self.category,
+            "severity": self.severity,
+            "title": self.title,
+            "description": self.description,
+            "impact": self.impact,
+            "target_url": self.target_url,
+            "page_state_name": self.page_state_name,
+            "discovered_context_url": self.discovered_context_url,
+            "target_selector": self.target_selector,
+            "html_snippet": self.html_snippet,
+            "reproduction_steps": self.reproduction_steps,
+            "before_screenshot": self.before_screenshot,
+            "after_screenshot": self.after_screenshot,
+            "expected_screenshot": self.expected_screenshot,
+            "root_cause_analysis": self.root_cause_analysis,
+            "remediation_instruction": self.remediation_instruction,
+        }
+
+    @property
+    def spec_block(self) -> Dict[str, Any]:
+        """Build the Remediation Spec Block for machine ingestion by coding agents.
+
+        Structured as a JSON-ready map with defect_type, target_element schema,
+        reproduction_sequence, root_cause_analysis, and remediation_instruction.
+        """
+        # Derive target_element from selector + html_snippet
+        target_element: Dict[str, Any] = {}
+        if self.target_selector:
+            target_element["selector"] = self.target_selector
+        if self.html_snippet:
+            # Extract tag and attributes from snippet for agent parsing
+            import re as _re
+
+            tag_match = _re.search(r"<(\w+)", self.html_snippet[:200])
+            if tag_match:
+                target_element["tag"] = tag_match.group(1)
+            attr_matches = _re.findall(
+                r'(\w+)\s*=\s*(?:&quot;|")([^"&]*)?(?:&quot;|")',
+                self.html_snippet[:500],
+            )
+            if attr_matches:
+                target_element["attributes"] = dict(attr_matches)
+
+        return {
+            "defect_type": self.category.replace("_", ""),
+            "severity": self.severity,
+            "target_element": target_element,
+            "target_url": self.target_url,
+            "page_state_name": self.page_state_name,
+            "reproduction_sequence": [
+                {
+                    "step": s.get("step", i + 1),
+                    "action": s.get("action", ""),
+                    "selector": s.get("target", ""),
+                    "value": s.get("value", ""),
+                    "url": s.get("url", ""),
+                }
+                for i, s in enumerate(self.reproduction_steps)
+            ],
+            "root_cause_analysis": self.root_cause_analysis,
+            "remediation_instruction": self.remediation_instruction,
+        }
+
+    def to_markdown(self) -> str:
+        """Render this ticket as a Remediation Blueprint card in Markdown."""
+        lines = []
+        sev_icon = {"CRITICAL": "🔴", "HIGH": "🟠", "MEDIUM": "⚠️ ", "LOW": "ℹ️ "}.get(
+            self.severity, "⚪"
+        )
+
+        lines.append(f"## [{self.severity}] {sev_icon} {self.defect_uid}: {self.title}")
+        if self.impact:
+            lines.append(f"- **Impact:** {self.impact}")
+        if self.target_selector:
+            lines.append(f"- **Target Selector:** `{self.target_selector}`")
+        if self.target_url:
+            lines.append(f"- **Discovered Context:** {self.target_url}")
+        if self.page_state_name:
+            lines.append(f"- **Page State:** {self.page_state_name}")
+
+        # Reproduction steps
+        if self.reproduction_steps:
+            lines.append("")
+            lines.append("**Reproduction Steps:**")
+            for s in self.reproduction_steps:
+                step_num = s.get("step", "?")
+                action = s.get("action", "")
+                target = s.get("target", "")
+                value = s.get("value", "")
+                url = s.get("url", "")
+                line = f"{step_num}. `{action}"
+                if target:
+                    line += f" on `{target}`"
+                if value:
+                    line += f" value=`{value[:60]}`"
+                line += "`"
+                if url:
+                    line += f" — {url}"
+                lines.append(f"- {line}")
+
+        # Root cause analysis
+        if self.root_cause_analysis:
+            lines.append("")
+            lines.append(f"**Root Cause Analysis:** {self.root_cause_analysis}")
+
+        # Remediation instruction
+        if self.remediation_instruction:
+            lines.append("")
+            lines.append(f"**Remediation Instruction:** {self.remediation_instruction}")
+
+        # Visual proofs
+        screenshots = []
+        for label, path in [
+            ("Before", self.before_screenshot),
+            ("After", self.after_screenshot),
+            ("Expected", self.expected_screenshot),
+        ]:
+            if path:
+                screenshots.append(f"`!{label} [{path}](./{path})`")
+        if screenshots:
+            lines.append("")
+            lines.append("**Visual Proofs:** " + ", ".join(screenshots))
+
+        # Machine-readable spec block (JSON)
+        lines.append("")
+        lines.append("```json")
+        lines.append(json_dumps(self.spec_block, indent=2))
+        lines.append("```")
+
+        return "\n".join(lines)
+
+
+# Ensure json.dumps is available for to_markdown()
+import json as _json_module
+
+json_dumps = _json_module.dumps
 
 
 # ── Defect normalization (used by core.py DefectTracker) ───────────────────────

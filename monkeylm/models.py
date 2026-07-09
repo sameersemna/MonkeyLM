@@ -203,11 +203,30 @@ When choosing your action, ADOPT one of the personas above. Declare:
 
     persona_fields = ""
     if testing_strategy is not None:
-        persona_fields = '\n  "persona_intent": "Rush User submitting form twice to expose race conditions",\n  "expected_reaction": "Server should deduplicate and return 409 Conflict",'
+        persona_fields = '\n      "persona_intent": "Rush User submitting form twice to expose race conditions",\n      "expected_reaction": "Server should deduplicate and return 409 Conflict",'
+
+    # Structured thinking enforcement block — always present
+    structured_thinking_block = """
+## STRUCTURED THINKING SEQUENCE (Mandatory — Follow This Order)
+
+Before selecting an action, you MUST reason through these three steps IN ORDER:
+
+### Step 1: INTENT — What are you trying to achieve?
+Define a clear, concrete testing intent. What specific behavior, edge case, or flow do you want to exercise or break? Be specific about the hypothesis you're testing (e.g., "I suspect this checkout form allows negative quantities to bypass server-side validation").
+
+### Step 2: STRATEGY REFERENCE — Which strategy from your briefing applies?
+Cross-reference your Intent against the Cognitive Testing Strategy above. Which persona does it align with? Which critical flow, edge case, or security concern does it target? If no strategy matches perfectly, explain why you're deviating.
+
+### Step 3: EXECUTION TARGET SELECTION — Which concrete element will you interact with?
+Select the precise DOM element ([id=N]) that best executes your Intent given your Strategy Reference. Justify why this specific target is the optimal probe vector. If multiple candidates exist, explain your selection criteria.
+
+---
+"""
 
     return f"""
 You are an Advanced Monkey Testing Agent. Your goal is to deeply test the app by filling forms, submitting data, and handling modals.
 {persona_context}
+{structured_thinking_block}
 Current Page State:
 {page_state}
 
@@ -237,12 +256,18 @@ Rules:
 
 Respond ONLY with JSON:
 {{
+  "reasoning": {{
+    "intent": "I suspect the checkout form allows negative quantities to bypass server-side validation",
+    "strategy_reference": "Adversarial User persona targeting edge case 'negative input in numeric fields'",
+    "target_justification": "[id=1] is the quantity input because it's a numeric field without visible min/max constraints, making it the optimal probe vector"
+  }},
   "action": "submit_form",
   "target": "[id=0]",
   "value": "",
-  "action_strategy": "HAPPY_UPSERT",{persona_fields}
+  "action_strategy": "EDGE_CASE_FUZZ",{persona_fields}
   "input_payloads": [
-    {{"target": "[id=1]", "value": "valid@example.com", "reason": "happy_valid_email"}}
+    {{"target": "[id=1]", "value": "-1", "reason": "negative quantity bypass probe"}},
+    {{"target": "[id=2]", "value": "valid@example.com", "reason": "happy_valid_email"}}
   ]
 }}
 """

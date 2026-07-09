@@ -1035,6 +1035,7 @@ async def execute_action(
     log_sink: Optional[List[Dict[str, Any]]] = None,
     persistence_engine: Any = None,
     worker_id: int = 0,
+    validation_prober: Any = None,  # ValidationProber instance (optional)
 ) -> Tuple[Optional[PageSnapshot], Dict[str, Any]]:
     """Execute a single action plan on the page and return (after_snapshot, log_entry).
 
@@ -1174,6 +1175,19 @@ async def execute_action(
                                 filled_payloads.append(
                                     {"target": payload_target, "value": payload_value[:120], "reason": payload_reason}
                                 )
+
+                                # Validation probing on form fields
+                                if validation_prober and validation_prober.should_probe():
+                                    try:
+                                        control_type = await locator.evaluate("el => el.type || 'text'")
+                                        probe_findings = await validation_prober.probe_field(
+                                            page, locator, control_type, step_num, f"submit_form:{payload_target}", payload_target
+                                        )
+                                        if probe_findings:
+                                            print(f"   \u26a0\ufe0f Validation probe found {len(probe_findings)} issue(s) on form field '{payload_target}'")
+                                    except Exception:
+                                        pass  # non-fatal probe failure
+
                             elif mode == "select":
                                 chosen, reason = await _fill_select_option(
                                     page, locator, payload_value, control_options, action_strategy
@@ -1277,6 +1291,21 @@ async def execute_action(
                                 "url": page.url,
                             },
                         )
+
+                    # Validation probing: send destructive input to check error handling
+                    if validation_prober and validation_prober.should_probe():
+                        try:
+                            control_type = await locator.evaluate(
+                                "el => el.type || (el.tagName === 'TEXTAREA' ? 'textarea' : '')"
+                            )
+                            probe_findings = await validation_prober.probe_field(
+                                page, locator, control_type or "text",
+                                step_num, f"{action}:{target}", target
+                            )
+                            if probe_findings:
+                                print(f"   \u26a0\ufe0f Validation probe found {len(probe_findings)} issue(s) on '{target}'")
+                        except Exception as probe_exc:
+                            _local_service_log(f"Step {step_num}: validation probe failed for '{target}': {probe_exc}")
             else:
                 raise Exception(f"Input or selectable target '{target}' not found")
 

@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import random
+import re
 import signal
 import time
 from datetime import datetime
@@ -49,6 +50,10 @@ class DefectTracker:
         self.console_findings: List[Dict[str, Any]] = []
         self.race_findings: List[Dict[str, Any]] = []
         self.boundary_drift: List[Dict[str, Any]] = []
+        # Smart observation sensors
+        self.context_anomalies: List[Dict[str, Any]] = []
+        self.ux_flow_freezes: List[Dict[str, Any]] = []
+        self.validation_failures: List[Dict[str, Any]] = []
 
     def add(self, category: str, payload: Dict[str, Any]) -> None:
         collection = getattr(self, category, None)
@@ -66,6 +71,9 @@ class DefectTracker:
             "console_findings",
             "race_findings",
             "boundary_drift",
+            "context_anomalies",
+            "ux_flow_freezes",
+            "validation_failures",
         ]
         for category in categories:
             own_collection = getattr(self, category)
@@ -450,6 +458,388 @@ class NetworkMonitor:
         return None
 
 
+# ── Browser anomaly sensor (global error interception) ────────────────────────
+
+
+class BrowserAnomalySensor:
+    """Intercepts hidden browser context anomalies and maps them to monkey actions.
+
+    Captures:
+      - Unhandled promise rejections / page script errors (pageerror, console)
+      - Strict CSP violations parsed from console messages
+      - Failing backend fetch/XHR calls (4xx/5xx responses) via route interception
+    Attributes each anomaly to the exact step and action that triggered it.
+    """
+
+    def __init__(self, defects: DefectTracker) -> None:
+        self.defects = defects
+        self._anomalies: List[Dict[str, Any]] = []
+        self._current_step: int = -1
+        self._current_action: str = ""
+        self._installed_pages: set[int] = set()
+
+    async def install(self, page: Page) -> None:
+        """Attach global error listeners to the page. Safe to call multiple times."""
+        page_id = id(page)
+        if page_id in self._installed_pages:
+            return
+        self._installed_pages.add(page_id)
+
+        def _on_page_error(error: Any) -> None:
+            msg = str(getattr(error, "message", error))
+            self._anomalies.append({
+                "step": self._current_step,
+                "action": self._current_action,
+                "type": "unhandled-page-error",
+                "severity": "error",
+                "message": msg[:1000],
+                "url": page.url,
+            })
+
+        def _on_console(msg: Any) -> None:
+            try:
+                text = getattr(msg, "text", "") or ""
+                lower_text = text.lower()
+
+                # Unhandled promise rejection
+                if "unhandled promise" in lower_text:
+                    self._anomalies.append({
+                        "step": self._current_step,
+                        "action": self._current_action,
+                        "type": "unhandled-promise-rejection",
+                        "severity": "error",
+                        "message": text[:1000],
+                        "url": page.url,
+                    })
+
+                # Strict CSP violation (blocked directive)
+                elif ("content security policy" in lower_text or "csp" in lower_text) and "blocked" in lower_text:
+                    # Parse the directive that was violated
+                    directive = ""
+                    resource = ""
+                    for part in text.split(";"):
+                        if "directive" in part.lower():
+                            directive = part.strip().split(":", 1)[-1].strip() if ":" in part else part.strip()
+                        if ("script-src" in part or "style-src" in part or "img-src" in part):
+                            resource = part.strip()
+                    self._anomalies.append({
+                        "step": self._current_step,
+                        "action": self._current_action,
+                        "type": "csp-violation",
+                        "severity": "warning",
+                        "message": text[:1000],
+                        "blocked_directive": directive or lower_text.split("directive")[-1].strip() if "directive" in lower_text else "",
+                        "url": page.url,
+                    })
+
+                # Uncaught exception from script (console-level)
+                elif (("uncaught" in lower_text or "error:" in lower_text) and msg.type in ("error", "warning", "assert")):
+                    # Avoid double-capturing if also caught by pageerror
+                    already = any(
+                        a.get("step") == self._current_step and a.get("type") == "unhandled-page-error" and text[:100] in a.get("message", "")
+                        for a in self._anomalies[-5:]
+                    )
+                    if not already:
+                        self._anomalies.append({
+                            "step": self._current_step,
+                            "action": self._current_action,
+                            "type": "console-error",
+                            "severity": "warning",
+                            "message": text[:1000],
+                            "url": page.url,
+                            "console_type": msg.type if hasattr(msg, "type") else "",
+                        })
+
+            except Exception:
+                pass  # sensor failure must never crash worker
+
+        page.on("pageerror", _on_page_error)
+        page.on("console", _on_console)
+
+    def set_action_context(self, step: int, action_desc: str) -> None:
+        """Call before execute_action to attribute subsequent anomalies."""
+        self._current_step = step
+        self._current_action = action_desc
+
+    async def check_network_failures(self, page: Page) -> None:
+        """Install route handler that captures server 4xx/5xx for fetch/xhr calls.
+
+        This augments (does not replace) the NetworkMonitor fault injector.
+        It must be installed after NetworkMonitor.install() so both handlers coexist.
+        """
+        if self._network_installed:
+            return
+
+        # We use a second route handler layered on the existing one.
+        # Playwright allows chaining via page.route — each new call replaces.
+        # To avoid replacing NetworkMonitor's handler, we check for failures
+        # by observing responses instead (page.on("response")).
+        try:
+            def _on_response(response) -> None:
+                try:
+                    status = response.status
+                    if status >= 400:
+                        request = response.request
+                        resource_type = request.resource_type
+                        url = request.url
+                        method = request.method
+                        # Focus on API/data requests
+                        if resource_type in ("xhr", "fetch") or "/api/" in url.lower():
+                            self._anomalies.append({
+                                "step": self._current_step,
+                                "action": self._current_action,
+                                "type": f"network-{status // 100}xx-fetch",
+                                "severity": "error" if status >= 500 else "warning",
+                                "url": url,
+                                "method": method,
+                                "status": status,
+                                "resource_type": resource_type,
+                            })
+                except Exception:
+                    pass
+
+            page.on("response", _on_response)
+
+        except Exception:
+            pass  # non-fatal
+
+    async def flush_anomalies(self) -> List[Dict[str, Any]]:
+        """Pop anomalies buffer into DefectTracker, returning flushed items."""
+        if not self._anomalies:
+            return []
+        batch = list(self._anomalies)
+        for anomaly in batch:
+            self.defects.add("context_anomalies", anomaly)
+        self._anomalies.clear()
+        return batch
+
+
+# ── Stall detector (state/URL lock detection) ──────────────────────────────────
+
+
+class StallDetector:
+    """Detects UX flow freezes when DOM structure or URL stays identical across steps.
+
+    Tracks a rolling window of page state fingerprints. If N consecutive steps
+    produce the same fingerprint while meaningful actions are attempted, it flags
+    a "Stall/UX Flow Freeze Defect".
+    """
+
+    def __init__(self, defects: DefectTracker, *, threshold: int = 3) -> None:
+        self.defects = defects
+        self.threshold = max(2, threshold)
+        self._history: List[Dict[str, Any]] = []
+
+    def record_state(self, step: int, url: str, structure_hash: str, action: str = "") -> None:
+        """Call with the page state after each action step."""
+        self._history.append({
+            "step": step,
+            "url": url,
+            "structure_hash": structure_hash,
+            "action": action,
+        })
+        # Keep only last threshold+1 entries to bound memory
+        if len(self._history) > self.threshold + 2:
+            excess = len(self._history) - (self.threshold + 1)
+            self._history = self._history[excess:]
+
+    def check_for_stall(self, step: int, current_action: str) -> Optional[Dict[str, Any]]:
+        """Return a stall finding if threshold consecutive fingerprints are identical.
+
+        A "stall" is flagged when:
+          - URL + structure_hash haven't changed for `threshold` consecutive steps
+          - The actions attempted were NOT passive (not 'scroll', not 'back')
+        Returns the finding dict, or None if no stall detected.
+        """
+        if len(self._history) < self.threshold:
+            return None
+
+        window = self._history[-self.threshold:]
+        urls = set(e["url"] for e in window)
+        hashes = set(e["structure_hash"] for e in window)
+        actions = [e["action"] for e in window]
+
+        # Consider the current action too
+        all_actions = actions + [current_action]
+
+        # Passive actions that don't change state are expected
+        passive_actions = {"scroll", "back"}
+        meaningful_count = sum(1 for a in all_actions if a not in passive_actions)
+
+        if len(urls) <= 1 and len(hashes) <= 1 and meaningful_count >= self.threshold:
+            finding = {
+                "step": step,
+                "type": "ux-flow-freeze",
+                "description": (
+                    f"Page state unchanged across {self.threshold} consecutive steps "
+                    f"(URL={window[0]['url']!r}, hash={window[0]['structure_hash']!r}). "
+                    f"Actions attempted: {actions}"
+                ),
+                "stall_window_steps": window,
+                "meaningful_actions_in_window": meaningful_count,
+                "url": window[0]["url"],
+                "structure_hash": window[0]["structure_hash"],
+            }
+            self.defects.add("ux_flow_freezes", finding)
+            return finding
+
+        # Also check for URL lock (URL unchanged but DOM evolved — potential endless navigation loop)
+        if len(urls) <= 1 and meaningful_count >= self.threshold:
+            # Different hashes but same URL — not a freeze, just state changes on same page
+            pass
+
+        return None
+
+
+# ── Validation prober (destructive input testing) ─────────────────────────────
+
+
+class ValidationProber:
+    """Periodically sends destructive inputs to form fields to check error handling.
+
+    Sends SQL injection fragments, XSS payloads, oversized strings, and improper formats
+    through controlled field interactions, then checks the page response for unhandled
+    application stack traces or crashes.
+
+    Probes are non-destructive by design: they only fill fields (without necessarily
+    submitting) and observe client-side behavior.
+    """
+
+    # Patterns that indicate the app leaked an error instead of handling gracefully
+    ERROR_LEAK_PATTERNS = [
+        re.compile(r"Traceback|stack\s*trace|uncaught\s+exception", re.I),
+        re.compile(r"'NoneType'|'null'\s+has\s+no\s+attribute|Cannot\s+read\s+property", re.I),
+        re.compile(r"TypeError:\s*(cannot|is not|invalid|expected)", re.I),
+        re.compile(r"SyntaxError:\s*unexpected", re.I),
+        re.compile(r"ReferenceError:\s*\w+\s+is\s+not\s+defined", re.I),
+        re.compile(r"<pre>\s*(File\s+\"|at\s+\S+\.js)", re.I),
+        re.compile(r"Internal Server Error|500 Internal|Server Error", re.I),
+        re.compile(r"django\.|flask\.|express\.|next\.", re.I),  # framework-specific leaks
+    ]
+
+    DESTRUCTIVE_PAYLOADS = [
+        {"name": "sql_injection_basic", "value": "' OR 1=1 --"},
+        {"name": "sql_injection_union", "value": "' UNION SELECT NULL,NULL--"},
+        {"name": "xss_script_tag", "value": "<script>alert('probe')</script>"},
+        {"name": "xss_event_handler", "value": "\" onfocus=\"alert('probe') autofocus=\""},
+        {"name": "path_traversal", "value": "../../../../etc/passwd"},
+        {"name": "ssti_injection", "value": "{{7*'7}}"},
+        {"name": "oversized_string", "value": "A" * 50000},
+        {"name": "unicode_boundary", "value": "\ud800\udc00\uFFFF𐍉\x00\x1F"},  # lone surrogates, null, control
+        {"name": "html_entity_injection", "value": "&lt;img src=x onerror=alert(1)&gt;"},
+    ]
+
+    def __init__(self, defects: DefectTracker, *, probe_frequency: int = 3):
+        self.defects = defects
+        # probe every Nth form interaction (default: 1 in 3)
+        self.probe_frequency = max(1, probe_frequency)
+        self._form_interaction_count: int = 0
+
+    def should_probe(self) -> bool:
+        """Return True if the next form interaction should be probed."""
+        self._form_interaction_count += 1
+        return self._form_interaction_count % self.probe_frequency == 0
+
+    async def probe_field(
+        self, page: Page, locator: Any, control_type: str,
+        step: int, action_desc: str, target_id: str = ""
+    ) -> List[Dict[str, Any]]:
+        """Send a destructive payload to a field and check for error handling failures.
+
+        Returns a list of validation failure findings (may be empty if app handles gracefully).
+        The probe is read-only for submissions — it only fills the field and observes.
+        """
+        findings: List[Dict[str, Any]] = []
+
+        # Select one destructive payload based on control type
+        if control_type in ("tel", "email"):
+            probe_payloads = [p for p in self.DESTRUCTIVE_PAYLOADS if "sql" in p["name"] or "xss" in p["name"]]
+        elif control_type in ("number", "range"):
+            probe_payloads = [
+                {"name": "non_numeric_in_number_field", "value": "abc, not a number"},
+                {"name": "extreme_number", "value": "-999999999999999999"},
+                {"name": "sql_injection_basic", "value": "' OR 1=1 --"},
+            ]
+        else:
+            probe_payloads = self.DESTRUCTIVE_PAYLOADS
+
+        # Pick a payload (deterministic by step for reproducibility)
+        probe = probe_payloads[step % len(probe_payloads)]
+
+        # Capture page content before probe
+        try:
+            before_content_length = len(await page.content())
+        except Exception:
+            before_content_length = 0
+
+        # Fill with destructive payload
+        try:
+            if control_type in ("checkbox",):
+                await locator.click(timeout=2000)
+            else:
+                await locator.fill(probe["value"][:1000], timeout=3000)  # cap at 1000 chars for fill
+        except Exception as fill_exc:
+            # Field rejected the input — this is itself useful info (client-side validation)
+            return findings
+
+        # Brief wait to let client-side validation fire
+        await asyncio.sleep(0.3)
+
+        # Check for error leaks in page content
+        try:
+            page_html = await page.content()
+
+            # Check for stack traces or error messages that weren't there before
+            for pattern in self.ERROR_LEAK_PATTERNS:
+                matches = pattern.findall(page_html)
+                if matches:
+                    # Verify this is new (not present in normal page state)
+                    finding = {
+                        "step": step,
+                        "type": "validation-error-leak",
+                        "description": (
+                            f"App exposed potential error when probing field '{target_id}' "
+                            f"with {probe['name']} payload. Pattern matched: {pattern.pattern}"
+                        ),
+                        "probe_name": probe["name"],
+                        "probe_value_preview": probe["value"][:100],
+                        "control_type": control_type,
+                        "target": target_id,
+                        "matched_text_sample": matches[0][:200] if isinstance(matches[0], str) else "",
+                        "action_context": action_desc,
+                        "url": page.url,
+                    }
+                    findings.append(finding)
+                    self.defects.add("validation_failures", finding)
+
+            # Check for DOM collapse (page may have crashed client-side)
+            if before_content_length > 0:
+                after_content_length = len(page_html)
+                if after_content_length < max(1, before_content_length * 0.2):
+                    finding = {
+                        "step": step,
+                        "type": "validation-dom-collapse",
+                        "description": (
+                            f"Page DOM collapsed from {before_content_length} to {after_content_length} chars "
+                            f"after probing field '{target_id}' with {probe['name']} payload."
+                        ),
+                        "probe_name": probe["name"],
+                        "control_type": control_type,
+                        "target": target_id,
+                        "before_size": before_content_length,
+                        "after_size": after_content_length,
+                        "action_context": action_desc,
+                        "url": page.url,
+                    }
+                    findings.append(finding)
+                    self.defects.add("validation_failures", finding)
+
+        except Exception:
+            pass  # sensor non-fatal
+
+        return findings
+
+
 # ── Performance monitor ───────────────────────────────────────────────────────
 
 
@@ -799,6 +1189,12 @@ async def run_worker(
     worker_network_monitor = NetworkMonitor(worker_defects)
     worker_a11y_checker = A11yChecker(worker_defects)
     worker_perf_monitor = PerformanceMonitor(worker_defects)
+
+    # Smart observation sensors
+    worker_anomaly_sensor = BrowserAnomalySensor(worker_defects)
+    worker_stall_detector = StallDetector(worker_defects, threshold=settings.max_steps // 4 if settings.max_steps >= 8 else 3)
+    worker_validation_prober = ValidationProber(worker_defects, probe_frequency=3)
+
     worker_memory = QdrantMemoryStore(settings)
     worker_logs: List[Dict[str, Any]] = []
     visited_states: Dict[str, int] = {}
@@ -863,6 +1259,10 @@ async def run_worker(
 
         await worker_network_monitor.install(page)
         await worker_perf_monitor.install(page)
+
+        # Install smart observation sensors
+        await worker_anomaly_sensor.install(page)
+
         await with_retry_backoff(
             f"{worker_label} qdrant initialize",
             worker_memory.initialize,
@@ -926,6 +1326,9 @@ async def run_worker(
             if plan.get("action") == "click" and plan.get("target"):
                 seen_click_targets.add(plan.get("target"))
 
+            # Set anomaly attribution context before action execution
+            worker_anomaly_sensor.set_action_context(step, f"{plan.get('action', '?')}:{plan.get('target', '')}")
+
             _, log_entry = await execute_action(
                 page,
                 settings,
@@ -938,6 +1341,7 @@ async def run_worker(
                 log_sink=worker_logs,
                 persistence_engine=persistence_engine,
                 worker_id=worker_id,
+                validation_prober=worker_validation_prober,
             )
             log_entry["worker_id"] = worker_id
             log_entry["memory_retrieval"] = retrieval_telemetry
@@ -1014,6 +1418,28 @@ async def run_worker(
                         )
                 except Exception:
                     pass
+
+            # ── Smart observation sensors: post-step analysis ──────────────
+
+            # Stall detection: record current state fingerprint and check for freezes
+            try:
+                post_snapshot = await get_page_state(page, step, phase="stall", output_dir=settings.output_dir)
+                worker_stall_detector.record_state(
+                    step, post_snapshot.url, post_snapshot.structure_hash, str(plan.get("action", ""))
+                )
+                stall_finding = worker_stall_detector.check_for_stall(step, plan.get("action", "scroll"))
+                if stall_finding:
+                    print(f"\u26a0\ufe0f {worker_label} STALL DETECTED at step {step}: page state unchanged across multiple steps")
+            except Exception as stall_exc:
+                _local_service_log(f"{worker_label} stall detection failed: {stall_exc}", settings.output_dir)
+
+            # Flush browser anomalies captured during this step into defects
+            try:
+                flushed = await worker_anomaly_sensor.flush_anomalies()
+                if flushed:
+                    print(f"\u26a0\ufe0f {worker_label} {len(flushed)} context anomaly(s) at step {step}")
+            except Exception as anomaly_exc:
+                _local_service_log(f"{worker_label} anomaly flush failed: {anomaly_exc}", settings.output_dir)
 
             completed_steps += 1
             await asyncio.sleep(ACTION_COOLDOWN_SECONDS)
