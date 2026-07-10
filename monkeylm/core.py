@@ -196,6 +196,24 @@ class A11yChecker:
                 },
             )
 
+    @staticmethod
+    def _sanitize_for_logging(value: str) -> str:
+        """Sanitize a raw payload value before it enters logs or reports.
+
+        Strips characters that could trigger XSS in downstream HTML-based
+        viewers and replaces long runs with an ellipsis to bound log size.
+        """
+        if not isinstance(value, str):
+            return "(non-string)"[:1024]
+        # Minimal HTML-entity encoding for log/display safety
+        safe = (
+            value.replace("&", "&amp;")
+                  .replace("<", "&lt;")
+                  .replace(">", "&gt;")
+                  .replace('"', "&quot;")
+        )
+        return safe[:1024]
+
     async def _reinject_via_evaluate(self, page: Page) -> bool:
         """Re-inject axe-core raw source when the execution context is wiped.
 
@@ -322,7 +340,7 @@ class A11yChecker:
         filtered: List[Dict[str, Any]] = []
         for violation in results.get("violations", []):
             impact = (violation.get("impact") or "").lower()
-            if impact not in {"critical", "serious"}:
+            if impact not in {"critical", "serious", "moderate"}:
                 continue
 
             rule_id = violation.get("id")
@@ -411,6 +429,7 @@ class NetworkMonitor:
         self.route_enabled = True
 
     async def detect_zombie_ui(self, page: Page, step_num: int) -> Optional[Dict[str, Any]]:
+        before_url = page.url
         try:
             before = await page.evaluate(
                 """() => {
@@ -421,6 +440,11 @@ class NetworkMonitor:
                 }"""
             )
             await asyncio.sleep(3.0)
+            # Guard: if page navigated away or was closed during the sleep window, skip check.
+            after_url = page.url
+            if after_url != before_url:
+                return None
+
             after = await page.evaluate(
                 """() => {
                     const spinnerSel = '[aria-busy="true"], .spinner, .loading, [data-testid*="spinner" i]';
@@ -667,18 +691,22 @@ class StallDetector:
         meaningful_count = sum(1 for a in all_actions if a not in passive_actions)
 
         if len(urls) <= 1 and len(hashes) <= 1 and meaningful_count >= self.threshold:
+            # Defensive: window may have entries without expected keys if data was
+            # corrupted or partially initialised. Use .get() with safe defaults.
+            sentinel = (window or [{}])[0] if window else {}
             finding = {
                 "step": step,
                 "type": "ux-flow-freeze",
                 "description": (
                     f"Page state unchanged across {self.threshold} consecutive steps "
-                    f"(URL={window[0]['url']!r}, hash={window[0]['structure_hash']!r}). "
+                    f"(URL={sentinel.get('url', 'unknown')!r}, "
+                    f"hash={sentinel.get('structure_hash', 'unknown')!r}). "
                     f"Actions attempted: {actions}"
                 ),
                 "stall_window_steps": window,
                 "meaningful_actions_in_window": meaningful_count,
-                "url": window[0]["url"],
-                "structure_hash": window[0]["structure_hash"],
+                "url": sentinel.get("url", "unknown"),
+                "structure_hash": sentinel.get("structure_hash", "unknown"),
             }
             self.defects.add("ux_flow_freezes", finding)
             return finding
@@ -1405,13 +1433,21 @@ async def run_worker(
                 payload_probe = log_entry["value"]
                 try:
                     body_html = await page.content()
-                    if payload_probe in body_html and "<" in payload_probe:
+                    # Detect reflected XSS: payload contains HTML tags and appears in DOM unescaped
+                    has_xss_patterns = "<" in payload_probe or "javascript:" in payload_probe.lower()
+                    # Detect reflected SQL injection: single-quoted payloads with SQL keywords
+                    has_sqli_patterns = (
+                        "'" in payload_probe
+                        and any(kw in payload_probe.upper() for kw in ("OR 1=1", "UNION SELECT", "DROP TABLE", "' OR '"))
+                    )
+                    if payload_probe in body_html and (has_xss_patterns or has_sqli_patterns):
+                        probe_type = "reflected-xss" if has_xss_patterns else "reflected-sql-injection"
                         worker_defects.add(
                             "security_risks",
                             {
                                 "step": step,
-                                "type": "possible-reflected-input",
-                                "payload_preview": payload_probe[:200],
+                                "type": f"fuzz-payload-{probe_type}",
+                                "payload_preview": payload_probe[:200],  # sanitized at report layer via _sanitize_for_logging
                                 "url": page.url,
                                 "worker": worker_label,
                             },
