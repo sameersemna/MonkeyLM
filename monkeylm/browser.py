@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import ipaddress
 import os
 import random
 import re
 import subprocess
+import urllib.parse
 from typing import Any, Dict, List, Optional, Tuple
 
 from playwright.async_api import Dialog, JSHandle, Page
 
+from monkeylm.core import sanitize_for_storage
 from monkeylm.config import (
     ACTION_COOLDOWN_SECONDS,
     AXE_CDN_URL,
@@ -225,10 +228,16 @@ async def capture_dom_and_layout(page: Page) -> Dict[str, Any]:
                     submitCandidateId = elementIdMap.get(submitBtn);
                 }
 
+                var actionVal = normalizeAttr(formEl, 'action');
+                var methodVal = normalizeAttr(formEl, 'method') || 'get';
+                // Sanitize form action: strip javascript: and data: URIs
+                if (/^javascript:/i.test(actionVal) || /^data:/i.test(actionVal)) {
+                    actionVal = '';
+                }
                 forms.push({
                     form_id: fid,
-                    action: normalizeAttr(formEl, 'action'),
-                    method: normalizeAttr(formEl, 'method') || 'get',
+                    action: actionVal,
+                    method: methodVal,
                     control_ids: controlIds,
                     submit_candidate_id: submitCandidateId,
                 });
@@ -568,6 +577,11 @@ def compare_screenshots_pixelmatch(
         except Exception as exc:
             result["error"] = f"python_pixelmatch_failed: {exc}"
 
+    # Validate all file paths before passing to subprocess
+    safe_before = os.path.abspath(before_path)
+    safe_after = os.path.abspath(after_path)
+    safe_diff = os.path.abspath(diff_image_path)
+    
     try:
         node_script = (
             "const fs=require('fs');"
@@ -582,7 +596,7 @@ def compare_screenshots_pixelmatch(
             "console.log(JSON.stringify({mismatch:m,total:w*h}));"
         )
         completed = subprocess.run(
-            ["node", "-e", node_script, before_path, after_path, diff_image_path],
+            ["node", "-e", node_script, safe_before, safe_after, safe_diff],
             check=True,
             capture_output=True,
             text=True,
@@ -616,6 +630,39 @@ async def _check_and_handle_dialogs(page: Page) -> None:
         pass
 
 
+def _validate_navigation_url(url: str) -> str:
+    """Validate navigation URL to prevent open redirect and SSRF attacks.
+    
+    Rejects non-string, empty, non-http(s) schemes, and private/reserved IPs.
+    Returns the validated URL on success.
+    """
+    if not isinstance(url, str):
+        raise TypeError(f"Navigation URL must be a string, got {type(url).__name__}")
+    cleaned = url.strip()
+    if not cleaned:
+        raise ValueError("Navigation URL is empty")
+    
+    parsed = urllib.parse.urlparse(cleaned)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(
+            f"Navigation to '{parsed.scheme}' URI scheme is not allowed"
+        )
+    
+    # SSRF: block private/reserved IPs
+    try:
+        host = parsed.hostname
+        if host:
+            addr = ipaddress.ip_address(host)
+            if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_multicast:
+                raise ValueError(f"Navigation to private/reserved IP ({host}) is blocked")
+    except ValueError:
+        if isinstance(host, str) and not host.startswith("["):
+            raise ValueError(f"Navigation to IP '{host}' blocked (SSRF protection)")
+        # hostname is a domain name — allow
+    
+    return cleaned
+
+
 async def resilient_page_goto(
     page: Page,
     url: str,
@@ -627,6 +674,7 @@ async def resilient_page_goto(
 ) -> Optional[Any]:
     """Navigate to URL with resilient retry logic for transient failures.
     
+    Validates the URL for open redirect and SSRF protection before navigation.
     Handles net::ERR_ABORTED errors, waits for network idle, and verifies
     native dialog states before releasing control back to the VLM agent.
     
@@ -642,6 +690,13 @@ async def resilient_page_goto(
         Response object from successful navigation, or None if all retries failed
     """
     last_error = None
+    
+    # Open redirect / SSRF guard
+    try:
+        url = _validate_navigation_url(url)
+    except (TypeError, ValueError) as exc:
+        print(f"❌ {phase}: Navigation URL rejected: {exc}")
+        return None
     
     for attempt in range(max_retries):
         try:
@@ -747,7 +802,11 @@ async def launch_context_with_fallback(
     worker_label: str,
 ) -> Tuple[Any, Dict[str, Any]]:
     """Launch Chromium with sandbox first; no-sandbox fallback if explicitly allowed."""
-    base_args = [f"--window-size={settings.browser_window_size}", "--disable-blink-features=AutomationControlled"]
+    window_size = str(settings.browser_window_size)
+    # Validate window size format: must match WxH numeric pattern
+    if not re.match(r"^\d+x\d+$", window_size):
+        window_size = "1280x720"
+    base_args = [f"--window-size={window_size}", "--disable-blink-features=AutomationControlled"]
     sandbox_args = list(base_args)
     no_sandbox_args = base_args + ["--no-sandbox", "--disable-setuid-sandbox"]
 
@@ -826,16 +885,24 @@ async def launch_context_with_fallback(
 def _extract_target_id(target: Any) -> Optional[int]:
     if isinstance(target, int):
         return target if target >= 0 else None
+    if not isinstance(target, (str, float, bool)):
+        return None
     target_str = str(target or "").strip()
     if not target_str:
         return None
 
     if target_str.isdigit():
-        return int(target_str)
+        parsed = int(target_str)
+        if parsed < 0:
+            return None
+        return parsed
 
     match = re.search(r"\[id\s*=\s*(\d+)\]", target_str, re.IGNORECASE)
     if match:
-        return int(match.group(1))
+        parsed = int(match.group(1))
+        if parsed < 0:
+            return None
+        return parsed
     return None
 
 
@@ -913,7 +980,8 @@ async def _fill_select_option(
 
 async def handle_dialog(dialog: Dialog) -> None:
     """Global dialog handler: randomly accept or dismiss native alerts."""
-    print(f"   -> 🚨 Native Dialog Detected: {dialog.message}")
+    safe_msg = sanitize_for_storage(str(dialog.message), max_len=512)
+    print(f"   -> 🚨 Native Dialog Detected: {safe_msg}")
     if random.random() > 0.5:
         await dialog.accept()
         print("   -> Accepted dialog")
@@ -1054,6 +1122,7 @@ async def execute_action(
     before_snapshot = await get_page_state(page, step_num, phase="before", output_dir=settings.output_dir)
     perf_before = await perf_monitor.snapshot(page)
 
+    safe_page_url = sanitize_for_storage(page.url, max_len=1024)
     log_entry = {
         "step": step_num,
         "action": action,
@@ -1064,7 +1133,7 @@ async def execute_action(
         "status": "SUCCESS",
         "error": None,
         "screenshot": None,
-        "url": page.url,
+        "url": safe_page_url,
     }
 
     # Cross-worker action-path deduplication via Redis lock
@@ -1086,7 +1155,7 @@ async def execute_action(
 
     try:
         if action == "scroll":
-            await page.evaluate(f"window.scrollBy(0, {random.choice([-500, 500])})")
+            await page.evaluate("window.scrollBy(0, arguments[0])", random.choice([-500, 500]))
 
         elif action == "back":
             history_length = await page.evaluate("() => window.history.length")
@@ -1286,9 +1355,9 @@ async def execute_action(
                             {
                                 "step": step_num,
                                 "type": "fuzz-payload-injected",
-                                "target": target,
-                                "payload_preview": payload[:200],
-                                "url": page.url,
+                                "target": sanitize_for_storage(str(target), max_len=256),
+                                "payload_preview": sanitize_for_storage(payload[:200], max_len=256),
+                                "url": sanitize_for_storage(page.url, max_len=1024),
                             },
                         )
 
@@ -1313,7 +1382,7 @@ async def execute_action(
             await page.wait_for_load_state("networkidle", timeout=5000)
         except Exception:
             pass
-        log_entry["url"] = page.url
+        log_entry["url"] = sanitize_for_storage(page.url, max_len=1024)
 
         after_snapshot = await get_page_state(page, step_num, phase="after", output_dir=settings.output_dir)
         perf_after = await perf_monitor.snapshot(page)
@@ -1327,7 +1396,7 @@ async def execute_action(
                     "step": step_num,
                     "type": "layout-instability",
                     "max_shift_px": max_shift,
-                    "url": after_snapshot.url,
+                    "url": sanitize_for_storage(after_snapshot.url, max_len=1024),
                     "before_hash": before_snapshot.structure_hash,
                     "after_hash": after_snapshot.structure_hash,
                 },
@@ -1345,7 +1414,7 @@ async def execute_action(
                     "type": "dom-collapse",
                     "before_elements": len(before_snapshot.elements),
                     "after_elements": len(after_snapshot.elements),
-                    "url": after_snapshot.url,
+                    "url": sanitize_for_storage(after_snapshot.url, max_len=1024),
                 },
             )
 
@@ -1363,12 +1432,12 @@ async def execute_action(
                     "diff_pixels": visual_diff.get("diff_pixels"),
                     "engine": visual_diff.get("engine"),
                     "diff_image": os.path.basename(visual_diff.get("diff_image", "")),
-                    "url": after_snapshot.url,
+                    "url": sanitize_for_storage(after_snapshot.url, max_len=1024),
                 },
             )
 
         perf_findings = await perf_monitor.detect_bottlenecks(
-            perf_before, perf_after, step_num, action, after_snapshot.url
+            perf_before, perf_after, step_num, action, sanitize_for_storage(after_snapshot.url, max_len=1024)
         )
         log_entry["performance_findings"] = len(perf_findings)
 
@@ -1423,12 +1492,12 @@ async def execute_action(
                 "step": step_num,
                 "type": f"functional-failure:{action}",
                 "severity": "error",
-                "selector": target if target.strip() else "(none)",
-                "html_snippet": html_context[:500] if html_context else "",
-                "failure_reason": error_msg[:300],
+                "selector": sanitize_for_storage(target, max_len=256) if target.strip() else "(none)",
+                "html_snippet": sanitize_for_storage(html_context[:500], max_len=512) if html_context else "",
+                "failure_reason": sanitize_for_storage(error_msg[:300], max_len=512),
                 "remediation_advice": remediation_text,
                 "screenshot_path": screenshot_name if log_entry.get("screenshot") == screenshot_name else "",
-                "url": page.url,
+                "url": sanitize_for_storage(page.url, max_len=1024),
             },
         )
 
