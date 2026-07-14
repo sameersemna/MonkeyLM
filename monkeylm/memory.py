@@ -9,6 +9,7 @@ import logging
 import os
 import random
 import re
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -114,23 +115,90 @@ def _normalize_url_for_baseline_lookup(url: str, preserve_routes: Optional[List[
     return normalized if normalized else "/"
 
 
+def _sanitize_path_component(value: Any, fallback: str = "unknown") -> str:
+    """Sanitize an untrusted string into a single safe filesystem segment.
+
+    Keeps only alphanumerics, dots, underscores and dashes; everything else is
+    folded to an underscore. Crucially collapses ``..`` (and any multi-dot run)
+    and strips leading dots so the segment can never behave as a parent-directory
+    reference or traversal-shaped path element. Empty or traversal-shaped input
+    falls back to a fixed safe label.
+    """
+    if not isinstance(value, str):
+        return fallback
+    cleaned = re.sub(r"[^a-zA-Z0-9._-]", "_", value)
+    # Neutralize parent-dir references and hidden-segment shapes.
+    cleaned = re.sub(r"\.{2,}", "_", cleaned)
+    cleaned = cleaned.lstrip(".")
+    if not cleaned or cleaned in (".", "..", "-", "_"):
+        return fallback
+    # Bound segment length to avoid absurd filenames.
+    return cleaned[:128]
+
+
 def _baseline_lookup_path(domain: str, route: str) -> str:
-    """Compute the canonical lookup path for baseline data.
+    """Compute the canonical, traversal-safe lookup path for baseline data.
 
     Args:
         domain: The domain name (e.g., 'example.com').
         route: The normalized route path (e.g., '/login').
 
     Returns:
-        Absolute directory path in reports/{domain}/data/ structure.
+        Absolute directory path in reports/{domain}/baseline/{route} structure,
+        guaranteed to remain inside the configured reports base directory.
     """
-    # Sanitize domain and route for filesystem safety
-    safe_domain = re.sub(r'[^a-zA-Z0-9._-]', '_', domain)
-    safe_route = re.sub(r'[^a-zA-Z0-9._-]', '_', route or "") or "root"
+    safe_domain = _sanitize_path_component(domain, "unknown")
+    safe_route = _sanitize_path_component(route or "", "root")
 
-    base_dir = os.environ.get("MONKEYLM_REPORTS_DIR", "reports")
-    lookup_path = os.path.join(base_dir, safe_domain, "baseline", safe_route)
-    return os.path.abspath(lookup_path)
+    base_dir = Path(os.environ.get("MONKEYLM_REPORTS_DIR", "reports")).resolve()
+    candidate = (base_dir / safe_domain / "baseline" / safe_route).resolve()
+
+    # Enforce containment: the resolved path must live inside base_dir. If an
+    # attacker-supplied domain/route somehow escapes (defense-in-depth), refuse
+    # to return the escaped path and fall back to the base directory instead.
+    try:
+        candidate.relative_to(base_dir)
+    except ValueError:
+        _baseline_logger.warning(
+            "Refused baseline lookup path escaping base dir for domain=%r route=%r",
+            domain, route,
+        )
+        return str(base_dir)
+    return str(candidate)
+
+
+def _secure_atomic_write(path: str | os.PathLike, data: str | bytes, *, mode: int = 0o600) -> None:
+    """Write ``data`` to ``path`` atomically with restrictive permissions.
+
+    Content is streamed to a secure temporary sibling file first, then moved into
+    place with ``os.replace`` so a crash mid-write can never leave a partially
+    written/corrupt target. The temp file is created 0o600 so other local
+    processes cannot read sensitive memory or session data.
+    """
+    target = Path(path).resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=str(target.parent), prefix=".tmp_")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            if isinstance(data, str):
+                fh.write(data.encode("utf-8"))
+            else:
+                fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp_name, mode)
+        os.replace(tmp_name, str(target))
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
+def _secure_atomic_write_json(path: str | os.PathLike, payload: Any, *, mode: int = 0o600) -> None:
+    """Serialize ``payload`` to JSON and write it via :func:`_secure_atomic_write`."""
+    _secure_atomic_write(path, json.dumps(payload, ensure_ascii=False), mode=mode)
 
 
 # ── Hash-based embedding helpers ───────────────────────────────────────────────
