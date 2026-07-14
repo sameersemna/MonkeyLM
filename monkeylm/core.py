@@ -14,6 +14,22 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from playwright.async_api import Page, Route, async_playwright
 
+def sanitize_for_storage(value: str, max_len: int = 1024) -> str:
+    '''Sanitize untrusted string (console text, page errors, URLs) before storage.
+
+    Strips characters that could trigger XSS in downstream HTML-based
+    viewers, replaces long runs with an ellipsis, and rejects non-string types.
+    '''
+    if not isinstance(value, str):
+        return '(non-string)'[:max_len]
+    # HTML-entity encoding for log/display safety
+    safe = value
+    safe = safe.replace('&', '&amp;')
+    safe = safe.replace('<', '&lt;')
+    safe = safe.replace('>', '&gt;')
+    safe = safe.replace('"', '&quot;')
+    return safe[:max_len]
+
 from monkeylm.config import (
     ACTION_COOLDOWN_SECONDS,
     Faker,
@@ -107,14 +123,15 @@ class Fuzzer:
         if self.fake:
             candidates.extend(
                 [
-                    self.fake.email(),
-                    self.fake.user_name(),
-                    self.fake.name(),
-                    self.fake.uri(),
-                    self.fake.pystr(min_chars=20, max_chars=100),
+                    str(self.fake.email()),  # type-safe
+                    str(self.fake.user_name()),
+                    str(self.fake.name()),
+                    str(self.fake.uri()),
+                    str(self.fake.pystr(min_chars=20, max_chars=100)),
                 ]
             )
-        return random.choice(candidates)
+        chosen = random.choice(candidates)
+        return str(chosen)[:1024]
 
 
 # ── Accessibility checker ────────────────────────────────────────────────────
@@ -203,16 +220,7 @@ class A11yChecker:
         Strips characters that could trigger XSS in downstream HTML-based
         viewers and replaces long runs with an ellipsis to bound log size.
         """
-        if not isinstance(value, str):
-            return "(non-string)"[:1024]
-        # Minimal HTML-entity encoding for log/display safety
-        safe = (
-            value.replace("&", "&amp;")
-                  .replace("<", "&lt;")
-                  .replace(">", "&gt;")
-                  .replace('"', "&quot;")
-        )
-        return safe[:1024]
+        return sanitize_for_storage(value, max_len=1024)
 
     async def _reinject_via_evaluate(self, page: Page) -> bool:
         """Re-inject axe-core raw source when the execution context is wiped.
@@ -228,7 +236,12 @@ class A11yChecker:
         try:
             # Read and cache the local file once; cache on subsequent calls
             if self._cached_raw_axe is None:
-                self._cached_raw_axe = AXE_CORE_PATH.read_text(encoding="utf-8")
+                raw = AXE_CORE_PATH.read_text(encoding="utf-8")
+                # Bound the raw JS payload to prevent memory exhaustion
+                if len(raw) > 10 * 1024 * 1024:  # 10 MiB limit
+                    self._cached_raw_axe = raw[:10 * 1024 * 1024]
+                else:
+                    self._cached_raw_axe = raw
 
             await page.evaluate(self._cached_raw_axe)
             return True
@@ -510,19 +523,21 @@ class BrowserAnomalySensor:
         self._installed_pages.add(page_id)
 
         def _on_page_error(error: Any) -> None:
-            msg = str(getattr(error, "message", error))
+            raw = str(getattr(error, "message", error))
+            msg = sanitize_for_storage(raw, max_len=1000)
             self._anomalies.append({
                 "step": self._current_step,
                 "action": self._current_action,
                 "type": "unhandled-page-error",
                 "severity": "error",
-                "message": msg[:1000],
-                "url": page.url,
+                "message": msg,
+                "url": sanitize_for_storage(page.url, max_len=2048),
             })
 
         def _on_console(msg: Any) -> None:
             try:
-                text = getattr(msg, "text", "") or ""
+                raw = getattr(msg, "text", "") or ""
+                text = sanitize_for_storage(raw, max_len=1000)
                 lower_text = text.lower()
 
                 # Unhandled promise rejection
@@ -569,9 +584,9 @@ class BrowserAnomalySensor:
                             "action": self._current_action,
                             "type": "console-error",
                             "severity": "warning",
-                            "message": text[:1000],
-                            "url": page.url,
-                            "console_type": msg.type if hasattr(msg, "type") else "",
+                            "message": text,
+                            "url": sanitize_for_storage(page.url, max_len=2048),
+                            "console_type": str(getattr(msg, "type", "")),
                         })
 
             except Exception:
@@ -605,7 +620,7 @@ class BrowserAnomalySensor:
                     if status >= 400:
                         request = response.request
                         resource_type = request.resource_type
-                        url = request.url
+                        url = sanitize_for_storage(request.url, max_len=2048)
                         method = request.method
                         # Focus on API/data requests
                         if resource_type in ("xhr", "fetch") or "/api/" in url.lower():
@@ -615,9 +630,9 @@ class BrowserAnomalySensor:
                                 "type": f"network-{status // 100}xx-fetch",
                                 "severity": "error" if status >= 500 else "warning",
                                 "url": url,
-                                "method": method,
+                                "method": sanitize_for_storage(str(method), max_len=64),
                                 "status": status,
-                                "resource_type": resource_type,
+                                "resource_type": sanitize_for_storage(str(resource_type), max_len=64),
                             })
                 except Exception:
                     pass
@@ -777,6 +792,16 @@ class ValidationProber:
         Returns a list of validation failure findings (may be empty if app handles gracefully).
         The probe is read-only for submissions — it only fills the field and observes.
         """
+        # Runtime type validation for dynamic inputs
+        if not isinstance(step, int) or step < 0:
+            return []
+        if not isinstance(action_desc, str):
+            action_desc = str(action_desc)[:512]
+        if not isinstance(target_id, str):
+            target_id = str(target_id)[:512]
+        if not isinstance(control_type, str):
+            control_type = str(control_type)[:64]
+
         findings: List[Dict[str, Any]] = []
 
         # Select one destructive payload based on control type
@@ -792,7 +817,8 @@ class ValidationProber:
             probe_payloads = self.DESTRUCTIVE_PAYLOADS
 
         # Pick a payload (deterministic by step for reproducibility)
-        probe = probe_payloads[step % len(probe_payloads)]
+        probe_idx = step % len(probe_payloads) if len(probe_payloads) > 0 else 0
+        probe = probe_payloads[probe_idx]
 
         # Capture page content before probe
         try:
@@ -1258,7 +1284,7 @@ async def run_worker(
         page.on("dialog", handle_dialog)
 
         def _console_listener(msg: Any) -> None:
-            text = msg.text
+            text = sanitize_for_storage(getattr(msg, "text", ""), max_len=2048)
             if "content security policy" in text.lower() or "csp" in text.lower():
                 worker_defects.add(
                     "console_findings",
@@ -1266,7 +1292,7 @@ async def run_worker(
                         "step": -1,
                         "type": "csp-warning",
                         "message": text,
-                        "url": page.url,
+                        "url": sanitize_for_storage(page.url, max_len=2048),
                         "worker": worker_label,
                     },
                 )
@@ -1430,25 +1456,27 @@ async def run_worker(
             log_entry["memory_write"] = worker_memory.consume_last_write_telemetry()
 
             if log_entry.get("value"):
-                payload_probe = log_entry["value"]
+                raw_probe = log_entry["value"]
+                payload_probe = sanitize_for_storage(str(raw_probe), max_len=200)
                 try:
                     body_html = await page.content()
                     # Detect reflected XSS: payload contains HTML tags and appears in DOM unescaped
-                    has_xss_patterns = "<" in payload_probe or "javascript:" in payload_probe.lower()
+                    # NOTE: operates on sanitized text — only flags structural patterns, not exact match
+                    has_xss_patterns = "&lt;" in payload_probe or "javascript:" in payload_probe.lower()
                     # Detect reflected SQL injection: single-quoted payloads with SQL keywords
                     has_sqli_patterns = (
-                        "'" in payload_probe
-                        and any(kw in payload_probe.upper() for kw in ("OR 1=1", "UNION SELECT", "DROP TABLE", "' OR '"))
+                        "'" in raw_probe
+                        and any(kw in raw_probe.upper() for kw in ("OR 1=1", "UNION SELECT", "DROP TABLE", "' OR '"))
                     )
-                    if payload_probe in body_html and (has_xss_patterns or has_sqli_patterns):
+                    if raw_probe in body_html and (has_xss_patterns or has_sqli_patterns):
                         probe_type = "reflected-xss" if has_xss_patterns else "reflected-sql-injection"
                         worker_defects.add(
                             "security_risks",
                             {
                                 "step": step,
                                 "type": f"fuzz-payload-{probe_type}",
-                                "payload_preview": payload_probe[:200],  # sanitized at report layer via _sanitize_for_logging
-                                "url": page.url,
+                                "payload_preview": payload_probe,
+                                "url": sanitize_for_storage(page.url, max_len=2048),
                                 "worker": worker_label,
                             },
                         )
