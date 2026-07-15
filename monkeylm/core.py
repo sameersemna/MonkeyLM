@@ -555,12 +555,12 @@ class BrowserAnomalySensor:
                 elif ("content security policy" in lower_text or "csp" in lower_text) and "blocked" in lower_text:
                     # Parse the directive that was violated
                     directive = ""
-                    resource = ""
+                    _csp_resource = ""  # noqa: F841 – CSP diagnostic, kept for future telemetry
                     for part in text.split(";"):
                         if "directive" in part.lower():
                             directive = part.strip().split(":", 1)[-1].strip() if ":" in part else part.strip()
                         if ("script-src" in part or "style-src" in part or "img-src" in part):
-                            resource = part.strip()
+                            _csp_resource = part.strip()  # noqa: F841
                     self._anomalies.append({
                         "step": self._current_step,
                         "action": self._current_action,
@@ -832,7 +832,7 @@ class ValidationProber:
                 await locator.click(timeout=2000)
             else:
                 await locator.fill(probe["value"][:1000], timeout=3000)  # cap at 1000 chars for fill
-        except Exception as fill_exc:
+        except Exception:
             # Field rejected the input — this is itself useful info (client-side validation)
             return findings
 
@@ -1533,7 +1533,6 @@ test_logs: List[Dict[str, Any]] = []
 
 async def main(settings: Settings) -> None:
     """Orchestrate the full monkey test run."""
-    from monkeylm.browser import launch_context_with_fallback
     from monkeylm.memory import PersistenceEngine, QdrantMemoryStore
     from monkeylm.models import _is_cloud_vision_model
     from monkeylm.reporting import generate_markdown_report, generate_json_summary, generate_pdf_report

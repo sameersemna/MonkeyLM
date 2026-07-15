@@ -12,19 +12,16 @@ import subprocess
 import urllib.parse
 from typing import Any, Dict, List, Optional, Tuple
 
-from playwright.async_api import Dialog, JSHandle, Page
+from playwright.async_api import Dialog, Page
 
 from monkeylm.core import sanitize_for_storage
 from monkeylm.config import (
-    ACTION_COOLDOWN_SECONDS,
-    AXE_CDN_URL,
     LAYOUT_SHIFT_THRESHOLD_PX,
     PageSnapshot,
     FormControlRecord,
     FormRecord,
     VISUAL_DIFF_THRESHOLD_RATIO,
     Image,
-    ImageDraw,
     pil_pixelmatch,
     _local_service_log,
 )
@@ -1109,7 +1106,7 @@ async def execute_action(
 
     All monitor classes are passed explicitly — no global reads.
     """
-    from monkeylm.models import annotate_relevant_screenshot, generate_form_payload, _step_defects_summary
+    from monkeylm.models import annotate_relevant_screenshot, _step_defects_summary
 
     action = action_plan.get("action", "scroll")
     target = action_plan.get("target", "")

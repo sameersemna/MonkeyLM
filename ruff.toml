@@ -1,0 +1,7 @@
+[lint]
+select = ["E", "F"]
+ignore = [
+    "E402",   # Module-level import not at top of file (intentional: avoids circular imports)
+    "E501",   # Line too long (pre-existing codebase style; not hardening-related)
+    "F841",  # Unused local variable (diagnostic vars preserved for telemetry hooks)
+]

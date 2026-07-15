@@ -50,19 +50,6 @@ redis_asyncio = _optional_import("redis.asyncio")
 httpx = _optional_import("httpx")
 
 try:
-    from reportlab.lib import colors
-    from reportlab.lib.pagesizes import letter
-    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-    from reportlab.lib.units import inch
-    from reportlab.platypus import (
-        Image as RLImage,
-        PageBreak,
-        Paragraph,
-        SimpleDocTemplate,
-        Spacer,
-        Table,
-        TableStyle,
-    )
 
     _REPORTLAB_AVAILABLE = True
 except Exception:

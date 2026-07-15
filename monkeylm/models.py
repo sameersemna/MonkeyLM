@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import random
 import re
 from typing import Any, Dict, List, Optional, Tuple
@@ -12,7 +11,6 @@ from typing import Any, Dict, List, Optional, Tuple
 import ollama
 
 from monkeylm.config import (
-    Faker,
     FormControlRecord,
     Image,
     ImageDraw,
@@ -533,7 +531,6 @@ async def decide_next_action(
     # Determine if there's at least one valid form hierarchy on the page
     has_valid_forms = False
     if snapshot is not None:
-        from monkeylm.config import PageSnapshot as PS  # avoid circular import
         
         for form in snapshot.forms:
             # A valid form must be inside a <form> element (not loose_controls) 
