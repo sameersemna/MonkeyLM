@@ -1,18 +1,36 @@
 """Markdown, JSON, and PDF report generators for MonkeyLM test runs."""
 
 from __future__ import annotations
-
 import json
 import os
+import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
-
 from monkeylm.config import (
     DefectTicket,
     Image,
     _REPORTLAB_AVAILABLE,
     _local_service_log,
 )
+from monkeylm.memory import _secure_atomic_write
+
+
+def redact_sensitive_content(text: str) -> str:
+    """Redact sensitive patterns from text before writing to files."""
+    # Redact specific patterns mentioned in requirements
+    text = re.sub(r'sk-\w+', '[REDACTED]', text, flags=re.IGNORECASE)
+    text = re.sub(r'gsk_\w+', '[REDACTED]', text, flags=re.IGNORECASE)
+    text = re.sub(r'ollama-\w+', '[REDACTED]', text, flags=re.IGNORECASE)
+    
+    # Redact common password-related terms
+    password_patterns = [
+        r'(password|passwd|secret|token|key|credential|api_key|access_key|auth_token|session_token|api_secret|private_key|public_key|auth_secret|jwt_token|access_secret)',
+    ]
+    
+    for pattern in password_patterns:
+        text = re.sub(pattern, '[REDACTED]', text, flags=re.IGNORECASE)
+    
+    return text
 
 # Conditional ReportLab imports
 if _REPORTLAB_AVAILABLE:
@@ -1015,8 +1033,8 @@ Actions included: Clicking, Typing, Form Submission, Modal Handling, and State E
         md_content += f"| {log['step']} | {log['action']} | {log['target'][:30]}... | {icon} |\n"
 
     report_path = os.path.join(settings.output_dir, "test_report.md")
-    with open(report_path, "w", encoding="utf-8") as f:
-        f.write(md_content)
+    redacted_md_content = redact_sensitive_content(md_content)
+    _secure_atomic_write(report_path, redacted_md_content, mode=0o640)
 
     print(f"\n📄 Report generated: {report_path}")
     print(f"💾 All artifacts saved in: {settings.output_dir}")
@@ -1086,8 +1104,8 @@ def generate_json_summary(
         "logs": test_logs,
     }
     output_path = os.path.join(settings.output_dir, "results.json")
-    with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(summary, f, indent=2)
+    redacted_summary = redact_sensitive_content(json.dumps(summary, indent=2))
+    _secure_atomic_write(output_path, redacted_summary, mode=0o600)
     print(f"📦 JSON summary generated: {output_path}")
 
 
@@ -1401,6 +1419,8 @@ def generate_pdf_report(
                 story.append(Spacer(1, 0.15 * inch))
 
         doc.build(story)
+        # Enforce restrictive file permissions for PDF output
+        os.chmod(pdf_path, 0o640)
         print(f"📄 PDF audit report generated: {pdf_path}")
     except Exception as exc:
         print(f"⚠️ PDF generation failed: {exc}")
@@ -1725,11 +1745,11 @@ def generate_interactive_html_report(
 </body>
 </html>'''
 
-    # Write to file
+    # Write to file with redaction and secure permissions
     output_dir = getattr(settings, "output_dir", None) or os.getcwd()
     report_path = os.path.join(output_dir, "accessibility_report.html")
-    with open(report_path, "w", encoding="utf-8") as f:
-        f.write(html_content)
+    redacted_html = redact_sensitive_content(html_content)
+    _secure_atomic_write(report_path, redacted_html, mode=0o640)
 
     print(f"🌐 Interactive HTML report generated: {report_path}")
     return report_path
