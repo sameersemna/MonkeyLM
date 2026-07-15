@@ -9,10 +9,15 @@ The canonical location for all functionality is now `monkeylm/`.
 """
 from __future__ import annotations
 
+import argparse
 import asyncio
+import logging
 import random
+import signal
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 # Re-export Playwright async API for backward compat
 from playwright.async_api import Dialog, Page, Route, async_playwright
@@ -76,9 +81,6 @@ from monkeylm.config import (
     MAX_ALLOWED_RETRIES,
     MAX_ALLOWED_RETRY_BASE_DELAY_SECONDS,
     SHUTDOWN_EVENT,
-    _local_service_log,
-    _normalize_window_size,
-    _optional_import,
     is_in_scope,
     normalize_action_plan,
     parse_cli_args,
@@ -88,7 +90,6 @@ from monkeylm.config import (
     _register_graceful_shutdown_signals,
     load_settings,
     build_redis_key,
-    _normalize_defect,
 )
 
 from monkeylm.models import (
@@ -97,14 +98,7 @@ from monkeylm.models import (
     generate_form_payload,
     _is_cloud_vision_model,
     _build_vision_annotation_prompt,
-    _is_ollama_overload_error,
     _extract_target_id,
-    _extract_all_target_ids,
-    _break_action_loop,
-    _step_defects_summary,
-    apply_state_aware_policy,
-    _extract_box_from_prose,
-    _draw_red_box_arrow,
 )
 
 from monkeylm.core import (
@@ -113,7 +107,6 @@ from monkeylm.core import (
     Fuzzer,
     NetworkMonitor,
     PerformanceMonitor,
-    WorkerRunResult,
     allocate_worker_steps,
     build_worker_user_data_dir,
     with_retry_backoff,
@@ -211,90 +204,185 @@ SHUTDOWN_EVENT: asyncio.Event = asyncio.Event()
 # ── Backward-compatible runtime override ───────────────────────────────────────
 
 
+# Whitelisted global keys and their expected types for safe mutation.
+# Any key NOT in this set will be rejected if passed via CLI args.
+_RUNTIME_GLOBAL_SCHEMA: Dict[str, type] = {
+    "TARGET_URL": str,
+    "OLLAMA_MODEL": str,
+    "OLLAMA_TIMEOUT_SECONDS": (int, float),
+    "VISION_MODEL": str,
+    "MAX_STEPS": int,
+    "MAX_STEPS_PER_WORKER": int,
+    "WORKERS": int,
+    "WORKER_NAVIGATION_RETRIES": int,
+    "WORKER_QDRANT_INIT_RETRIES": int,
+    "WORKER_BOUNDARY_RECOVERY_RETRIES": int,
+    "RETRY_BASE_DELAY_SECONDS": (int, float),
+    "HEADLESS": bool,
+    "BROWSER_WINDOW_SIZE": str,
+    "NO_VIEWPORT": bool,
+    "POSTGRES_DSN": str,
+    "REDIS_URL": str,
+    "REDIS_PREFIX": str,
+    "REDIS_PATH_LOCK_TTL_SECONDS": int,
+    "GOLDEN_BASELINE_MODE": str,
+    "STRICT_PERSISTENCE": bool,
+    "QDRANT_URL": str,
+    "QDRANT_COLLECTION": str,
+    "QDRANT_EMBEDDING_PROVIDER": str,
+    "QDRANT_EMBEDDING_MODEL": str,
+    "QDRANT_RERANK_ENABLED": bool,
+    "QDRANT_RERANK_MODEL": str,
+    "QDRANT_CANDIDATE_LIMIT": int,
+    "QDRANT_ADMIN_ACTION": str,
+    "QDRANT_ENABLE_READS": bool,
+    "QDRANT_ENABLE_WRITES": bool,
+}
+
+# Global keys that carry sensitive credentials — logged on mutation.
+_SENSITIVE_CONFIG_KEYS: frozenset = frozenset([
+    "POSTGRES_DSN",
+    "REDIS_URL",
+])
+
+# Positive integer globals — must be >= 1.
+_POS_INT_KEYS: frozenset = frozenset([
+    "MAX_STEPS",
+    "MAX_STEPS_PER_WORKER",
+    "WORKERS",
+    "WORKER_NAVIGATION_RETRIES",
+    "WORKER_QDRANT_INIT_RETRIES",
+    "WORKER_BOUNDARY_RECOVERY_RETRIES",
+    "REDIS_PATH_LOCK_TTL_SECONDS",
+    "QDRANT_CANDIDATE_LIMIT",
+])
+
+# Positive float globals — must be > 0.
+_POS_FLOAT_KEYS: frozenset = frozenset([
+    "OLLAMA_TIMEOUT_SECONDS",
+    "RETRY_BASE_DELAY_SECONDS",
+])
+
+# Allowed values for QDRANT_ADMIN_ACTION.
+_QDRANT_ADMIN_ACTIONS_ALLOWED: frozenset = frozenset(["", "inspect", "clear"])
+
+
+def _safe_set_global(key: str, value: Any) -> None:
+    """Set a module-level global variable with type and range validation.
+
+    Only keys present in _RUNTIME_GLOBAL_SCHEMA are accepted.  Values are
+    checked against their declared type and, for numeric keys, constrained to
+    positive ranges.  Sensitive keys (credentials) trigger a warning log.
+
+    Raises ``ValueError`` on type mismatch, range violation, or unwhitelisted key.
+    """
+    if key not in _RUNTIME_GLOBAL_SCHEMA:
+        logger.warning("Runtime override rejected: key '%s' not in whitelist", key)
+        return
+
+    expected = _RUNTIME_GLOBAL_SCHEMA[key]
+    if not isinstance(value, expected):
+        try:
+            value = expected(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Invalid type for {key}: expected {expected}, got {type(value).__name__}"
+            ) from exc
+
+    if key in _POS_INT_KEYS and value <= 0:
+        raise ValueError(f"{key} must be a positive integer, got {value}")
+
+    if key in _POS_FLOAT_KEYS and value <= 0:
+        raise ValueError(f"{key} must be positive, got {value}")
+
+    if key == "QDRANT_ADMIN_ACTION" and value not in _QDRANT_ADMIN_ACTIONS_ALLOWED:
+        raise ValueError(
+            f"QDRANT_ADMIN_ACTION must be one of {_QDRANT_ADMIN_ACTIONS_ALLOWED - {''}}, got {value!r}"
+        )
+
+    globals()[key] = value
+
+    if key in _SENSITIVE_CONFIG_KEYS:
+        logger.warning("Sensitive config override applied: %s", key)
+
+
 def apply_runtime_overrides(args: argparse.Namespace) -> None:
     """Apply runtime configuration overrides from CLI args to module-level globals.
-    
-    This function mutates the module-level mutable globals to reflect runtime
-    configuration overrides, maintaining backward compatibility with existing
-    code that expects global variable mutation for configuration.
+
+    All values pass through ``_safe_set_global`` for type safety and range
+    constraints, replacing the previous unvalidated direct globals() writes.
     """
-    # Set the seed first to initialize the global random state
-    if args.seed is not None:
-        global ACTIVE_SEED
-        ACTIVE_SEED = str(args.seed)
-        random.seed(int(args.seed))
-    
-    # Update runtime configuration globals
-    if args.target_url is not None:
-        globals()['TARGET_URL'] = args.target_url
-    if args.ollama_model is not None:
-        globals()['OLLAMA_MODEL'] = args.ollama_model
-    if args.ollama_timeout_seconds is not None:
-        globals()['OLLAMA_TIMEOUT_SECONDS'] = args.ollama_timeout_seconds
-    if args.vision_model is not None:
-        globals()['VISION_MODEL'] = args.vision_model
-    if args.max_steps is not None:
-        globals()['MAX_STEPS'] = args.max_steps
-    if args.max_steps_per_worker is not None:
-        globals()['MAX_STEPS_PER_WORKER'] = args.max_steps_per_worker
-    if args.workers is not None:
-        globals()['WORKERS'] = args.workers
-    if args.worker_navigation_retries is not None:
-        globals()['WORKER_NAVIGATION_RETRIES'] = args.worker_navigation_retries
-    if args.worker_qdrant_init_retries is not None:
-        globals()['WORKER_QDRANT_INIT_RETRIES'] = args.worker_qdrant_init_retries
-    if args.worker_boundary_recovery_retries is not None:
-        globals()['WORKER_BOUNDARY_RECOVERY_RETRIES'] = args.worker_boundary_recovery_retries
-    if args.retry_base_delay_seconds is not None:
-        globals()['RETRY_BASE_DELAY_SECONDS'] = args.retry_base_delay_seconds
-    if args.headless is not None:
-        globals()['HEADLESS'] = args.headless
-    if args.window_size is not None:
-        globals()['BROWSER_WINDOW_SIZE'] = args.window_size
-    if args.no_viewport is not None:
-        globals()['NO_VIEWPORT'] = args.no_viewport
-    if args.postgres_dsn is not None:
-        globals()['POSTGRES_DSN'] = args.postgres_dsn
-    if args.redis_url is not None:
-        globals()['REDIS_URL'] = args.redis_url
-    if args.redis_prefix is not None:
-        globals()['REDIS_PREFIX'] = args.redis_prefix
-    if args.redis_path_lock_ttl_seconds is not None:
-        globals()['REDIS_PATH_LOCK_TTL_SECONDS'] = args.redis_path_lock_ttl_seconds
-    if args.golden_baseline_mode is not None:
-        globals()['GOLDEN_BASELINE_MODE'] = args.golden_baseline_mode
-    if args.strict_persistence is not None:
-        globals()['STRICT_PERSISTENCE'] = args.strict_persistence
-    if getattr(args, 'qdrant_url', None) is not None:
-        globals()['QDRANT_URL'] = args.qdrant_url
-    if getattr(args, 'qdrant_collection', None) is not None:
-        globals()['QDRANT_COLLECTION'] = args.qdrant_collection
-    if getattr(args, 'qdrant_embedding_provider', None) is not None:
-        globals()['QDRANT_EMBEDDING_PROVIDER'] = args.qdrant_embedding_provider
-    if getattr(args, 'qdrant_embedding_model', None) is not None:
-        globals()['QDRANT_EMBEDDING_MODEL'] = args.qdrant_embedding_model
-    if getattr(args, 'qdrant_enable_rerank', None) is not None:
-        globals()['QDRANT_RERANK_ENABLED'] = args.qdrant_enable_rerank
-    if getattr(args, 'qdrant_rerank_model', None) is not None:
-        globals()['QDRANT_RERANK_MODEL'] = args.qdrant_rerank_model
-    if getattr(args, 'qdrant_candidate_limit', None) is not None:
-        globals()['QDRANT_CANDIDATE_LIMIT'] = args.qdrant_candidate_limit
-    if getattr(args, 'qdrant_admin_action', None) is not None:
-        globals()['QDRANT_ADMIN_ACTION'] = args.qdrant_admin_action
-    # Handle qdrant_inspect flag (maps to QDRANT_ADMIN_ACTION = "inspect")
-    if getattr(args, 'qdrant_inspect', False):
-        globals()['QDRANT_ADMIN_ACTION'] = "inspect"
-    # Handle qdrant_clear flag (maps to QDRANT_ADMIN_ACTION = "clear")
-    if getattr(args, 'qdrant_clear', False):
-        globals()['QDRANT_ADMIN_ACTION'] = "clear"
-    
-    # Handle boolean toggles (use getattr to handle missing attributes)
-    if getattr(args, 'qdrant_disable_reads', False):
-        globals()['QDRANT_ENABLE_READS'] = False
-    if getattr(args, 'qdrant_disable_writes', False) or getattr(args, 'qdrant_read_only', False):
-        globals()['QDRANT_ENABLE_WRITES'] = False
-    if getattr(args, 'qdrant_disable_rerank', False):
-        globals()['QDRANT_RERANK_ENABLED'] = False
+    # Set seed first (validate integer, clamp to reasonable range)
+    if getattr(args, "seed", None) is not None:
+        try:
+            seed_val = int(args.seed)
+        except (TypeError, ValueError):
+            raise ValueError(f"seed must be an integer, got {args.seed!r}")
+        global ACTIVE_SEED  # noqa: PLW0603
+        ACTIVE_SEED = str(seed_val)
+        random.seed(seed_val)
+
+    # Simple key mappings: args.<attr> -> GLOBAL_KEY
+    _SIMPLE_OVERRIDES: List[tuple] = [
+        ("target_url", "TARGET_URL"),
+        ("ollama_model", "OLLAMA_MODEL"),
+        ("ollama_timeout_seconds", "OLLAMA_TIMEOUT_SECONDS"),
+        ("vision_model", "VISION_MODEL"),
+        ("max_steps", "MAX_STEPS"),
+        ("max_steps_per_worker", "MAX_STEPS_PER_WORKER"),
+        ("workers", "WORKERS"),
+        ("worker_navigation_retries", "WORKER_NAVIGATION_RETRIES"),
+        ("worker_qdrant_init_retries", "WORKER_QDRANT_INIT_RETRIES"),
+        ("worker_boundary_recovery_retries", "WORKER_BOUNDARY_RECOVERY_RETRIES"),
+        ("retry_base_delay_seconds", "RETRY_BASE_DELAY_SECONDS"),
+        ("headless", "HEADLESS"),
+        ("window_size", "BROWSER_WINDOW_SIZE"),
+        ("no_viewport", "NO_VIEWPORT"),
+        ("postgres_dsn", "POSTGRES_DSN"),
+        ("redis_url", "REDIS_URL"),
+        ("redis_prefix", "REDIS_PREFIX"),
+        ("redis_path_lock_ttl_seconds", "REDIS_PATH_LOCK_TTL_SECONDS"),
+        ("golden_baseline_mode", "GOLDEN_BASELINE_MODE"),
+        ("strict_persistence", "STRICT_PERSISTENCE"),
+    ]
+
+    for attr, gkey in _SIMPLE_OVERRIDES:
+        val = getattr(args, attr, None)
+        if val is not None:
+            _safe_set_global(gkey, val)
+
+    # Qdrant-specific overrides (attrs may be missing on older argparsers)
+    _QDRANT_OVERRIDES: List[tuple] = [
+        ("qdrant_url", "QDRANT_URL"),
+        ("qdrant_collection", "QDRANT_COLLECTION"),
+        ("qdrant_embedding_provider", "QDRANT_EMBEDDING_PROVIDER"),
+        ("qdrant_embedding_model", "QDRANT_EMBEDDING_MODEL"),
+        ("qdrant_enable_rerank", "QDRANT_RERANK_ENABLED"),
+        ("qdrant_rerank_model", "QDRANT_RERANK_MODEL"),
+        ("qdrant_candidate_limit", "QDRANT_CANDIDATE_LIMIT"),
+    ]
+
+    for attr, gkey in _QDRANT_OVERRIDES:
+        val = getattr(args, attr, None)
+        if val is not None:
+            _safe_set_global(gkey, val)
+
+    # qdrant_admin_action — validated against allowlist
+    admin_action = getattr(args, "qdrant_admin_action", None)
+    if admin_action is not None:
+        _safe_set_global("QDRANT_ADMIN_ACTION", admin_action)
+    elif getattr(args, "qdrant_inspect", False):
+        globals()["QDRANT_ADMIN_ACTION"] = "inspect"
+    elif getattr(args, "qdrant_clear", False):
+        globals()["QDRANT_ADMIN_ACTION"] = "clear"
+
+    # Boolean toggle flags (hardcoded safe values — no user-controlled data)
+    if getattr(args, "qdrant_disable_reads", False):
+        globals()["QDRANT_ENABLE_READS"] = False
+    if getattr(args, "qdrant_disable_writes", False) or getattr(args, "qdrant_read_only", False):
+        globals()["QDRANT_ENABLE_WRITES"] = False
+    if getattr(args, "qdrant_disable_rerank", False):
+        globals()["QDRANT_RERANK_ENABLED"] = False
 
 
 # ── Backward-compatible wrappers for shutdown functions ────────────────────────
