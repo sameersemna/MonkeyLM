@@ -46,5 +46,5 @@ for line in shim_content.split('\n'):
                     shim_symbols.add(var_part)
 
 print(f"\nShim symbols ({len(shim_symbols)}):", sorted(shim_symbols))
-print(f"\nMissing from shim:", test_symbols - shim_symbols)
-print(f"\nExtra in shim:", shim_symbols - test_symbols)
+print("\nMissing from shim:", test_symbols - shim_symbols)
+print("\nExtra in shim:", shim_symbols - test_symbols)

@@ -21,7 +21,7 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 USER_DATA_DIR = os.path.abspath("./playwright_user_data")
 os.makedirs(USER_DATA_DIR, exist_ok=True)
 
-test_logs = []
+test_logs: list[dict] = []
 
 async def get_page_state(page: Page) -> str:
     try:
@@ -64,7 +64,7 @@ async def get_page_state(page: Page) -> str:
                 await page.wait_for_load_state("networkidle", timeout=10000)
                 # Retry once after navigation
                 return await get_page_state(page)
-            except:
+            except Exception:
                 return "URL: Loading...\nElements: []"
         raise e
 
@@ -186,7 +186,7 @@ async def execute_action(page: Page, action_plan: dict, step_num: int):
         try:
             await page.screenshot(path=os.path.join(OUTPUT_DIR, screenshot_name))
             log_entry["screenshot"] = screenshot_name
-        except:
+        except Exception:
             pass
 
     test_logs.append(log_entry)
@@ -278,7 +278,7 @@ async def main():
             # 🛑 Critical: Wait for navigation AFTER action before next loop
             try:
                 await page.wait_for_load_state("networkidle", timeout=5000)
-            except:
+            except Exception:
                 pass # Timeout is okay, we just proceed to next step
             
             await asyncio.sleep(1.0)

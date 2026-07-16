@@ -469,52 +469,69 @@ def load_settings(cli_args: Optional[argparse.Namespace] = None) -> Settings:
 
     # ── Apply .env-driven defaults (primary source) ────────────────────
     # Fetch from .env first, then environment variables, then Settings defaults
-    s.target_url = env_vars.get("TARGET_URL", os.getenv("TARGET_URL", s.target_url))
-    s.ollama_model = env_vars.get("OLLAMA_MODEL", os.getenv("OLLAMA_MODEL", s.ollama_model))
+    raw_target: str = env_vars.get("TARGET_URL") or os.getenv("TARGET_URL") or s.target_url
+    s.target_url = raw_target
+    raw_ollama: str = env_vars.get("OLLAMA_MODEL") or os.getenv("OLLAMA_MODEL") or s.ollama_model
+    s.ollama_model = raw_ollama
     ollama_timeout = _env_float("OLLAMA_TIMEOUT_SECONDS", s.ollama_timeout_seconds)
     s.ollama_timeout_seconds = max(1.0, _env_to_float(env_vars.get("OLLAMA_TIMEOUT_SECONDS"), ollama_timeout))
     
-    s.max_steps = max(1, int(env_vars.get("MAX_STEPS", s.max_steps)))
-    
-    s.workers = max(1, int(env_vars.get("WORKERS", s.workers)))
-    
-    s.max_steps_per_worker = max(
-        1, int(env_vars.get("MAX_STEPS_PER_WORKER", min(s.max_steps, DEFAULT_MAX_STEPS_PER_WORKER)))
-    )
-    
-    s.worker_navigation_retries = max(0, int(env_vars.get("WORKER_NAVIGATION_RETRIES", s.worker_navigation_retries)))
-    s.worker_qdrant_init_retries = max(0, int(env_vars.get("WORKER_QDRANT_INIT_RETRIES", s.worker_qdrant_init_retries)))
-    s.worker_boundary_recovery_retries = max(
-        0, int(env_vars.get("WORKER_BOUNDARY_RECOVERY_RETRIES", s.worker_boundary_recovery_retries))
-    )
-    s.retry_base_delay_seconds = max(0.1, float(env_vars.get("RETRY_BASE_DELAY_SECONDS", s.retry_base_delay_seconds)))
-    s.headless = _env_bool("HEADLESS", default=_env_to_bool(env_vars.get("HEADLESS"), s.headless))
-    s.browser_window_size = _normalize_window_size(env_vars.get("BROWSER_WINDOW_SIZE", os.getenv("BROWSER_WINDOW_SIZE", s.browser_window_size)))
-    s.no_viewport = _env_bool("NO_VIEWPORT", default=_env_to_bool(env_vars.get("NO_VIEWPORT"), s.no_viewport))
-    s.postgres_dsn = _env_str("POSTGRES_DSN", env_vars.get("POSTGRES_DSN", s.postgres_dsn))
-    s.redis_url = _env_str("REDIS_URL", env_vars.get("REDIS_URL", s.redis_url))
-    s.redis_prefix = _env_str("REDIS_PREFIX", env_vars.get("REDIS_PREFIX", s.redis_prefix))
-    s.redis_path_lock_ttl_seconds = max(1, int(env_vars.get("REDIS_PATH_LOCK_TTL_SECONDS", s.redis_path_lock_ttl_seconds)))
-    s.golden_baseline_mode = _env_str("GOLDEN_BASELINE_MODE", env_vars.get("GOLDEN_BASELINE_MODE", s.golden_baseline_mode)).lower()
-    s.strict_persistence = _env_bool("STRICT_PERSISTENCE", default=_env_to_bool(env_vars.get("STRICT_PERSISTENCE"), s.strict_persistence))
-    s.redis_state_ttl_seconds = max(60, int(env_vars.get("REDIS_STATE_TTL_SECONDS", s.redis_state_ttl_seconds)))
-    s.qdrant_url = _env_str("QDRANT_URL", env_vars.get("QDRANT_URL", s.qdrant_url))
-    s.qdrant_collection = _env_str("QDRANT_COLLECTION", env_vars.get("QDRANT_COLLECTION", s.qdrant_collection))
-    s.qdrant_vector_size = max(64, int(env_vars.get("QDRANT_VECTOR_SIZE", s.qdrant_vector_size)))
-    s.qdrant_enable_reads = _env_bool("QDRANT_ENABLE_READS", default=_env_to_bool(env_vars.get("QDRANT_ENABLE_READS"), s.qdrant_enable_reads))
-    s.qdrant_enable_writes = _env_bool("QDRANT_ENABLE_WRITES", default=_env_to_bool(env_vars.get("QDRANT_ENABLE_WRITES"), s.qdrant_enable_writes))
-    s.qdrant_embedding_provider = _env_str("QDRANT_EMBEDDING_PROVIDER", env_vars.get("QDRANT_EMBEDDING_PROVIDER", s.qdrant_embedding_provider)).lower()
-    s.qdrant_embedding_model = _env_str("QDRANT_EMBEDDING_MODEL", env_vars.get("QDRANT_EMBEDDING_MODEL", s.qdrant_embedding_model))
-    s.qdrant_admin_action = _env_str("QDRANT_ADMIN_ACTION", env_vars.get("QDRANT_ADMIN_ACTION", "")).lower()
-    s.qdrant_rerank_enabled = _env_bool("QDRANT_RERANK_ENABLED", default=_env_to_bool(env_vars.get("QDRANT_RERANK_ENABLED"), s.qdrant_rerank_enabled))
-    s.qdrant_rerank_model = _env_str("QDRANT_RERANK_MODEL", env_vars.get("QDRANT_RERANK_MODEL", s.qdrant_rerank_model))
-    s.qdrant_candidate_limit = max(3, int(env_vars.get("QDRANT_CANDIDATE_LIMIT", s.qdrant_candidate_limit)))
-    s.pdf_generate = _env_bool("PDF_GENERATE", default=_env_to_bool(env_vars.get("PDF_GENERATE"), s.pdf_generate))
-    s.pdf_vision_model = _env_str("PDF_VISION_MODEL", env_vars.get("PDF_VISION_MODEL", s.pdf_vision_model))
-    s.vision_model = _env_str("VISION_MODEL", env_vars.get("VISION_MODEL", s.vision_model))
-    s.pdf_vision_timeout_seconds = max(
-        1.0, float(env_vars.get("PDF_VISION_TIMEOUT_SECONDS", s.pdf_vision_timeout_seconds))
-    )
+    raw_max_steps = env_vars.get("MAX_STEPS")
+    s.max_steps = max(1, int(raw_max_steps) if raw_max_steps is not None else s.max_steps)
+
+    raw_workers = env_vars.get("WORKERS")
+    s.workers = max(1, int(raw_workers) if raw_workers is not None else s.workers)
+
+    raw_mspw = env_vars.get("MAX_STEPS_PER_WORKER")
+    s.max_steps_per_worker = max(1, int(raw_mspw) if raw_mspw is not None else min(s.max_steps, DEFAULT_MAX_STEPS_PER_WORKER))
+
+    raw_wnr = env_vars.get("WORKER_NAVIGATION_RETRIES")
+    s.worker_navigation_retries = max(0, int(raw_wnr) if raw_wnr is not None else s.worker_navigation_retries)
+    raw_wqi = env_vars.get("WORKER_QDRANT_INIT_RETRIES")
+    s.worker_qdrant_init_retries = max(0, int(raw_wqi) if raw_wqi is not None else s.worker_qdrant_init_retries)
+    raw_wbr = env_vars.get("WORKER_BOUNDARY_RECOVERY_RETRIES")
+    s.worker_boundary_recovery_retries = max(0, int(raw_wbr) if raw_wbr is not None else s.worker_boundary_recovery_retries)
+
+    raw_rbd = env_vars.get("RETRY_BASE_DELAY_SECONDS")
+    s.retry_base_delay_seconds = max(0.1, float(raw_rbd) if raw_rbd is not None else s.retry_base_delay_seconds)
+    ev_headless = env_vars.get("HEADLESS")
+    s.headless = _env_bool("HEADLESS", default=_env_to_bool(ev_headless, s.headless))
+    raw_bws = env_vars.get("BROWSER_WINDOW_SIZE") or os.getenv("BROWSER_WINDOW_SIZE") or s.browser_window_size
+    s.browser_window_size = _normalize_window_size(raw_bws)
+    ev_nv = env_vars.get("NO_VIEWPORT")
+    s.no_viewport = _env_bool("NO_VIEWPORT", default=_env_to_bool(ev_nv, s.no_viewport))
+    s.postgres_dsn = _env_str("POSTGRES_DSN", env_vars.get("POSTGRES_DSN") or s.postgres_dsn)
+    s.redis_url = _env_str("REDIS_URL", env_vars.get("REDIS_URL") or s.redis_url)
+    s.redis_prefix = _env_str("REDIS_PREFIX", env_vars.get("REDIS_PREFIX") or s.redis_prefix)
+    ev_rp = env_vars.get("REDIS_PATH_LOCK_TTL_SECONDS")
+    s.redis_path_lock_ttl_seconds = max(1, int(ev_rp) if ev_rp is not None else s.redis_path_lock_ttl_seconds)
+    s.golden_baseline_mode = _env_str("GOLDEN_BASELINE_MODE", env_vars.get("GOLDEN_BASELINE_MODE") or s.golden_baseline_mode).lower()
+    ev_sp = env_vars.get("STRICT_PERSISTENCE")
+    s.strict_persistence = _env_bool("STRICT_PERSISTENCE", default=_env_to_bool(ev_sp, s.strict_persistence))
+    ev_rsttl = env_vars.get("REDIS_STATE_TTL_SECONDS")
+    s.redis_state_ttl_seconds = max(60, int(ev_rsttl) if ev_rsttl is not None else s.redis_state_ttl_seconds)
+    s.qdrant_url = _env_str("QDRANT_URL", env_vars.get("QDRANT_URL") or s.qdrant_url)
+    s.qdrant_collection = _env_str("QDRANT_COLLECTION", env_vars.get("QDRANT_COLLECTION") or s.qdrant_collection)
+    ev_qvs = env_vars.get("QDRANT_VECTOR_SIZE")
+    s.qdrant_vector_size = max(64, int(ev_qvs) if ev_qvs is not None else s.qdrant_vector_size)
+    ev_ger = env_vars.get("QDRANT_ENABLE_READS")
+    s.qdrant_enable_reads = _env_bool("QDRANT_ENABLE_READS", default=_env_to_bool(ev_ger, s.qdrant_enable_reads))
+    ev_gew = env_vars.get("QDRANT_ENABLE_WRITES")
+    s.qdrant_enable_writes = _env_bool("QDRANT_ENABLE_WRITES", default=_env_to_bool(ev_gew, s.qdrant_enable_writes))
+    s.qdrant_embedding_provider = _env_str("QDRANT_EMBEDDING_PROVIDER", env_vars.get("QDRANT_EMBEDDING_PROVIDER") or s.qdrant_embedding_provider).lower()
+    s.qdrant_embedding_model = _env_str("QDRANT_EMBEDDING_MODEL", env_vars.get("QDRANT_EMBEDDING_MODEL") or s.qdrant_embedding_model)
+    s.qdrant_admin_action = _env_str("QDRANT_ADMIN_ACTION", env_vars.get("QDRANT_ADMIN_ACTION") or "").lower()
+    ev_qre = env_vars.get("QDRANT_RERANK_ENABLED")
+    s.qdrant_rerank_enabled = _env_bool("QDRANT_RERANK_ENABLED", default=_env_to_bool(ev_qre, s.qdrant_rerank_enabled))
+    s.qdrant_rerank_model = _env_str("QDRANT_RERANK_MODEL", env_vars.get("QDRANT_RERANK_MODEL") or s.qdrant_rerank_model)
+    ev_qcl = env_vars.get("QDRANT_CANDIDATE_LIMIT")
+    s.qdrant_candidate_limit = max(3, int(ev_qcl) if ev_qcl is not None else s.qdrant_candidate_limit)
+    ev_pg = env_vars.get("PDF_GENERATE")
+    s.pdf_generate = _env_bool("PDF_GENERATE", default=_env_to_bool(ev_pg, s.pdf_generate))
+    s.pdf_vision_model = _env_str("PDF_VISION_MODEL", env_vars.get("PDF_VISION_MODEL") or s.pdf_vision_model)
+    s.vision_model = _env_str("VISION_MODEL", env_vars.get("VISION_MODEL") or s.vision_model)
+    ev_pvt = env_vars.get("PDF_VISION_TIMEOUT_SECONDS")
+    s.pdf_vision_timeout_seconds = max(1.0, float(ev_pvt) if ev_pvt is not None else s.pdf_vision_timeout_seconds)
     s.strict_sandbox = _env_bool("STRICT_SANDBOX", default=_env_to_bool(env_vars.get("STRICT_SANDBOX"), s.strict_sandbox))
     s.allow_no_sandbox_fallback = _env_bool("ALLOW_NO_SANDBOX_FALLBACK", default=_env_to_bool(env_vars.get("ALLOW_NO_SANDBOX_FALLBACK"), s.allow_no_sandbox_fallback))
 
@@ -644,7 +661,7 @@ def _request_graceful_shutdown(signum: int, frame: Any) -> None:
     """Signal handler that requests a graceful shutdown."""
     global GRACEFUL_SHUTDOWN_REQUESTED
     if GRACEFUL_SHUTDOWN_REQUESTED:
-        signal.default_int_handler()
+        signal.default_int_handler(signum, frame)  # type: ignore[arg-type]
         return
 
     GRACEFUL_SHUTDOWN_REQUESTED = True
@@ -663,8 +680,8 @@ def _register_graceful_shutdown_signals() -> None:
     """Register SIGINT/SIGTERM handlers for graceful shutdown."""
     loop = asyncio.get_running_loop()
     try:
-        loop.add_signal_handler(signal.SIGINT, _request_graceful_shutdown)
-        loop.add_signal_handler(signal.SIGTERM, _request_graceful_shutdown)
+        loop.add_signal_handler(signal.SIGINT, lambda: _request_graceful_shutdown(signal.SIGINT, None))  # type: ignore[arg-type]
+        loop.add_signal_handler(signal.SIGTERM, lambda: _request_graceful_shutdown(signal.SIGTERM, None))  # type: ignore[arg-type]
     except NotImplementedError:
         signal.signal(signal.SIGINT, _request_graceful_shutdown)
         try:
@@ -830,7 +847,7 @@ class WorkerRunResult:
     allocated_steps: int
     completed_steps: int
     logs: List[Dict[str, Any]]
-    defects: "DefectTracker"  # noqa: F821
+    defects: Any  # DefectTracker from monkeylm.core – forward ref avoids circular import
     network_injections: List[Dict[str, Any]]
     launch_info: Dict[str, Any]
 

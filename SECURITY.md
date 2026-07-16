@@ -1,6 +1,6 @@
 # MonkeyLM Security Architecture
 
-This document outlines the security architecture, defensive controls, and hardened surfaces implemented across MonkeyLM (Steps 1–6).
+This document outlines the security architecture, defensive controls, and hardened surfaces implemented across MonkeyLM (Steps 1–8).
 
 ## Overview
 
@@ -73,6 +73,45 @@ Fuzzer payloads (`/etc/passwd`, SQLi strings, XSS tags) are intentional maliciou
 | Restrictive PDF permissions | `os.chmod(pdf_path, 0o640)` after ReportLab build |
 | Secure HTML report | `_secure_atomic_write(path, redacted_html_content, mode=0o640)` |
 
+## 7. Agent Hardening (`monkey_agent_advanced.py`) — Step 7
+
+| Control | Detail |
+|---|---|
+| Typed globals whitelist | `_RUNTIME_GLOBAL_SCHEMA` typed dict — only declared keys accepted; unknown keys rejected with log warning |
+| Safe mutation primitive | `_safe_set_global()` enforces type coercion, positive-numeric range validation |
+| Credential override warning | Writes to `POSTGRES_DSN` / `REDIS_URL` emit logging warnings |
+| Seed validation | Input validated for integer type before use |
+| No subprocess exposure | Audit confirmed zero `subprocess`, `shell=True`, or `os.environ` usage — file is a compatibility shim |
+
+## 8. Dependency Audit & Pinning (`requirements.txt`) — Step 8
+
+### CVE Remediation
+
+| Package | Old Version | New Version | CVE(s) Mitigated | Severity |
+|---|---|---|---|---|
+| **Pillow** | 11.3.0 | 12.3.0 | CVE-2026-55798 (command injection), CVE-2026-55379/80 (decompression bomb) | CRITICAL |
+
+### Version Upgrades (latest stable)
+
+| Package | Old → New | Notes |
+|---|---|---|
+| Faker | 37.8.0 → 40.31.0 | No known CVEs; upgrade for bug fixes |
+| pixelmatch | 0.3.0 → 0.4.0 | Minor library bump |
+| playwright | 1.60.0 → 1.61.0 | CVE-2025-9611 affects `@playwright/mcp` (npm), not PyPI package; upgrade for hygiene |
+| asyncpg | 0.30.0 → 0.31.0 | CVE-2020-17446 already addressed in 0.21.0+; upgrade for latest |
+| redis | 6.2.0 → 8.0.1 | No known client-side CVEs; full feature update |
+| python-dotenv | 1.0.1 → 1.2.2 | Minor improvements |
+| reportlab | 4.4.0 → 5.0.0 | CVE-2023-33733 (RCE) fixed in 3.6.13+; upgrade to latest major |
+
+### Unchanged Packages
+
+| Package | Version | Rationale |
+|---|---|---|
+| ollama | 0.6.2 | CVE-2026-5757 affects the Ollama server binary (GGUF quantization engine), not this Python HTTP client library |
+| httpx | 0.28.1 | Already latest; SSRF CVEs found in downstream consumers, not in httpx itself |
+
+> **All 10 dependencies strictly pinned with `==`. Zero wildcards or loose version constraints.**
+
 ---
 
 ## Threat Model Summary
@@ -85,6 +124,8 @@ Fuzzer payloads (`/etc/passwd`, SQLi strings, XSS tags) are intentional maliciou
 | SSRF via browser nav | `_validate_navigation_url()` IP/scheme blocking | `browser.py` |
 | Prompt Injection (LLM) | Fence-wrapped UNTRUSTED DATA with BOUNDARY directive | `models.py` |
 | Unsafe file writes (TOCTOU / partials) | Atomic temp→fsync→rename pipeline | `memory.py`, `reporting.py` |
+| Supply-chain (outdated deps) | Strict pinning (`==`) + CVE remediation at every audit cycle | `requirements.txt` |
+| Globals mutation from CLI args | `_RUNTIME_GLOBAL_SCHEMA` typed whitelist + `_safe_set_global()` | `monkey_agent_advanced.py` |
 
 ---
 
@@ -104,10 +145,10 @@ When adding new features or modifying existing code:
 3. Guard user-supplied paths/domains/routes through `_sanitize_path_component()` and verify containment with `relative_to()`.
 4. Never log raw Ollama responses or exception text — pass through `_redact_secrets()` first.
 5. Keep baseline data isolated within the designated output/baseline directory; never trust URL-derived path components.
+6. Run `pip-audit` (or manually cross-reference PyPI advisories) before merging dependency changes. Re-pin with `==`.
 
-## Remaining Targets (not yet hardened)
+---
 
-| File | Risk Area | Status |
-|---|---|---|
-| `monkey_agent_advanced.py` | subprocess invocation, env leakage | Pending — Step 7 |
-| `requirements.txt` | dependency CVE audit | Pending — Step 8 |
+## Cycle Status ✓
+
+All 8 steps of the AppSec Hardening cycle are complete as of 2026-07-16.

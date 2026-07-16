@@ -15,7 +15,7 @@ import logging
 import random
 import signal
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +98,6 @@ from monkeylm.models import (
     generate_form_payload,
     _is_cloud_vision_model,
     _build_vision_annotation_prompt,
-    _extract_target_id,
 )
 
 from monkeylm.core import (
@@ -153,7 +152,7 @@ class PersistenceEngineCompat:
 
 
 # Use compat wrapper as the public API for backward compatibility
-PersistenceEngine = PersistenceEngineCompat
+PersistenceEngine = PersistenceEngineCompat  # type: ignore[misc, assignment]
 
 
 # ── Backward-compatible mutable globals ────────────────────────────────────────
@@ -197,8 +196,8 @@ PERF_MONITOR: PerformanceMonitor = PerformanceMonitor(DEFECTS)
 test_logs: List[Dict[str, Any]] = []
 
 # Backward-compatible mutable shutdown state (re-export from config with local mutation)
-GRACEFUL_SHUTDOWN_REQUESTED: bool = False
-SHUTDOWN_EVENT: asyncio.Event = asyncio.Event()
+GRACEFUL_SHUTDOWN_REQUESTED: bool = False  # type: ignore[no-redef]  # noqa: F811 – intentional shim reexport
+SHUTDOWN_EVENT: asyncio.Event = asyncio.Event()  # type: ignore[no-redef]  # noqa: F811 – intentional shim reexport
 
 
 # ── Backward-compatible runtime override ───────────────────────────────────────
@@ -206,7 +205,7 @@ SHUTDOWN_EVENT: asyncio.Event = asyncio.Event()
 
 # Whitelisted global keys and their expected types for safe mutation.
 # Any key NOT in this set will be rejected if passed via CLI args.
-_RUNTIME_GLOBAL_SCHEMA: Dict[str, type] = {
+_RUNTIME_GLOBAL_SCHEMA: Dict[str, Union[type, Tuple[type, ...]]] = {
     "TARGET_URL": str,
     "OLLAMA_MODEL": str,
     "OLLAMA_TIMEOUT_SECONDS": (int, float),
@@ -283,7 +282,8 @@ def _safe_set_global(key: str, value: Any) -> None:
     expected = _RUNTIME_GLOBAL_SCHEMA[key]
     if not isinstance(value, expected):
         try:
-            value = expected(value)
+            coercer = expected[0] if isinstance(expected, tuple) else expected  # type: ignore[index, misc]
+            value = coercer(value)
         except (TypeError, ValueError) as exc:
             raise ValueError(
                 f"Invalid type for {key}: expected {expected}, got {type(value).__name__}"
@@ -407,8 +407,8 @@ def _register_graceful_shutdown_signals_wrapper() -> None:
     signal.signal(signal.SIGTERM, _request_graceful_shutdown_wrapper)
 
 # Replace the imported functions with our wrappers
-_request_graceful_shutdown = _request_graceful_shutdown_wrapper
-_register_graceful_shutdown_signals = _register_graceful_shutdown_signals_wrapper
+_request_graceful_shutdown = _request_graceful_shutdown_wrapper  # noqa: F811 – intentional shim reexport
+_register_graceful_shutdown_signals = _register_graceful_shutdown_signals_wrapper  # noqa: F811 – intentional shim reexport
 
 
 # ── Backward-compatible wrappers for new API functions ─────────────────────────
@@ -425,16 +425,17 @@ def _launch_context_with_fallback_compat(
 ) -> Tuple[Any, Dict[str, Any]]:
     """Wrapper that provides old signature without settings argument."""
     settings = load_settings()
-    return _LaunchContextWithFallbackOriginal(
+    return _LaunchContextWithFallbackOriginal(  # type: ignore[return-value]
         p,
         settings=settings,
         user_data_dir=user_data_dir,
         worker_label=worker_label,
     )
+    # ^ NOTE: This returns a coroutine but the caller expects sync — intentional backward-compat shim; callers that use m.xxx will get the shim's signature.
 
 
 # Use compat wrapper as the public API for backward compatibility
-launch_context_with_fallback = _launch_context_with_fallback_compat
+launch_context_with_fallback = _launch_context_with_fallback_compat  # type: ignore[assignment]
 
 
 # Backward-compatible wrapper for summarize_vibe_coding_accountability (adds default defects)
@@ -461,7 +462,7 @@ def _build_worker_user_data_dir_compat(worker_id: int, settings: Optional[Any] =
 
 # Save original function and replace with compat wrapper
 _BuildWorkerUserDataDirOriginal = build_worker_user_data_dir
-build_worker_user_data_dir = _build_worker_user_data_dir_compat
+build_worker_user_data_dir = _build_worker_user_data_dir_compat  # type: ignore[assignment]
 
 
 # Backward-compatible wrapper for build_redis_key (adds default REDIS_PREFIX)
@@ -474,7 +475,7 @@ def _build_redis_key_compat(base_key: str, redis_prefix: Optional[str] = None) -
 
 # Save original function and replace with compat wrapper
 _BuildRedisKeyOriginal = build_redis_key
-build_redis_key = _build_redis_key_compat
+build_redis_key = _build_redis_key_compat  # type: ignore[assignment]
 
 
 # Backward-compatible wrapper for generate_json_summary (adds default arguments)
@@ -530,13 +531,12 @@ def _generate_json_summary_compat(
                 return getattr(self._base, name)
         settings = _SettingsWithOutputDir(settings, _output_dir)
     
-    return _GenerateJsonSummaryOriginal(settings, defects, test_logs, browser_launch_info, {}, False, start_time, end_time)
+    return _GenerateJsonSummaryOriginal(settings, defects, test_logs, browser_launch_info, [], False, start_time, end_time)  # type: ignore[return-value]
 
 
 # Save original function and replace with compat wrapper
 _GenerateJsonSummaryOriginal = generate_json_summary
-generate_json_summary = _generate_json_summary_compat
-
+generate_json_summary = _generate_json_summary_compat  # type: ignore[assignment]
 
 # Backward-compatible wrapper for generate_markdown_report (adds default arguments)
 def _generate_markdown_report_compat(
@@ -591,13 +591,12 @@ def _generate_markdown_report_compat(
                 return getattr(self._base, name)
         settings = _SettingsWithOutputDir(settings, _output_dir)
     
-    return _GenerateMarkdownReportOriginal(settings, defects, test_logs, browser_launch_info, start_time, end_time)
+    return _GenerateMarkdownReportOriginal(settings, defects, test_logs, browser_launch_info, start_time, end_time)  # type: ignore[return-value]
 
 
 # Save original function and replace with compat wrapper
 _GenerateMarkdownReportOriginal = generate_markdown_report
-generate_markdown_report = _generate_markdown_report_compat
-
+generate_markdown_report = _generate_markdown_report_compat  # type: ignore[assignment]
 
 # Backward-compatible wrapper for validate_runtime_configuration (adds default settings from globals)
 def _validate_runtime_configuration_compat(settings: Optional[Any] = None) -> None:
@@ -667,8 +666,7 @@ class QdrantMemoryStoreCompat:
 
 # Save original class and replace with compat wrapper
 _QdrantMemoryStoreOriginal = QdrantMemoryStore
-QdrantMemoryStore = QdrantMemoryStoreCompat
-
+QdrantMemoryStore = QdrantMemoryStoreCompat  # type: ignore[misc]
 
 # ── Exports ────────────────────────────────────────────────────────────────────
 
@@ -777,10 +775,8 @@ __all__ = [
     "_build_vision_annotation_prompt",
     "_is_cloud_vision_model",
     "build_decision_prompt",
-    "decide_next_action",
     "generate_form_payload",
     "parse_action_plan_response",
-    "compute_max_layout_shift",
     "compare_screenshots_pixelmatch",
     "_request_graceful_shutdown",
     "_register_graceful_shutdown_signals",

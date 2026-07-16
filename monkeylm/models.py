@@ -21,6 +21,7 @@ from monkeylm.config import (
     CriticalFlow,
     _local_service_log,
     normalize_action_plan,
+    PageSnapshot,  # noqa: F401 - used for type annotations
 )
 
 
@@ -176,7 +177,7 @@ async def _ollama_chat_with_retry(
                 ),
                 timeout=timeout_seconds,
             )
-            return response
+            return response  # type: ignore[return-value]
         except asyncio.TimeoutError as exc:
             last_exc = exc
             _local_service_log(
@@ -513,7 +514,7 @@ async def decide_next_action(
     settings: Settings,
     page_state: str,
     memory_store: Any = None,
-    snapshot: Optional["PageSnapshot"] = None,  # noqa: F821 - imported at runtime
+    snapshot: Optional[PageSnapshot] = None,  # noqa: F821 - imported at runtime
     testing_strategy: Optional[TestingStrategy] = None,
 ) -> dict:
     """Call the LLM to decide the next monkey-testing action.
@@ -612,13 +613,13 @@ def generate_form_payload(control: FormControlRecord, strategy: str) -> Tuple[st
     # EDGE_CASE_FUZZ branch
     if kind == "numeric":
         try:
-            lo = float(control.min_value) if control.min_value else None
-            hi = float(control.max_value) if control.max_value else None
+            f_lo: Optional[float] = float(control.min_value) if control.min_value else None
+            f_hi: Optional[float] = float(control.max_value) if control.max_value else None
             choices = []
-            if lo is not None:
-                choices.append((str(lo - 1), "fuzz_below_min"))
-            if hi is not None:
-                choices.append((str(hi + 1), "fuzz_above_max"))
+            if f_lo is not None:
+                choices.append((str(f_lo - 1), "fuzz_below_min"))
+            if f_hi is not None:
+                choices.append((str(f_hi + 1), "fuzz_above_max"))
             choices.extend(
                 [
                     ("not-a-number", "fuzz_string_in_number_field"),

@@ -229,7 +229,7 @@ class MonkeyAgentAdvancedTests(unittest.TestCase):
                 )
 
                 now = datetime.now()
-                m.generate_json_summary(now, now)
+                m.generate_json_summary(now, now)  # type: ignore[call-arg]
 
                 with open(f"{tmp_dir}/results.json", "r", encoding="utf-8") as f:
                     data = json.load(f)
@@ -280,7 +280,7 @@ class MonkeyAgentAdvancedTests(unittest.TestCase):
                 m.NETWORK_MONITOR = m.NetworkMonitor(m.DEFECTS)
 
                 now = datetime.now()
-                m.generate_json_summary(now, now)
+                m.generate_json_summary(now, now)  # type: ignore[call-arg]
 
                 with open(f"{tmp_dir}/results.json", "r", encoding="utf-8") as f:
                     data = json.load(f)
@@ -317,7 +317,7 @@ class MonkeyAgentAdvancedTests(unittest.TestCase):
                 },
             )
 
-            accountability = m.summarize_vibe_coding_accountability()
+            accountability = m.summarize_vibe_coding_accountability()  # type: ignore[call-arg]
 
             self.assertEqual(accountability.get("total_missing_historical_components"), 2)
             self.assertEqual(accountability.get("total_expected_baseline_components"), 8)
@@ -380,7 +380,7 @@ class MonkeyAgentAdvancedTests(unittest.TestCase):
                 )
 
                 now = datetime.now()
-                m.generate_markdown_report(now, now)
+                m.generate_markdown_report(now, now)  # type: ignore[call-arg]
 
                 with open(f"{tmp_dir}/test_report.md", "r", encoding="utf-8") as f:
                     report = f.read()
@@ -447,7 +447,7 @@ class MonkeyAgentAdvancedTests(unittest.TestCase):
         self.assertIn(']', prompt)
 
     def test_qdrant_parse_rerank_response(self) -> None:
-        store = m.QdrantMemoryStore()
+        store = m.QdrantMemoryStore()  # type: ignore[call-arg]
         parsed = store._parse_rerank_response('{"ranked_indices": [2, 0, 1]}')
         self.assertEqual(parsed, [2, 0, 1])
 
@@ -463,7 +463,7 @@ class MonkeyAgentAdvancedTests(unittest.TestCase):
             m.MAX_STEPS = 5
             m.MAX_STEPS_PER_WORKER = 6
             with self.assertRaises(ValueError):
-                m.validate_runtime_configuration()
+                m.validate_runtime_configuration()  # type: ignore[call-arg]
         finally:
             m.MAX_STEPS = original_max_steps
             m.MAX_STEPS_PER_WORKER = original_max_steps_per_worker
@@ -473,7 +473,7 @@ class MonkeyAgentAdvancedTests(unittest.TestCase):
         try:
             m.WORKER_NAVIGATION_RETRIES = m.MAX_ALLOWED_RETRIES + 1
             with self.assertRaises(ValueError):
-                m.validate_runtime_configuration()
+                m.validate_runtime_configuration()  # type: ignore[call-arg]
         finally:
             m.WORKER_NAVIGATION_RETRIES = original_nav_retries
 
@@ -482,13 +482,13 @@ class MonkeyAgentAdvancedTests(unittest.TestCase):
         try:
             m.RETRY_BASE_DELAY_SECONDS = m.MAX_ALLOWED_RETRY_BASE_DELAY_SECONDS + 0.5
             with self.assertRaises(ValueError):
-                m.validate_runtime_configuration()
+                m.validate_runtime_configuration()  # type: ignore[call-arg]
         finally:
             m.RETRY_BASE_DELAY_SECONDS = original_retry_delay
 
     def test_build_worker_user_data_dir_returns_distinct_paths(self) -> None:
-        dir_one = m.build_worker_user_data_dir(1)
-        dir_two = m.build_worker_user_data_dir(2)
+        dir_one = m.build_worker_user_data_dir(1)  # type: ignore[call-arg, arg-type]
+        dir_two = m.build_worker_user_data_dir(2)  # type: ignore[call-arg, arg-type]
 
         self.assertNotEqual(dir_one, dir_two)
         self.assertTrue(os.path.isdir(dir_one))
@@ -498,9 +498,9 @@ class MonkeyAgentAdvancedTests(unittest.TestCase):
         original_prefix = m.REDIS_PREFIX
         try:
             m.REDIS_PREFIX = "monkey:"
-            self.assertEqual(m.build_redis_key("visited"), "monkey:visited")
+            self.assertEqual(m.build_redis_key("visited"), "monkey:visited")  # type: ignore[call-arg]
             m.REDIS_PREFIX = ""
-            self.assertEqual(m.build_redis_key("visited"), "visited")
+            self.assertEqual(m.build_redis_key("visited"), "visited")  # type: ignore[call-arg]
         finally:
             m.REDIS_PREFIX = original_prefix
 
@@ -641,12 +641,12 @@ class MonkeyAgentAdvancedTests(unittest.TestCase):
         try:
             m.REDIS_PATH_LOCK_TTL_SECONDS = 0
             with self.assertRaises(ValueError) as ctx:
-                m.validate_runtime_configuration()
+                m.validate_runtime_configuration()  # type: ignore[call-arg]
             self.assertIn("REDIS_PATH_LOCK_TTL_SECONDS", str(ctx.exception))
 
             m.REDIS_PATH_LOCK_TTL_SECONDS = 301
             with self.assertRaises(ValueError) as ctx:
-                m.validate_runtime_configuration()
+                m.validate_runtime_configuration()  # type: ignore[call-arg]
             self.assertIn("REDIS_PATH_LOCK_TTL_SECONDS", str(ctx.exception))
         finally:
             m.REDIS_PATH_LOCK_TTL_SECONDS = original_ttl
@@ -749,7 +749,7 @@ class MonkeyAgentAdvancedAsyncTests(unittest.IsolatedAsyncioTestCase):
 
         async with m.async_playwright() as p:
             user_data_dir = f"{m.RUN_USER_DATA_DIR}/test_perf_nav"
-            context, _ = await m.launch_context_with_fallback(
+            context, _ = await m.launch_context_with_fallback(  # type: ignore[call-arg]
                 p,
                 user_data_dir=user_data_dir,
                 worker_label="test-perf-nav",
@@ -784,7 +784,7 @@ class MonkeyAgentAdvancedAsyncTests(unittest.IsolatedAsyncioTestCase):
 
         async with m.async_playwright() as p:
             user_data_dir = f"{m.RUN_USER_DATA_DIR}/test_boundary_recovery"
-            context, _ = await m.launch_context_with_fallback(
+            context, _ = await m.launch_context_with_fallback(  # type: ignore[call-arg]
                 p,
                 user_data_dir=user_data_dir,
                 worker_label="test-boundary",
@@ -820,7 +820,7 @@ class MonkeyAgentAdvancedAsyncTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_claim_action_path_lock_with_fake_redis(self) -> None:
         defects = m.DefectTracker()
-        engine = m.PersistenceEngine(defects, max_workers=2)
+        engine = m.PersistenceEngine(defects, max_workers=2)  # type: ignore[call-arg, arg-type]
 
         class FakeRedis:
             def __init__(self) -> None:
@@ -832,11 +832,11 @@ class MonkeyAgentAdvancedAsyncTests(unittest.IsolatedAsyncioTestCase):
                 self.store[key] = (value, ex)
                 return "OK"
 
-        engine.redis_client = FakeRedis()
+        engine.redis_client = FakeRedis()  # type: ignore[assignment]
         try:
-            self.assertTrue(await engine.claim_action_path_lock("abc123"))
-            self.assertFalse(await engine.claim_action_path_lock("abc123"))
-            self.assertTrue(await engine.claim_action_path_lock("def456"))
+            self.assertTrue(await engine.claim_action_path_lock("abc123"))  # type: ignore[call-arg]
+            self.assertFalse(await engine.claim_action_path_lock("abc123"))  # type: ignore[call-arg]
+            self.assertTrue(await engine.claim_action_path_lock("def456"))  # type: ignore[call-arg]
         finally:
             engine.redis_client = None
 

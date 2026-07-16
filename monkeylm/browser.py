@@ -10,7 +10,7 @@ import random
 import re
 import subprocess
 import urllib.parse
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from playwright.async_api import Dialog, Page
 
@@ -665,7 +665,7 @@ async def resilient_page_goto(
     url: str,
     *,
     timeout: int = 45000,
-    wait_until: str = "domcontentloaded",
+    wait_until: Literal["commit", "domcontentloaded", "load", "networkidle"] | None = "domcontentloaded",
     phase: str = "navigation",
     max_retries: int = 3,
 ) -> Optional[Any]:
@@ -1304,7 +1304,7 @@ async def execute_action(
 
             locator = await _locator_for_target_id(page, target)
             mode = "unsupported"
-            control_options: List[str] = []
+            type_control_options: List[str] = []
             if locator:
                 mode = await _resolve_interaction_mode(locator)
                 parsed_id = _extract_target_id(target)
@@ -1313,24 +1313,24 @@ async def execute_action(
                         (fc for fc in before_snapshot.form_controls if fc.control_id == parsed_id), None
                     )
                     if control is not None:
-                        control_options = control.options
+                        type_control_options = control.options
             if mode == "unsupported":
-                locator = page.locator("input:visible, textarea:visible, select:visible").first
-                if await locator.count() > 0:
-                    mode = await _resolve_interaction_mode(locator)
+                fallback_locator = page.locator("input:visible, textarea:visible, select:visible").first
+                if await fallback_locator.count() > 0:
+                    mode = await _resolve_interaction_mode(fallback_locator)
                     try:
-                        fallback_options = await locator.evaluate(
+                        fallback_options = await fallback_locator.evaluate(
                             "el => Array.from(el.options).map(o => o.value || o.textContent.trim()).filter(v => v)"
                         )
                         if isinstance(fallback_options, list):
-                            control_options = [str(o) for o in fallback_options]
+                            type_control_options = [str(o) for o in fallback_options]
                     except Exception:
                         pass
 
-            if await locator.count() > 0 and mode != "unsupported":
+            if locator is not None and await locator.count() > 0 and mode != "unsupported":
                 payload = payload_value or fuzzer.next_payload()
                 if mode == "select":
-                    chosen, reason = await _fill_select_option(page, locator, payload, control_options, action_strategy)
+                    chosen, reason = await _fill_select_option(page, locator, payload, type_control_options, action_strategy)
                     log_entry["value"] = chosen[:120]
                     log_entry["input_payloads"] = [{"target": target, "value": chosen[:120], "reason": reason}]
                 elif mode == "checkbox_radio":

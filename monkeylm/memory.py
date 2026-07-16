@@ -283,6 +283,7 @@ class PersistenceEngine:
                 max_size=max_size,
                 command_timeout=30,
             )
+            assert self.pg_pool is not None
             async with self.pg_pool.acquire() as conn:
                 await conn.execute(
                     """
@@ -353,6 +354,7 @@ class PersistenceEngine:
                 health_check_interval=30,
                 retry_on_timeout=True,
             )
+            assert self.redis_client is not None
             await self.redis_client.ping()
             print("✅ Redis state cache is ready.")
         except Exception as exc:
@@ -730,8 +732,8 @@ class QdrantMemoryStore:
             pass
 
         try:
-            response = ollama.embeddings(model=self.embedding_model, prompt=text)
-            vector = self._extract_embedding_from_response(response)
+            embed_response = ollama.embeddings(model=self.embedding_model, prompt=text)
+            vector = self._extract_embedding_from_response(embed_response)
             if vector:
                 return vector
         except Exception:
@@ -827,6 +829,7 @@ class QdrantMemoryStore:
 
         try:
             self.client = httpx.AsyncClient(timeout=6.0)
+            assert self.client is not None
             health = await self.client.get(f"{self.settings.qdrant_url}/collections")
             if health.status_code >= 400:
                 raise RuntimeError(f"collections endpoint returned {health.status_code}")

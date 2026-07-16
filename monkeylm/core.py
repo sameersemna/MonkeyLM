@@ -514,6 +514,7 @@ class BrowserAnomalySensor:
         self._current_step: int = -1
         self._current_action: str = ""
         self._installed_pages: set[int] = set()
+        self._network_installed: bool = False
 
     async def install(self, page: Page) -> None:
         """Attach global error listeners to the page. Safe to call multiple times."""
@@ -1614,9 +1615,10 @@ async def main(settings: Settings) -> None:
     worker_completion: List[Dict[str, Any]] = []
 
     for result in worker_results:
-        if isinstance(result, Exception):
+        if isinstance(result, BaseException):
             print(f"   -> 🚨 Worker raised an exception during shutdown: {result}")
             continue
+        # At this point result is WorkerRunResult (any non-BaseException from gather)
         merged_defects.merge_from(result.defects)
         merged_logs.extend(result.logs)
         merged_network_events.extend(result.network_injections)

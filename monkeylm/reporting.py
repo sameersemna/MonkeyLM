@@ -10,7 +10,6 @@ from monkeylm.config import (
     DefectTicket,
     Image,
     _REPORTLAB_AVAILABLE,
-    _local_service_log,
 )
 from monkeylm.memory import _secure_atomic_write
 
@@ -34,11 +33,11 @@ def redact_sensitive_content(text: str) -> str:
 
 # Conditional ReportLab imports
 if _REPORTLAB_AVAILABLE:
-    from reportlab.lib import colors
-    from reportlab.lib.pagesizes import letter
-    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-    from reportlab.lib.units import inch
-    from reportlab.platypus import (
+    from reportlab.lib import colors  # type: ignore[import-untyped]
+    from reportlab.lib.pagesizes import letter  # type: ignore[import-untyped]
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet  # type: ignore[import-untyped]
+    from reportlab.lib.units import inch  # type: ignore[import-untyped]
+    from reportlab.platypus import (  # type: ignore[import-untyped]
         Image as RLImage,
         PageBreak,
         Paragraph,
@@ -57,15 +56,15 @@ def summarize_semantic_memory_telemetry(test_logs: List[Dict[str, Any]]) -> Dict
             return 0.0
         return float(sum(values) / len(values))
 
-    retrieval_events = [
-        log.get("memory_retrieval")
-        for log in test_logs
-        if isinstance(log.get("memory_retrieval"), dict)
+    retrieval_events: List[Dict[str, Any]] = [
+        val for log in test_logs
+        for val in [log.get("memory_retrieval")]
+        if isinstance(val, dict)
     ]
-    write_events = [
-        log.get("memory_write")
-        for log in test_logs
-        if isinstance(log.get("memory_write"), dict)
+    write_events: List[Dict[str, Any]] = [
+        val for log in test_logs
+        for val in [log.get("memory_write")]
+        if isinstance(val, dict)
     ]
 
     retrieval_ok = [evt for evt in retrieval_events if evt.get("status") == "ok"]

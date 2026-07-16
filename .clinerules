@@ -1,0 +1,25 @@
+# DwarfStar & DeepSeek V4 Flash Optimization Rules
+
+You are running locally on a custom DwarfStar (`ds4-server`) inference engine with a strict hardware context ceiling of 32,768 tokens. To prevent "context_length_exceeded" API crashes and maximize the SSD-backed KV cache performance, you MUST adhere to the following rules:
+
+## 1. Context Budget & Surgical Slicing
+* **Strict Reading Limit:** NEVER read an entire file if it is longer than 150 lines. Break large files into surgical slices (e.g., `lines 1-100`).
+* **Synthesize Quickly:** Once you have read 3-4 slices of a file, you MUST stop reading, synthesize what you have learned, and explain your security findings to the user before requesting more file access. Do not loop reading the same file.
+* **Surgical File Viewing:** Before reading any file, check its length or use structural search (`grep`/`ripgrep`) to find the exact function or block you need. Do not ingest blind context.
+* **No Speculative Reads:** Do not speculatively read multiple codebase files "just to be sure." Only ingest files directly relevant to the current discrete step.
+
+## 2. Formatting Constraints (Parser Safety)
+* **Explicit Thought Closure:** You MUST explicitly output the closing `</think>` tag before generating any tool calls, DSML syntax, or markdown code blocks. 
+* **Separation of Concerns:** Never embed tool block executions inside your internal reasoning/thinking tags. Complete your reasoning loop first, close the tag, and then invoke the tool.
+
+## 3. Conversation Continuity & Handoffs
+* **Context Preservation:** Prioritize matching the existing prompt history prefix to maximize DwarfStar's rapid `thinking live continuation` SSD cache hits. Avoid editing or prepending new system text mid-session if it alters the starting token structure.
+* **Proactive Resetting:** If a task requires heavy multi-file edits and the chat history approaches 25,000+ tokens, explicitly summarize your architectural progress, write a checkpoint file, and instruct the user to "Start New Task" to flush the memory footprint safely.
+
+## 4. Proactive Memory Compaction & Handoffs
+* **Monitor Context Usage:** Watch the context progress bar closely. Since our hardware context is strictly capped at 24,576 / 32,768 tokens, you must trigger a manual compaction when you reach approximately 20,000 tokens.
+* **Write a State Checkpoint:** Do NOT allow the conversation to run into a raw truncation loop. Before you hit the context threshold, create or update a `.cline-checkpoint.md` file in the root of the project. This file must strictly document:
+  - **Completed Actions:** What code has already been modified or written.
+  - **Discovered Security Vulnerabilities:** Specific lines, files, or flaws found.
+  - **Next Immediate Steps:** The precise next files to target.
+* **Execute Clean Handoff:** Once the checkpoint file is written, explicitly invoke the `new_task` tool (or ask the user to click "Start New Task"). Your first prompt in the new task will be to read `.cline-checkpoint.md` and immediately resume implementation with a completely fresh, 0-token memory overhead.
