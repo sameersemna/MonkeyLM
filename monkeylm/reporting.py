@@ -7,10 +7,10 @@ import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from monkeylm.config import (
-    DefectTicket,
     Image,
     _REPORTLAB_AVAILABLE,
 )
+from monkeylm.types import DefectTicket
 from monkeylm.memory import _secure_atomic_write
 
 

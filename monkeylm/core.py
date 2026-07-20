@@ -7,7 +7,6 @@ import json
 import os
 import random
 import re
-import signal
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -34,13 +33,14 @@ from monkeylm.config import (
     ACTION_COOLDOWN_SECONDS,
     Faker,
     Settings,
-    WorkerRunResult,
     _local_service_log,
     _normalize_defect,
     GRACEFUL_SHUTDOWN_REQUESTED,
     is_in_scope,
     SHUTDOWN_EVENT,
+    _register_graceful_shutdown_signals,
 )
+from monkeylm.types import WorkerRunResult
 
 from monkeylm.resources import AXE_CORE_PATH
 
@@ -1130,69 +1130,6 @@ def allocate_worker_steps(total_steps: int, worker_count: int, per_worker_cap: i
     return allocations
 
 
-# ── Graceful shutdown helpers ─────────────────────────────────────────────────
-
-
-def _request_graceful_shutdown(signum: int, frame: Optional[Any]) -> None:
-    """Signal handler that requests a graceful shutdown."""
-    global GRACEFUL_SHUTDOWN_REQUESTED
-    if GRACEFUL_SHUTDOWN_REQUESTED:
-        # Second Ctrl+C during graceful shutdown - just ignore, let shutdown complete
-        return
-
-    GRACEFUL_SHUTDOWN_REQUESTED = True
-    print(f"\n\U0001f6d1 Graceful shutdown requested (signal {signum}). Finishing in-flight steps...")
-    _remove_graceful_shutdown_signals()  # Remove handlers to prevent further interrupts
-    try:
-        loop = asyncio.get_event_loop()
-        loop.call_soon_threadsafe(SHUTDOWN_EVENT.set)
-    except Exception:
-        try:
-            SHUTDOWN_EVENT.set()
-        except Exception:
-            pass
-
-
-def _remove_graceful_shutdown_signals() -> None:
-    """Remove signal handlers to prevent further interrupts during graceful shutdown."""
-    try:
-        # Try to use asyncio's signal handler removal if loop is still running
-        loop = asyncio.get_running_loop()
-        try:
-            loop.remove_signal_handler(signal.SIGINT)
-        except (NotImplementedError, KeyError, ValueError, RuntimeError):
-            # RuntimeError can occur if loop is being destroyed
-            pass
-        try:
-            loop.remove_signal_handler(signal.SIGTERM)
-        except (NotImplementedError, KeyError, ValueError, RuntimeError):
-            pass
-    except Exception:
-        # Fallback to signal.signal() if asyncio removal fails
-        try:
-            signal.signal(signal.SIGINT, signal.default_int_handler)
-        except Exception:
-            pass
-        try:
-            signal.signal(signal.SIGTERM, signal.default_int_handler)
-        except Exception:
-            pass
-
-
-def _register_graceful_shutdown_signals() -> None:
-    """Register SIGINT/SIGTERM handlers for graceful shutdown."""
-    loop = asyncio.get_running_loop()
-    try:
-        loop.add_signal_handler(signal.SIGINT, lambda: _request_graceful_shutdown(signal.SIGINT, None))
-        loop.add_signal_handler(signal.SIGTERM, lambda: _request_graceful_shutdown(signal.SIGTERM, None))
-    except NotImplementedError:
-        signal.signal(signal.SIGINT, _request_graceful_shutdown)
-        try:
-            signal.signal(signal.SIGTERM, _request_graceful_shutdown)
-        except Exception:
-            pass
-
-
 # ── Worker lifecycle ──────────────────────────────────────────────────────────
 
 
@@ -1527,6 +1464,9 @@ async def run_worker(
 # ── Global test logs (populated by main) ─────────────────────────────────────
 
 test_logs: List[Dict[str, Any]] = []
+DEFECTS: DefectTracker = DefectTracker()
+NETWORK_MONITOR: NetworkMonitor = NetworkMonitor(DEFECTS)
+PERF_MONITOR: PerformanceMonitor = PerformanceMonitor(DEFECTS)
 
 
 # ── Main entry point ──────────────────────────────────────────────────────────

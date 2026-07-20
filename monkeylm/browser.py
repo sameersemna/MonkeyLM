@@ -17,13 +17,15 @@ from playwright.async_api import Dialog, Page
 from monkeylm.core import sanitize_for_storage
 from monkeylm.config import (
     LAYOUT_SHIFT_THRESHOLD_PX,
-    PageSnapshot,
-    FormControlRecord,
-    FormRecord,
     VISUAL_DIFF_THRESHOLD_RATIO,
     Image,
     pil_pixelmatch,
     _local_service_log,
+)
+from monkeylm.types import (
+    PageSnapshot,
+    FormControlRecord,
+    FormRecord,
 )
 
 

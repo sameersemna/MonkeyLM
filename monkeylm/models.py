@@ -11,17 +11,19 @@ from typing import Any, Dict, List, Optional, Tuple
 import ollama
 
 from monkeylm.config import (
-    FormControlRecord,
     Image,
     ImageDraw,
     OLLAMA_DECISION_OPTIONS,
     Settings,
+    _local_service_log,
+    normalize_action_plan,
+)
+from monkeylm.types import (
+    FormControlRecord,
     TestingStrategy,
     PersonaGoal,
     CriticalFlow,
-    _local_service_log,
-    normalize_action_plan,
-    PageSnapshot,  # noqa: F401 - used for type annotations
+    PageSnapshot,
 )
 
 

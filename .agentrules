@@ -1,0 +1,83 @@
+# MonkeyLM Agent Context File
+# This file defines the architectural standards and patterns enforced in this repository.
+# Future AI agents MUST read this file before making any modifications.
+
+## Structural Transformations Performed
+
+### 1. Type Extraction (monkeylm/types.py)
+- All dataclasses (Settings, PageSnapshot, FormControlRecord, DefectTicket, etc.) extracted from config.py
+- Zero runtime logic or I/O in types.py — pure data definitions only
+- Enables circular-import-free access from any module
+
+### 2. Error Hierarchy (monkeylm/errors.py)
+- Centralized exception hierarchy rooted at `MonkeyLMError`
+- Typed subclasses: ConfigurationError, BrowserError, ModelError, PersistenceError, NavigationError, ValidationError, ShutdownRequested
+- All carry structured context (url, selector, model, service) for logging
+
+### 3. Shutdown Handler Consolidation
+- `_request_graceful_shutdown` and `_register_graceful_shutdown_signals` live ONLY in config.py
+- Duplicate implementations removed from core.py
+
+### 4. Dead Code Removal
+- `monkey_agent_advanced.py` (799-line backward-compat shim) — removed
+- `test.py` (292-line standalone script duplicating engine) — removed
+
+### 5. Import Standardization
+- All modules use `from monkeylm.types import ...` for dataclasses
+- All modules use `from monkeylm.config import ...` for config/helpers
+- All modules have explicit `__all__` exports
+
+## Enforced Architectural Paradigms
+
+### Module Layout
+```
+monkeylm/
+  __init__.py     # Public API re-exports only
+  __main__.py     # Entry point
+  config.py       # Settings, CLI, env loading, helpers
+  types.py        # All dataclasses and type definitions
+  errors.py       # Centralized exception hierarchy
+  memory.py       # PostgreSQL, Redis, Qdrant persistence
+  models.py       # LLM client, prompts, vision routing
+  browser.py      # Playwright lifecycle, DOM, actions
+  reporting.py    # Markdown, JSON, PDF, HTML reports
+  core.py         # Main loop, workers, monitor classes
+  resources/      # Bundled third-party assets
+```
+
+### Typing & Structure
+- All functions MUST have type annotations
+- All modules MUST have `from __future__ import annotations`
+- All modules MUST have `__all__` with explicit export list
+- Dataclasses go in types.py, NOT config.py
+
+### Error Handling
+- Catch `MonkeyLMError` for all application-specific errors
+- Use typed subclasses (BrowserError, ModelError, etc.) for granular handling
+- Never use bare `except Exception` without logging
+
+### Agent Interoperability
+- No global mutable state across module boundaries
+- No backward-compat shims or wrapper classes
+- No conversational AI comments ("FIX (Layer 1)", "GUARDRAIL (Layer 2)")
+- Docstrings are concise, structured, and programmatically valid
+
+### Dependency Management
+- All dependencies strictly pinned in requirements.txt
+- Optional imports use `_optional_import()` pattern from config.py
+- No runtime network fetches for bundled assets (axe-core is local)
+
+## System Instruction Prompt for Future Agents
+
+```
+You are working on the MonkeyLM codebase. Before making any changes:
+
+1. Read .agentrules to understand the enforced architecture.
+2. All dataclasses live in monkeylm/types.py — never add new dataclasses to config.py.
+3. All custom exceptions inherit from monkeylm.errors.MonkeyLMError.
+4. Every module must have `from __future__ import annotations`, type annotations, and `__all__`.
+5. No backward-compat shims, wrapper classes, or mutable global state across modules.
+6. No conversational AI comments — use concise, structured docstrings only.
+7. Run `ruff check monkeylm/ tests/` before committing.
+8. Run `pytest tests/` to verify all tests pass.
+```

@@ -1,4 +1,9 @@
-"""Configuration, constants, dataclasses, and CLI argument parsing for MonkeyLM."""
+"""Configuration, constants, CLI argument parsing, and utility helpers for MonkeyLM.
+
+All structured dataclasses (Settings, PageSnapshot, DefectTicket, etc.) now
+live in :mod:`monkeylm.types` to avoid circular imports. This module provides
+the runtime machinery: env loading, CLI parsing, validation, and helpers.
+"""
 
 from __future__ import annotations
 
@@ -11,6 +16,19 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
+
+from monkeylm.types import (
+    FormControlRecord,
+    FormRecord,
+    PageSnapshot,
+    PersonaGoal,
+    CriticalFlow,
+    TestingStrategy,
+    Settings,
+    WorkerRunResult,
+    DefectTicket,
+)
+
 
 # ── Optional third-party imports ───────────────────────────────────────────────
 
@@ -26,7 +44,6 @@ def _optional_import(module_name: str, attr_name: Optional[str] = None):
 
 
 def _load_dotenv() -> None:
-    """Load environment variables from a local `.env` file if python-dotenv is available."""
     dotenv = _optional_import("dotenv")
     if dotenv is None:
         return
@@ -40,7 +57,6 @@ def _load_dotenv() -> None:
 
 _load_dotenv()
 
-# Expose optional imports for downstream modules
 Faker = _optional_import("faker", "Faker")
 Image = _optional_import("PIL", "Image")
 ImageDraw = _optional_import("PIL", "ImageDraw")
@@ -50,16 +66,11 @@ redis_asyncio = _optional_import("redis.asyncio")
 httpx = _optional_import("httpx")
 
 try:
-
     _REPORTLAB_AVAILABLE = True
 except Exception:
     _REPORTLAB_AVAILABLE = False
 
 # ── Default constants ──────────────────────────────────────────────────────────
-
-# IMPORTANT: These DEFAULT_* constants serve as fallbacks only.
-# Primary configuration is fetched dynamically from .env file at runtime via load_settings().
-# See load_settings() for the fetching order: .env file → environment variables → defaults
 
 DEFAULT_TARGET_URL = "https://noblequran-85hu2yge.manus.space/"
 DEFAULT_OLLAMA_MODEL = "minimax-m3:cloud"
@@ -126,7 +137,6 @@ ALLOWED_ACTIONS = {
 
 
 def _env_to_bool(value: Any, default: bool = False) -> bool:
-    """Convert a value (string, bool, or None) to boolean."""
     if value is None:
         return default
     if isinstance(value, bool):
@@ -137,7 +147,6 @@ def _env_to_bool(value: Any, default: bool = False) -> bool:
 
 
 def _env_to_float(value: Any, default: float) -> float:
-    """Convert a value (string, float, or None) to float."""
     if value is None:
         return default
     if isinstance(value, (int, float)):
@@ -203,114 +212,6 @@ def _normalize_window_size(raw: str, fallback: str = DEFAULT_WINDOW_SIZE) -> str
     if width < 320 or height < 200:
         return fallback
     return f"{width},{height}"
-
-
-# ── Settings & Cognitive Testing Persona dataclasses ──────────────────────────
-
-from dataclasses import dataclass, field
-
-
-@dataclass
-class PersonaGoal:
-    """A single testing persona with intent and expected reactions."""
-    name: str  # e.g., "Rush User", "SQL Injection Attacker"
-    description: str  # human-like motivation
-    behaviors: List[str]  # example: ["double-clicks submit", "skips validation"]
-
-
-@dataclass
-class CriticalFlow:
-    """A critical user flow to test with persona-driven actions."""
-    name: str  # e.g., "user_registration"
-    description: str
-    steps: List[str]  # e.g., ["fill_form", "validate", "submit"]
-
-
-@dataclass
-class TestingStrategy:
-    """Application discovery output — LLM-generated testing strategy before the action loop."""
-    app_domain: str  # inferred domain, e.g., "e-commerce checkout"
-    primary_personas: List[PersonaGoal]  # target user personas for testing
-    critical_flows: List[CriticalFlow]  # key flows to exercise
-    edge_cases_to_test: List[str]  # specific edge cases to explore
-    security_focus: List[str]  # security concerns to probe
-    strategy_summary: str = ""  # one-line summary of the overall approach
-
-
-@dataclass
-class Settings:
-    """Single source of truth for all MonkeyLM runtime configuration."""
-
-    # Target & model
-    target_url: str = DEFAULT_TARGET_URL
-    ollama_model: str = DEFAULT_OLLAMA_MODEL
-    ollama_timeout_seconds: float = DEFAULT_OLLAMA_TIMEOUT_SECONDS
-    vision_model: str = DEFAULT_VISION_MODEL
-    pdf_vision_model: str = DEFAULT_PDF_VISION_MODEL
-    pdf_vision_timeout_seconds: float = DEFAULT_PDF_VISION_TIMEOUT_SECONDS
-
-    # Execution
-    max_steps: int = DEFAULT_MAX_STEPS
-    workers: int = DEFAULT_WORKERS
-    max_steps_per_worker: int = DEFAULT_MAX_STEPS_PER_WORKER
-    worker_navigation_retries: int = DEFAULT_WORKER_NAVIGATION_RETRIES
-    worker_qdrant_init_retries: int = DEFAULT_WORKER_QDRANT_INIT_RETRIES
-    worker_boundary_recovery_retries: int = DEFAULT_WORKER_BOUNDARY_RECOVERY_RETRIES
-    retry_base_delay_seconds: float = DEFAULT_RETRY_BASE_DELAY_SECONDS
-
-    # Browser
-    headless: bool = DEFAULT_HEADLESS
-    browser_window_size: str = DEFAULT_WINDOW_SIZE
-    no_viewport: bool = DEFAULT_NO_VIEWPORT
-    strict_sandbox: bool = False
-    allow_no_sandbox_fallback: bool = False
-
-    # Persistence
-    postgres_dsn: str = DEFAULT_POSTGRES_DSN
-    redis_url: str = DEFAULT_REDIS_URL
-    redis_prefix: str = DEFAULT_REDIS_PREFIX
-    redis_path_lock_ttl_seconds: int = DEFAULT_REDIS_PATH_LOCK_TTL_SECONDS
-    redis_state_ttl_seconds: int = DEFAULT_REDIS_STATE_TTL_SECONDS
-    strict_persistence: bool = DEFAULT_STRICT_PERSISTENCE
-    golden_baseline_mode: str = DEFAULT_GOLDEN_BASELINE_MODE
-
-    # Qdrant
-    qdrant_url: str = DEFAULT_QDRANT_URL
-    qdrant_collection: str = DEFAULT_QDRANT_COLLECTION
-    qdrant_vector_size: int = DEFAULT_QDRANT_VECTOR_SIZE
-    qdrant_enable_reads: bool = DEFAULT_QDRANT_ENABLE_READS
-    qdrant_enable_writes: bool = DEFAULT_QDRANT_ENABLE_WRITES
-    qdrant_embedding_provider: str = DEFAULT_QDRANT_EMBEDDING_PROVIDER
-    qdrant_embedding_model: str = DEFAULT_QDRANT_EMBEDDING_MODEL
-    qdrant_rerank_enabled: bool = DEFAULT_QDRANT_RERANK_ENABLED
-    qdrant_rerank_model: str = DEFAULT_QDRANT_RERANK_MODEL
-    qdrant_candidate_limit: int = DEFAULT_QDRANT_CANDIDATE_LIMIT
-    qdrant_admin_action: str = ""
-
-    # PDF
-    pdf_generate: bool = DEFAULT_PDF_GENERATE
-
-    # Runtime state (mutable)
-    active_seed: Optional[str] = None
-    timestamp: str = field(default_factory=lambda: datetime.now().strftime("%Y%m%d_%H%M%S"))
-
-    @property
-    def output_dir(self) -> str:
-        import os
-
-        return os.path.abspath(f"reports/testrun_{self.timestamp}")
-
-    @property
-    def user_data_root(self) -> str:
-        import os
-
-        return os.path.abspath("./playwright_user_data")
-
-    @property
-    def run_user_data_dir(self) -> str:
-        import os
-
-        return os.path.join(self.user_data_root, f"session_{self.timestamp}")
 
 
 # ── CLI parsing ────────────────────────────────────────────────────────────────
@@ -450,32 +351,23 @@ def parse_cli_args() -> argparse.Namespace:
 
 
 def load_settings(cli_args: Optional[argparse.Namespace] = None) -> Settings:
-    """Build a Settings object from .env file, environment variables, optionally overridden by CLI args."""
-    import os
-
-    # ── Load .env file values for dynamic fetching ──────────────────────
-    # Read .env file contents to fetch values dynamically
-    # .env is in parent directory (project root), not in monkeylm/
     from dotenv import dotenv_values
-    
+
     project_root = Path(__file__).resolve().parent.parent
     env_path = project_root / ".env"
     env_vars = {}
     if env_path.is_file():
         env_vars = dotenv_values(env_path)
-    
-    # ── Create Settings object with .env values as defaults ────────────
+
     s = Settings()
 
-    # ── Apply .env-driven defaults (primary source) ────────────────────
-    # Fetch from .env first, then environment variables, then Settings defaults
     raw_target: str = env_vars.get("TARGET_URL") or os.getenv("TARGET_URL") or s.target_url
     s.target_url = raw_target
     raw_ollama: str = env_vars.get("OLLAMA_MODEL") or os.getenv("OLLAMA_MODEL") or s.ollama_model
     s.ollama_model = raw_ollama
     ollama_timeout = _env_float("OLLAMA_TIMEOUT_SECONDS", s.ollama_timeout_seconds)
     s.ollama_timeout_seconds = max(1.0, _env_to_float(env_vars.get("OLLAMA_TIMEOUT_SECONDS"), ollama_timeout))
-    
+
     raw_max_steps = env_vars.get("MAX_STEPS")
     s.max_steps = max(1, int(raw_max_steps) if raw_max_steps is not None else s.max_steps)
 
@@ -535,7 +427,6 @@ def load_settings(cli_args: Optional[argparse.Namespace] = None) -> Settings:
     s.strict_sandbox = _env_bool("STRICT_SANDBOX", default=_env_to_bool(env_vars.get("STRICT_SANDBOX"), s.strict_sandbox))
     s.allow_no_sandbox_fallback = _env_bool("ALLOW_NO_SANDBOX_FALLBACK", default=_env_to_bool(env_vars.get("ALLOW_NO_SANDBOX_FALLBACK"), s.allow_no_sandbox_fallback))
 
-    # ── Apply CLI overrides ─────────────────────────────────────────────
     if cli_args is not None:
         if getattr(cli_args, "target_url", None):
             s.target_url = cli_args.target_url
@@ -610,9 +501,6 @@ def load_settings(cli_args: Optional[argparse.Namespace] = None) -> Settings:
         if getattr(cli_args, "qdrant_clear", False):
             s.qdrant_admin_action = "clear"
 
-    # ── Ensure output directories exist ─────────────────────────────────
-    import os
-
     os.makedirs(s.output_dir, exist_ok=True)
     os.makedirs(s.user_data_root, exist_ok=True)
     os.makedirs(s.run_user_data_dir, exist_ok=True)
@@ -658,14 +546,13 @@ GRACEFUL_SHUTDOWN_REQUESTED: bool = False
 
 
 def _request_graceful_shutdown(signum: int, frame: Any) -> None:
-    """Signal handler that requests a graceful shutdown."""
     global GRACEFUL_SHUTDOWN_REQUESTED
     if GRACEFUL_SHUTDOWN_REQUESTED:
-        signal.default_int_handler(signum, frame)  # type: ignore[arg-type]
+        signal.default_int_handler(signum, frame)
         return
 
     GRACEFUL_SHUTDOWN_REQUESTED = True
-    print("\n🛑 Graceful shutdown requested (signal {}). Finishing in-flight steps...".format(signum))
+    print("\n\U0001f6d1 Graceful shutdown requested (signal {}). Finishing in-flight steps...".format(signum))
     try:
         loop = asyncio.get_event_loop()
         loop.call_soon_threadsafe(SHUTDOWN_EVENT.set)
@@ -677,11 +564,10 @@ def _request_graceful_shutdown(signum: int, frame: Any) -> None:
 
 
 def _register_graceful_shutdown_signals() -> None:
-    """Register SIGINT/SIGTERM handlers for graceful shutdown."""
     loop = asyncio.get_running_loop()
     try:
-        loop.add_signal_handler(signal.SIGINT, lambda: _request_graceful_shutdown(signal.SIGINT, None))  # type: ignore[arg-type]
-        loop.add_signal_handler(signal.SIGTERM, lambda: _request_graceful_shutdown(signal.SIGTERM, None))  # type: ignore[arg-type]
+        loop.add_signal_handler(signal.SIGINT, lambda: _request_graceful_shutdown(signal.SIGINT, None))
+        loop.add_signal_handler(signal.SIGTERM, lambda: _request_graceful_shutdown(signal.SIGTERM, None))
     except NotImplementedError:
         signal.signal(signal.SIGINT, _request_graceful_shutdown)
         try:
@@ -722,7 +608,6 @@ def normalize_action_plan(raw_plan: Any) -> Dict[str, Any]:
                 {"target": str(p.get("target", "")), "value": str(p.get("value", "")), "reason": str(p.get("reason", ""))}
             )
 
-    # Cognitive Testing Personas - optional fields (backward compatible)
     persona_intent = raw_plan.get("persona_intent", "")
     if persona_intent is None:
         persona_intent = ""
@@ -730,7 +615,6 @@ def normalize_action_plan(raw_plan: Any) -> Dict[str, Any]:
     if expected_reaction is None:
         expected_reaction = ""
 
-    # Structured Thinking Reasoning Fields (Phase B — Intent → Strategy Reference → Execution Target)
     reasoning_obj = raw_plan.get("reasoning", {})
     if not isinstance(reasoning_obj, dict):
         reasoning_obj = {}
@@ -759,7 +643,6 @@ def normalize_action_plan(raw_plan: Any) -> Dict[str, Any]:
 
 
 def is_in_scope(current_url: str, target_url: str) -> bool:
-    """Return True when current_url stays within target_url netloc/domain boundary."""
     try:
         current = urlparse(current_url)
         target = urlparse(target_url)
@@ -773,328 +656,15 @@ def is_in_scope(current_url: str, target_url: str) -> bool:
 
 
 def build_redis_key(redis_prefix: str, base_key: str) -> str:
-    """Prepend the configured REDIS_PREFIX to a Redis key name."""
     if redis_prefix:
         return f"{redis_prefix}{base_key}"
     return base_key
 
 
-# ── Dataclasses ────────────────────────────────────────────────────────────────
-
-
-@dataclass
-class FormControlRecord:
-    """Structured metadata for a single form control extracted from the DOM."""
-
-    control_id: int
-    form_id: Optional[str]
-    tag_name: str
-    input_type: str
-    name_attr: str
-    id_attr: str
-    placeholder: str
-    aria_label: str
-    aria_labelledby: str
-    required: bool
-    disabled: bool
-    readonly: bool
-    minlength: Optional[int]
-    maxlength: Optional[int]
-    pattern: str
-    min_value: str
-    max_value: str
-    step: str
-    resolved_label: str
-    label_confidence: float
-    semantic_kind: str
-    visible: bool = True
-    options: List[str] = field(default_factory=list)
-
-
-@dataclass
-class FormRecord:
-    """Structured metadata for a single form and its associated controls."""
-
-    form_id: str
-    action: str
-    method: str
-    control_ids: List[int] = field(default_factory=list)
-    submit_candidate_id: Optional[int] = None
-
-
-@dataclass
-class PageSnapshot:
-    """Normalized, lightweight representation of page state used for diffing and planning."""
-
-    url: str
-    title: str
-    dom_hash: str
-    structure_hash: str
-    elements: List[str] = field(default_factory=list)
-    layout_anchors: Dict[str, Dict[str, float]] = field(default_factory=dict)
-    modal_count: int = 0
-    spinner_count: int = 0
-    disabled_controls: int = 0
-    screenshot_path: str = ""
-    timestamp: float = 0.0
-    form_controls: List[FormControlRecord] = field(default_factory=list)
-    forms: List[FormRecord] = field(default_factory=list)
-
-
-@dataclass
-class WorkerRunResult:
-    worker_id: int
-    allocated_steps: int
-    completed_steps: int
-    logs: List[Dict[str, Any]]
-    defects: Any  # DefectTracker from monkeylm.core – forward ref avoids circular import
-    network_injections: List[Dict[str, Any]]
-    launch_info: Dict[str, Any]
-
-
-# ── Defect Ticket for Remediation Blueprints ───────────────────────────────────
-
-
-@dataclass
-class DefectTicket:
-    """Structured engineering defect ticket with remediation blueprint.
-
-    Compiles raw defects into actionable cards optimized for both human review
-    (scannable Markdown/PDF) and machine ingestion by coding agents
-    (structured JSON spec blocks).
-    """
-
-    # Identity & severity
-    defect_uid: str  # e.g., "DEFECT-001"
-    category: str  # e.g., "security_risks", "context_anomalies"
-    severity: str  # CRITICAL, HIGH, MEDIUM, LOW
-    title: str  # concise human-readable defect name
-
-    # Narrative description
-    description: str = ""
-
-    # Context triangulation
-    target_url: str = ""
-    page_state_name: str = ""
-    target_selector: str = ""
-    html_snippet: str = ""
-
-    # Reproduction sequence (list of step dicts)
-    reproduction_steps: List[Dict[str, Any]] = field(default_factory=list)
-
-    # Visual proofs
-    before_screenshot: Optional[str] = None
-    after_screenshot: Optional[str] = None
-    expected_screenshot: Optional[str] = None
-
-    # Root cause & remediation
-    root_cause_analysis: str = ""
-    remediation_instruction: str = ""
-
-    # Raw defect payload (for reference)
-    raw_defects: List[Dict[str, Any]] = field(default_factory=list)
-
-    # Agent-discovered metadata
-    impact: str = ""  # e.g., "Security Risk / Data Pollution"
-    discovered_context_url: str = ""
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Return a flat dictionary suitable for JSON serialization."""
-        return {
-            "defect_uid": self.defect_uid,
-            "category": self.category,
-            "severity": self.severity,
-            "title": self.title,
-            "description": self.description,
-            "impact": self.impact,
-            "target_url": self.target_url,
-            "page_state_name": self.page_state_name,
-            "discovered_context_url": self.discovered_context_url,
-            "target_selector": self.target_selector,
-            "html_snippet": self.html_snippet,
-            "reproduction_steps": self.reproduction_steps,
-            "before_screenshot": self.before_screenshot,
-            "after_screenshot": self.after_screenshot,
-            "expected_screenshot": self.expected_screenshot,
-            "root_cause_analysis": self.root_cause_analysis,
-            "remediation_instruction": self.remediation_instruction,
-        }
-
-    @property
-    def spec_block(self) -> Dict[str, Any]:
-        """Build the Remediation Spec Block for machine ingestion by coding agents.
-
-        Structured as a JSON-ready map with defect_type, target_element schema,
-        reproduction_sequence, root_cause_analysis, and remediation_instruction.
-        """
-        # Derive target_element from selector + html_snippet
-        target_element: Dict[str, Any] = {}
-        if self.target_selector:
-            target_element["selector"] = self.target_selector
-        if self.html_snippet:
-            # Extract tag and attributes from snippet for agent parsing
-            import re as _re
-
-            tag_match = _re.search(r"<(\w+)", self.html_snippet[:200])
-            if tag_match:
-                target_element["tag"] = tag_match.group(1)
-            attr_matches = _re.findall(
-                r'(\w+)\s*=\s*(?:&quot;|")([^"&]*)?(?:&quot;|")',
-                self.html_snippet[:500],
-            )
-            if attr_matches:
-                target_element["attributes"] = dict(attr_matches)
-
-        return {
-            "defect_type": self.category.replace("_", ""),
-            "severity": self.severity,
-            "target_element": target_element,
-            "target_url": self.target_url,
-            "page_state_name": self.page_state_name,
-            "reproduction_sequence": [
-                {
-                    "step": s.get("step", i + 1),
-                    "action": s.get("action", ""),
-                    "selector": s.get("target", ""),
-                    "value": s.get("value", ""),
-                    "url": s.get("url", ""),
-                }
-                for i, s in enumerate(self.reproduction_steps)
-            ],
-            "root_cause_analysis": self.root_cause_analysis,
-            "remediation_instruction": self.remediation_instruction,
-        }
-
-    def to_markdown(self) -> str:
-        """Render this ticket as a Remediation Blueprint card in Markdown."""
-        lines = []
-        sev_icon = {"CRITICAL": "🔴", "HIGH": "🟠", "MEDIUM": "⚠️ ", "LOW": "ℹ️ "}.get(
-            self.severity, "⚪"
-        )
-
-        lines.append(f"## [{self.severity}] {sev_icon} {self.defect_uid}: {self.title}")
-        if self.impact:
-            lines.append(f"- **Impact:** {self.impact}")
-        if self.target_selector:
-            lines.append(f"- **Target Selector:** `{self.target_selector}`")
-        if self.target_url:
-            lines.append(f"- **Discovered Context:** {self.target_url}")
-        if self.page_state_name:
-            lines.append(f"- **Page State:** {self.page_state_name}")
-
-        # Reproduction steps
-        if self.reproduction_steps:
-            lines.append("")
-            lines.append("**Reproduction Steps:**")
-            for s in self.reproduction_steps:
-                step_num = s.get("step", "?")
-                action = s.get("action", "")
-                target = s.get("target", "")
-                value = s.get("value", "")
-                url = s.get("url", "")
-                line = f"{step_num}. `{action}"
-                if target:
-                    line += f" on `{target}`"
-                if value:
-                    line += f" value=`{value[:60]}`"
-                line += "`"
-                if url:
-                    line += f" — {url}"
-                lines.append(f"- {line}")
-
-        # Root cause analysis
-        if self.root_cause_analysis:
-            lines.append("")
-            lines.append(f"**Root Cause Analysis:** {self.root_cause_analysis}")
-
-        # Remediation instruction
-        if self.remediation_instruction:
-            lines.append("")
-            lines.append(f"**Remediation Instruction:** {self.remediation_instruction}")
-
-        # Visual proofs
-        screenshots = []
-        for label, path in [
-            ("Before", self.before_screenshot),
-            ("After", self.after_screenshot),
-            ("Expected", self.expected_screenshot),
-        ]:
-            if path:
-                screenshots.append(f"`!{label} [{path}](./{path})`")
-        if screenshots:
-            lines.append("")
-            lines.append("**Visual Proofs:** " + ", ".join(screenshots))
-
-        # Machine-readable spec block (JSON)
-        lines.append("")
-        lines.append("```json")
-        lines.append(json_dumps(self.spec_block, indent=2))
-        lines.append("```")
-
-        return "\n".join(lines)
-
-    def agent_context_block(self) -> Dict[str, Any]:
-        """Build the agent_context JSON block for HIGH/MEDIUM severity defects.
-
-        Produces the exact schema required for downstream coding agents:
-        defect_type, severity, target_url, target_selector, reproduction_action,
-        observed_error, and reremediation_instruction.
-        """
-        # Derive reproduction action from the defect's raw data or first step
-        action = "click"  # default
-        payload_used = ""
-        if self.reproduction_steps:
-            last_step = self.reproduction_steps[-1]
-            action = last_step.get("action", "").lower() or "click"
-            if last_step.get("value"):
-                payload_used = str(last_step["value"])[:200]
-            elif last_step.get("target"):
-                payload_used = str(last_step["target"])[:200]
-
-        # Extract observed error from raw defects
-        observed_error = ""
-        for rd in self.raw_defects:
-            err = rd.get("error", "") or rd.get("message", "") or rd.get("description", "")
-            if err:
-                observed_error = str(err)[:500]
-                break
-        if not observed_error and self.description:
-            observed_error = self.description[:500]
-
-        # Map action to valid categories
-        action_map = {"type": "type", "submit": "submit_form", "press": "click",
-                      "fill": "type", "check": "click"}
-        normalized_action = action_map.get(action, action) if action in action_map else (
-            "submit_form" if "form" in action or "submit" in action else "click"
-        )
-
-        return {
-            "agent_context": {
-                "defect_type": self.category,
-                "severity": self.severity,
-                "target_url": self.target_url,
-                "target_selector": self.target_selector,
-                "reproduction_action": {
-                    "action": normalized_action,
-                    "payload_used": payload_used,
-                },
-                "observed_error": observed_error,
-                "reremediation_instruction": self.remediation_instruction,
-            }
-        }
-
-
-# Ensure json.dumps is available for to_markdown()
-import json as _json_module
-
-json_dumps = _json_module.dumps
-
-
-# ── Defect normalization (used by core.py DefectTracker) ───────────────────────
+# ── Defect normalization (used by core.py DefectTracker) ─────────────────────
 
 
 def _normalize_defect(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Normalize any ad-hoc defect payload into the canonical five-field schema."""
     out = dict(payload)
 
     if "selector" not in out or not out["selector"]:
@@ -1162,8 +732,6 @@ def _local_service_log(message: str, output_dir: str = "") -> None:
     print("\u26a0\ufe0f", log_line)
     if output_dir:
         try:
-            import os
-
             log_path = os.path.join(output_dir, "service_connectivity.log")
             with open(log_path, "a", encoding="utf-8") as f:
                 f.write(log_line + "\n")
@@ -1182,3 +750,300 @@ def split_domain_and_route(url: str) -> tuple[str, str]:
     if parsed.query:
         route = f"{route}?{parsed.query}"
     return domain, route
+
+
+# ── Runtime override globals (for backward-compatible CLI usage) ──────────────
+
+import logging as _logging
+
+_logger = _logging.getLogger("monkeylm.config")
+
+ACTIVE_SEED: Optional[str] = None
+TARGET_URL: str = DEFAULT_TARGET_URL
+OLLAMA_MODEL: str = DEFAULT_OLLAMA_MODEL
+OLLAMA_TIMEOUT_SECONDS: float = DEFAULT_OLLAMA_TIMEOUT_SECONDS
+VISION_MODEL: str = DEFAULT_VISION_MODEL
+MAX_STEPS: int = DEFAULT_MAX_STEPS
+MAX_STEPS_PER_WORKER: int = DEFAULT_MAX_STEPS_PER_WORKER
+WORKERS: int = DEFAULT_WORKERS
+WORKER_NAVIGATION_RETRIES: int = DEFAULT_WORKER_NAVIGATION_RETRIES
+WORKER_QDRANT_INIT_RETRIES: int = DEFAULT_WORKER_QDRANT_INIT_RETRIES
+WORKER_BOUNDARY_RECOVERY_RETRIES: int = DEFAULT_WORKER_BOUNDARY_RECOVERY_RETRIES
+RETRY_BASE_DELAY_SECONDS: float = DEFAULT_RETRY_BASE_DELAY_SECONDS
+HEADLESS: bool = DEFAULT_HEADLESS
+BROWSER_WINDOW_SIZE: str = DEFAULT_WINDOW_SIZE
+NO_VIEWPORT: bool = DEFAULT_NO_VIEWPORT
+POSTGRES_DSN: str = DEFAULT_POSTGRES_DSN
+REDIS_URL: str = DEFAULT_REDIS_URL
+REDIS_PREFIX: str = DEFAULT_REDIS_PREFIX
+REDIS_PATH_LOCK_TTL_SECONDS: int = DEFAULT_REDIS_PATH_LOCK_TTL_SECONDS
+GOLDEN_BASELINE_MODE: str = DEFAULT_GOLDEN_BASELINE_MODE
+STRICT_PERSISTENCE: bool = DEFAULT_STRICT_PERSISTENCE
+QDRANT_URL: str = DEFAULT_QDRANT_URL
+QDRANT_COLLECTION: str = DEFAULT_QDRANT_COLLECTION
+QDRANT_ENABLE_READS: bool = DEFAULT_QDRANT_ENABLE_READS
+QDRANT_ENABLE_WRITES: bool = DEFAULT_QDRANT_ENABLE_WRITES
+QDRANT_EMBEDDING_PROVIDER: str = DEFAULT_QDRANT_EMBEDDING_PROVIDER
+QDRANT_EMBEDDING_MODEL: str = DEFAULT_QDRANT_EMBEDDING_MODEL
+QDRANT_RERANK_ENABLED: bool = DEFAULT_QDRANT_RERANK_ENABLED
+QDRANT_RERANK_MODEL: str = DEFAULT_QDRANT_RERANK_MODEL
+QDRANT_CANDIDATE_LIMIT: int = DEFAULT_QDRANT_CANDIDATE_LIMIT
+QDRANT_ADMIN_ACTION: str = ""
+OUTPUT_DIR: str = f"reports/testrun_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+RUN_USER_DATA_DIR: str = f"playwright_user_data/session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+_RUNTIME_GLOBAL_SCHEMA: Dict[str, Any] = {
+    "TARGET_URL": str,
+    "OLLAMA_MODEL": str,
+    "OLLAMA_TIMEOUT_SECONDS": (int, float),
+    "VISION_MODEL": str,
+    "MAX_STEPS": int,
+    "MAX_STEPS_PER_WORKER": int,
+    "WORKERS": int,
+    "WORKER_NAVIGATION_RETRIES": int,
+    "WORKER_QDRANT_INIT_RETRIES": int,
+    "WORKER_BOUNDARY_RECOVERY_RETRIES": int,
+    "RETRY_BASE_DELAY_SECONDS": (int, float),
+    "HEADLESS": bool,
+    "BROWSER_WINDOW_SIZE": str,
+    "NO_VIEWPORT": bool,
+    "POSTGRES_DSN": str,
+    "REDIS_URL": str,
+    "REDIS_PREFIX": str,
+    "REDIS_PATH_LOCK_TTL_SECONDS": int,
+    "GOLDEN_BASELINE_MODE": str,
+    "STRICT_PERSISTENCE": bool,
+    "QDRANT_URL": str,
+    "QDRANT_COLLECTION": str,
+    "QDRANT_EMBEDDING_PROVIDER": str,
+    "QDRANT_EMBEDDING_MODEL": str,
+    "QDRANT_RERANK_ENABLED": bool,
+    "QDRANT_RERANK_MODEL": str,
+    "QDRANT_CANDIDATE_LIMIT": int,
+    "QDRANT_ADMIN_ACTION": str,
+    "QDRANT_ENABLE_READS": bool,
+    "QDRANT_ENABLE_WRITES": bool,
+}
+
+_SENSITIVE_CONFIG_KEYS: frozenset = frozenset(["POSTGRES_DSN", "REDIS_URL"])
+_POS_INT_KEYS: frozenset = frozenset([
+    "MAX_STEPS", "MAX_STEPS_PER_WORKER", "WORKERS",
+    "WORKER_NAVIGATION_RETRIES", "WORKER_QDRANT_INIT_RETRIES",
+    "WORKER_BOUNDARY_RECOVERY_RETRIES", "REDIS_PATH_LOCK_TTL_SECONDS",
+    "QDRANT_CANDIDATE_LIMIT",
+])
+_POS_FLOAT_KEYS: frozenset = frozenset(["OLLAMA_TIMEOUT_SECONDS", "RETRY_BASE_DELAY_SECONDS"])
+_QDRANT_ADMIN_ACTIONS_ALLOWED: frozenset = frozenset(["", "inspect", "clear"])
+
+
+def _safe_set_global(key: str, value: Any) -> None:
+    if key not in _RUNTIME_GLOBAL_SCHEMA:
+        _logger.warning("Runtime override rejected: key '%s' not in whitelist", key)
+        return
+
+    expected = _RUNTIME_GLOBAL_SCHEMA[key]
+    if not isinstance(value, expected):
+        try:
+            coercer = expected[0] if isinstance(expected, tuple) else expected
+            value = coercer(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Invalid type for {key}: expected {expected}, got {type(value).__name__}"
+            ) from exc
+
+    if key in _POS_INT_KEYS and value <= 0:
+        raise ValueError(f"{key} must be a positive integer, got {value}")
+
+    if key in _POS_FLOAT_KEYS and value <= 0:
+        raise ValueError(f"{key} must be positive, got {value}")
+
+    if key == "QDRANT_ADMIN_ACTION" and value not in _QDRANT_ADMIN_ACTIONS_ALLOWED:
+        raise ValueError(
+            f"QDRANT_ADMIN_ACTION must be one of {_QDRANT_ADMIN_ACTIONS_ALLOWED - {''}}, got {value!r}"
+        )
+
+    globals()[key] = value
+
+    if key in _SENSITIVE_CONFIG_KEYS:
+        _logger.warning("Sensitive config override applied: %s", key)
+
+
+def apply_runtime_overrides(args: argparse.Namespace) -> None:
+    if getattr(args, "seed", None) is not None:
+        try:
+            seed_val = int(args.seed)
+        except (TypeError, ValueError):
+            raise ValueError(f"seed must be an integer, got {args.seed!r}")
+        global ACTIVE_SEED
+        ACTIVE_SEED = str(seed_val)
+        random.seed(seed_val)
+
+    _SIMPLE_OVERRIDES: List[tuple] = [
+        ("target_url", "TARGET_URL"),
+        ("ollama_model", "OLLAMA_MODEL"),
+        ("ollama_timeout_seconds", "OLLAMA_TIMEOUT_SECONDS"),
+        ("vision_model", "VISION_MODEL"),
+        ("max_steps", "MAX_STEPS"),
+        ("max_steps_per_worker", "MAX_STEPS_PER_WORKER"),
+        ("workers", "WORKERS"),
+        ("worker_navigation_retries", "WORKER_NAVIGATION_RETRIES"),
+        ("worker_qdrant_init_retries", "WORKER_QDRANT_INIT_RETRIES"),
+        ("worker_boundary_recovery_retries", "WORKER_BOUNDARY_RECOVERY_RETRIES"),
+        ("retry_base_delay_seconds", "RETRY_BASE_DELAY_SECONDS"),
+        ("headless", "HEADLESS"),
+        ("window_size", "BROWSER_WINDOW_SIZE"),
+        ("no_viewport", "NO_VIEWPORT"),
+        ("postgres_dsn", "POSTGRES_DSN"),
+        ("redis_url", "REDIS_URL"),
+        ("redis_prefix", "REDIS_PREFIX"),
+        ("redis_path_lock_ttl_seconds", "REDIS_PATH_LOCK_TTL_SECONDS"),
+        ("golden_baseline_mode", "GOLDEN_BASELINE_MODE"),
+        ("strict_persistence", "STRICT_PERSISTENCE"),
+    ]
+
+    for attr, gkey in _SIMPLE_OVERRIDES:
+        val = getattr(args, attr, None)
+        if val is not None:
+            _safe_set_global(gkey, val)
+
+    _QDRANT_OVERRIDES: List[tuple] = [
+        ("qdrant_url", "QDRANT_URL"),
+        ("qdrant_collection", "QDRANT_COLLECTION"),
+        ("qdrant_embedding_provider", "QDRANT_EMBEDDING_PROVIDER"),
+        ("qdrant_embedding_model", "QDRANT_EMBEDDING_MODEL"),
+        ("qdrant_enable_rerank", "QDRANT_RERANK_ENABLED"),
+        ("qdrant_rerank_model", "QDRANT_RERANK_MODEL"),
+        ("qdrant_candidate_limit", "QDRANT_CANDIDATE_LIMIT"),
+    ]
+
+    for attr, gkey in _QDRANT_OVERRIDES:
+        val = getattr(args, attr, None)
+        if val is not None:
+            _safe_set_global(gkey, val)
+
+    admin_action = getattr(args, "qdrant_admin_action", None)
+    if admin_action is not None:
+        _safe_set_global("QDRANT_ADMIN_ACTION", admin_action)
+    elif getattr(args, "qdrant_inspect", False):
+        globals()["QDRANT_ADMIN_ACTION"] = "inspect"
+    elif getattr(args, "qdrant_clear", False):
+        globals()["QDRANT_ADMIN_ACTION"] = "clear"
+
+    if getattr(args, "qdrant_disable_reads", False):
+        globals()["QDRANT_ENABLE_READS"] = False
+    if getattr(args, "qdrant_disable_writes", False) or getattr(args, "qdrant_read_only", False):
+        globals()["QDRANT_ENABLE_WRITES"] = False
+    if getattr(args, "qdrant_disable_rerank", False):
+        globals()["QDRANT_RERANK_ENABLED"] = False
+
+
+__all__ = [
+    "Faker",
+    "Image",
+    "ImageDraw",
+    "pil_pixelmatch",
+    "asyncpg",
+    "redis_asyncio",
+    "httpx",
+    "_REPORTLAB_AVAILABLE",
+    "DEFAULT_TARGET_URL",
+    "DEFAULT_OLLAMA_MODEL",
+    "DEFAULT_OLLAMA_TIMEOUT_SECONDS",
+    "DEFAULT_MAX_STEPS",
+    "DEFAULT_WORKERS",
+    "DEFAULT_MAX_STEPS_PER_WORKER",
+    "DEFAULT_WORKER_NAVIGATION_RETRIES",
+    "DEFAULT_WORKER_QDRANT_INIT_RETRIES",
+    "DEFAULT_WORKER_BOUNDARY_RECOVERY_RETRIES",
+    "DEFAULT_RETRY_BASE_DELAY_SECONDS",
+    "MAX_ALLOWED_RETRIES",
+    "MAX_ALLOWED_RETRY_BASE_DELAY_SECONDS",
+    "DEFAULT_HEADLESS",
+    "DEFAULT_WINDOW_SIZE",
+    "DEFAULT_NO_VIEWPORT",
+    "DEFAULT_POSTGRES_DSN",
+    "DEFAULT_REDIS_URL",
+    "DEFAULT_REDIS_PREFIX",
+    "DEFAULT_REDIS_PATH_LOCK_TTL_SECONDS",
+    "DEFAULT_GOLDEN_BASELINE_MODE",
+    "DEFAULT_STRICT_PERSISTENCE",
+    "DEFAULT_REDIS_STATE_TTL_SECONDS",
+    "DEFAULT_QDRANT_URL",
+    "DEFAULT_QDRANT_COLLECTION",
+    "DEFAULT_QDRANT_VECTOR_SIZE",
+    "DEFAULT_QDRANT_ENABLE_READS",
+    "DEFAULT_QDRANT_ENABLE_WRITES",
+    "DEFAULT_QDRANT_EMBEDDING_PROVIDER",
+    "DEFAULT_QDRANT_EMBEDDING_MODEL",
+    "DEFAULT_QDRANT_RERANK_ENABLED",
+    "DEFAULT_QDRANT_RERANK_MODEL",
+    "DEFAULT_QDRANT_CANDIDATE_LIMIT",
+    "DEFAULT_PDF_GENERATE",
+    "DEFAULT_PDF_VISION_MODEL",
+    "DEFAULT_VISION_MODEL",
+    "DEFAULT_PDF_VISION_TIMEOUT_SECONDS",
+    "AXE_CDN_URL",
+    "VISUAL_DIFF_THRESHOLD_RATIO",
+    "LAYOUT_SHIFT_THRESHOLD_PX",
+    "STATE_LOOP_THRESHOLD",
+    "ACTION_COOLDOWN_SECONDS",
+    "OLLAMA_DECISION_OPTIONS",
+    "ALLOWED_ACTIONS",
+    "SHUTDOWN_EVENT",
+    "GRACEFUL_SHUTDOWN_REQUESTED",
+    "parse_cli_args",
+    "load_settings",
+    "validate_runtime_configuration",
+    "_request_graceful_shutdown",
+    "_register_graceful_shutdown_signals",
+    "normalize_action_plan",
+    "is_in_scope",
+    "build_redis_key",
+    "_normalize_defect",
+    "_local_service_log",
+    "split_domain_and_route",
+    "FormControlRecord",
+    "FormRecord",
+    "PageSnapshot",
+    "PersonaGoal",
+    "CriticalFlow",
+    "TestingStrategy",
+    "Settings",
+    "WorkerRunResult",
+    "DefectTicket",
+    "ACTIVE_SEED",
+    "TARGET_URL",
+    "OLLAMA_MODEL",
+    "OLLAMA_TIMEOUT_SECONDS",
+    "VISION_MODEL",
+    "MAX_STEPS",
+    "MAX_STEPS_PER_WORKER",
+    "WORKERS",
+    "WORKER_NAVIGATION_RETRIES",
+    "WORKER_QDRANT_INIT_RETRIES",
+    "WORKER_BOUNDARY_RECOVERY_RETRIES",
+    "RETRY_BASE_DELAY_SECONDS",
+    "HEADLESS",
+    "BROWSER_WINDOW_SIZE",
+    "NO_VIEWPORT",
+    "POSTGRES_DSN",
+    "REDIS_URL",
+    "REDIS_PREFIX",
+    "REDIS_PATH_LOCK_TTL_SECONDS",
+    "GOLDEN_BASELINE_MODE",
+    "STRICT_PERSISTENCE",
+    "QDRANT_URL",
+    "QDRANT_COLLECTION",
+    "QDRANT_ENABLE_READS",
+    "QDRANT_ENABLE_WRITES",
+    "QDRANT_EMBEDDING_PROVIDER",
+    "QDRANT_EMBEDDING_MODEL",
+    "QDRANT_RERANK_ENABLED",
+    "QDRANT_RERANK_MODEL",
+    "QDRANT_CANDIDATE_LIMIT",
+    "QDRANT_ADMIN_ACTION",
+    "OUTPUT_DIR",
+    "RUN_USER_DATA_DIR",
+    "apply_runtime_overrides",
+    "_safe_set_global",
+]
