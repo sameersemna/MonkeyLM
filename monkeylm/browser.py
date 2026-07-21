@@ -629,6 +629,23 @@ async def _check_and_handle_dialogs(page: Page) -> None:
         pass
 
 
+def _looks_like_ip_literal(host: str) -> bool:
+    """Return True if *host* looks like an IPv4 or IPv6 literal rather than a domain name.
+
+    Heuristic: IPv4 is digits and dots; IPv6 contains colons or is bracket-wrapped.
+    Domain names always contain at least one letter (or non-ASCII) and no colons.
+    """
+    if not host:
+        return False
+    if host.startswith("["):
+        return True
+    if ":" in host:
+        return True
+    if re.fullmatch(r"[0-9.]+", host):
+        return True
+    return False
+
+
 def _validate_navigation_url(url: str) -> str:
     """Validate navigation URL to prevent open redirect and SSRF attacks.
     
@@ -648,17 +665,18 @@ def _validate_navigation_url(url: str) -> str:
         )
     
     # SSRF: block private/reserved IPs
-    try:
-        host = parsed.hostname
-        if host:
-            addr = ipaddress.ip_address(host)
+    host = parsed.hostname
+    if host:
+        if _looks_like_ip_literal(host):
+            try:
+                addr = ipaddress.ip_address(host)
+            except ValueError:
+                raise ValueError(f"Navigation to malformed IP '{host}' blocked (SSRF protection)")
             if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_multicast:
                 raise ValueError(f"Navigation to private/reserved IP ({host}) is blocked")
-    except ValueError:
-        if isinstance(host, str) and not host.startswith("["):
-            raise ValueError(f"Navigation to IP '{host}' blocked (SSRF protection)")
-        # hostname is a domain name — allow
-    
+        # Domain names pass through; DNS rebinding is mitigated by
+        # is_in_scope() checking netloc equality after navigation.
+
     return cleaned
 
 
