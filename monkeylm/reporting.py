@@ -792,6 +792,14 @@ def generate_markdown_report(
 **Graceful Shutdown:** {"requested" if browser_launch_info.get('graceful_shutdown_requested') else "not requested"}  
 **Output Folder:** `{settings.output_dir}`
 
+## LLM Configuration
+
+| Model | Name |
+|-------|------|
+| **Decision Model** | `{settings.ollama_model}` |
+| **Vision Model** | `{settings.vision_model}` |
+| **PDF Vision Model** | `{settings.pdf_vision_model}` |
+
 ## Summary
 The agent performed {total_steps} actions using **{settings.ollama_model}**.
 Actions included: Clicking, Typing, Form Submission, Modal Handling, and State Escapes.
@@ -1201,6 +1209,34 @@ def generate_pdf_report(
             )
         )
         story.append(summary_table)
+        story.append(Spacer(1, 0.2 * inch))
+
+        # LLM Configuration section
+        story.append(Paragraph("<b>LLM Configuration</b>", styles["Heading2"]))
+        story.append(Spacer(1, 0.1 * inch))
+        llm_data = [
+            ["Model Role", "Model Name"],
+            ["Decision Model", _xml_escape(settings.ollama_model)],
+            ["Vision Model", _xml_escape(settings.vision_model)],
+            ["PDF Vision Model", _xml_escape(settings.pdf_vision_model)],
+        ]
+        llm_table = Table(llm_data, colWidths=[3.0 * inch, 3.0 * inch])
+        llm_table.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2c3e50")),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
+                    ("ALIGN", (0, 0), (-1, -1), "LEFT"),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTSIZE", (0, 0), (-1, 0), 11),
+                    ("BOTTOMPADDING", (0, 0), (-1, 0), 8),
+                    ("BACKGROUND", (0, 1), (-1, -1), colors.HexColor("#f8f9fa")),
+                    ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ]
+            )
+        )
+        story.append(llm_table)
         story.append(Spacer(1, 0.3 * inch))
 
         # ─── Unified Defect Audit Cards with Inline Screenshots ──────────

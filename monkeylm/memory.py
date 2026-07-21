@@ -613,13 +613,13 @@ class PersistenceEngine:
             if self.settings.golden_baseline_mode == "auto_upsert":
                 await self._upsert_baseline(
                     domain=domain,
-                    page_route=page_route,
+                    page_route=normalized_route,
                     dom_structure_hash=snapshot.structure_hash,
                     component_manifest=component_manifest,
                     is_golden_standard=True,
                 )
                 _local_service_log(
-                    f"Auto-seeded golden baseline for {domain}{page_route}.", self.settings.output_dir
+                    f"Auto-seeded golden baseline for {domain}{normalized_route}.", self.settings.output_dir
                 )
             else:
                 _local_service_log(

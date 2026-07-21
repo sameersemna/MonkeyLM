@@ -1215,11 +1215,30 @@ async def execute_action(
             # Guard: resolve form boundary before any mutation
             form_locator, form_reason = await _resolve_form_boundary(page, target)
             if form_locator is None:
-                log_entry["status"] = "SKIPPED_NOT_FORM"
-                log_entry["error"] = f"form_boundary_not_resolved: {form_reason}"
-                print(
-                    f"   ⚠️ Step {step_num}: submit_form skipped — {form_reason} (target='{target}')"
-                )
+                # Fallback: LLM sometimes picks a link/button styled as a submit but not
+                # inside a <form>. Click it instead of skipping entirely.
+                fallback_locator = await _locator_for_target_id(page, target)
+                if fallback_locator is not None:
+                    try:
+                        await fallback_locator.click(timeout=3000)
+                        log_entry["status"] = "FALLBACK_CLICK"
+                        log_entry["action"] = "click"
+                        log_entry["error"] = None
+                        print(
+                            f"   -> submit_form target has no form ancestor; falling back to click (target='{target}')"
+                        )
+                    except Exception as click_exc:
+                        log_entry["status"] = "SKIPPED_NOT_FORM"
+                        log_entry["error"] = f"form_boundary_not_resolved: {form_reason}; fallback click failed: {click_exc}"
+                        print(
+                            f"   ⚠️ Step {step_num}: submit_form skipped — {form_reason} (target='{target}')"
+                        )
+                else:
+                    log_entry["status"] = "SKIPPED_NOT_FORM"
+                    log_entry["error"] = f"form_boundary_not_resolved: {form_reason}"
+                    print(
+                        f"   ⚠️ Step {step_num}: submit_form skipped — {form_reason} (target='{target}')"
+                    )
             else:
                 for payload in input_payloads:
                     payload_target = payload.get("target", "")
