@@ -19,6 +19,7 @@ from monkeylm.config import (
     LAYOUT_SHIFT_THRESHOLD_PX,
     VISUAL_DIFF_THRESHOLD_RATIO,
     Image,
+    PIL_Image,
     pil_pixelmatch,
     _local_service_log,
 )
@@ -559,10 +560,10 @@ def compare_screenshots_pixelmatch(
     diff_image_path = os.path.join(output_dir, _sanitize_filename(f"visual_diff_step_{step_num:03d}.png"))
     result["diff_image"] = diff_image_path
 
-    if pil_pixelmatch and Image:
+    if pil_pixelmatch and Image and PIL_Image:
         try:
-            before_img = Image.open(before_path).convert("RGBA")
-            after_img = Image.open(after_path).convert("RGBA")
+            before_img = PIL_Image.open(before_path).convert("RGBA")
+            after_img = PIL_Image.open(after_path).convert("RGBA")
             if before_img.size != after_img.size:
                 after_img = after_img.resize(before_img.size)
             diff_img = Image.new("RGBA", before_img.size)
@@ -1552,7 +1553,9 @@ async def execute_action(
                 active_vision_model = settings.vision_model or settings.pdf_vision_model
                 print(f"   └─ 📸 Annotating screenshot with {active_vision_model}...")
                 original_path = os.path.join(settings.output_dir, log_entry["screenshot"])
-                annotated_path = await annotate_relevant_screenshot(settings, original_path, context_issue)
+                annotated_path = await annotate_relevant_screenshot(
+                    settings, original_path, context_issue, step_num=step_num
+                )
                 if annotated_path != original_path:
                     log_entry["screenshot"] = os.path.basename(annotated_path)
                     log_entry["screenshot_annotated"] = True

@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 from monkeylm.config import (
     Image,
+    PIL_Image,
     _REPORTLAB_AVAILABLE,
 )
 from monkeylm.types import DefectTicket
@@ -1357,8 +1358,8 @@ def generate_pdf_report(
             try:
                 img_width = max_width * inch
                 img_height = 4.0 * inch
-                if Image is not None:
-                    with Image.open(image_path) as img:
+                if Image is not None and PIL_Image is not None:
+                    with PIL_Image.open(image_path) as img:
                         orig_w, orig_h = img.size
                         aspect = orig_h / max(1, orig_w)
                         img_height = min(img_width * aspect, 3.5 * inch)
@@ -1416,7 +1417,7 @@ def generate_pdf_report(
         # Only include screenshots for non-SUCCESS status (errors/problems/issues)
         # to keep the audit report focused on items that need attention.
         annotated_logs = [
-            log for log in test_logs 
+            log for log in test_logs
             if (log.get("screenshot_annotated") or str(log.get("screenshot", "")).endswith("_annotated.png"))
             and log.get("status", "UNKNOWN") != "SUCCESS"
         ]
@@ -1426,6 +1427,33 @@ def generate_pdf_report(
             story.append(PageBreak())
             story.append(Paragraph("Visual Proof Plates", styles["Heading2"]))
             story.append(Spacer(1, 0.1 * inch))
+            story.append(Paragraph(
+                "Each plate below is the actual screenshot from the failing step, "
+                "annotated with a red bounding box (the issue region), a pointer arrow, "
+                "and a wrapping text label that explains what the vision model located. "
+                "Use these to triage without leaving the PDF.",
+                styles["BodyText"],
+            ))
+            story.append(Spacer(1, 0.15 * inch))
+
+            # Map step→defect_reasons for caption enrichment
+            step_defect_reasons: Dict[int, List[str]] = {}
+            for cat_name, cat_items in [
+                ("security_risk", defects.security_risks),
+                ("visual_regression", defects.visual_regressions),
+                ("layout_instability", defects.layout_instability),
+                ("a11y_violation", defects.accessibility_violations),
+                ("perf_bottleneck", defects.performance_bottlenecks),
+                ("console_finding", defects.console_findings),
+                ("race_condition", defects.race_findings),
+                ("boundary_drift", defects.boundary_drift),
+            ]:
+                for it in cat_items or []:
+                    sn = it.get("step")
+                    if sn is None:
+                        continue
+                    label = f"{cat_name}:{it.get('type', 'unknown')}"
+                    step_defect_reasons.setdefault(int(sn), []).append(label)
 
             for log in proof_plate_logs:
                 screenshot_name = log.get("screenshot", "")
@@ -1440,18 +1468,46 @@ def generate_pdf_report(
                 action = log.get("action", "")
                 target = log.get("target", "")
                 error = log.get("error", "")
-                story.append(
-                    Paragraph(f"Step {step}: {_xml_escape(action)} on '{_xml_escape(target)}' — status {status}", styles["Heading3"])
-                )
-                if error:
-                    story.append(Paragraph(f"<font color='red'>Error:</font> {_xml_escape(error[:200])}", styles["BodyText"]))
+                description = log.get("screenshot_description", "")
+                reasons = step_defect_reasons.get(int(step) if isinstance(step, int) else -1, [])
 
+                # Plate header
+                story.append(Paragraph(
+                    f"Step {step}: {_xml_escape(action)} on '{_xml_escape(target)}' — status {status}",
+                    styles["Heading3"],
+                ))
+
+                # Defect reasons (what triggered this plate to be drawn)
+                if reasons:
+                    reason_line = "Why this plate was drawn: " + ", ".join(
+                        _xml_escape(r) for r in reasons[:6]
+                    )
+                    if len(reasons) > 6:
+                        reason_line += f" (+{len(reasons) - 6} more)"
+                    story.append(Paragraph(reason_line, description_style))
+
+                # Vision-model description (the in-image caption text)
+                if description:
+                    story.append(Paragraph(
+                        f"<b>Vision annotation:</b> {_xml_escape(description)}",
+                        description_style,
+                    ))
+
+                # Error text (if any)
+                if error:
+                    story.append(Paragraph(
+                        f"<font color='red'>Error:</font> {_xml_escape(error[:200])}",
+                        styles["BodyText"],
+                    ))
+
+                # The annotated image
                 img_flowable = _build_scaled_image(screenshot_name)
                 if img_flowable is not None:
+                    story.append(Spacer(1, 0.05 * inch))
                     story.append(img_flowable)
                 else:
                     story.append(Paragraph("⚠️ Screenshot not available", styles["BodyText"]))
-                story.append(Spacer(1, 0.15 * inch))
+                story.append(Spacer(1, 0.2 * inch))
 
         doc.build(story)
         # Enforce restrictive file permissions for PDF output

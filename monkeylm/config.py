@@ -34,11 +34,32 @@ from monkeylm.types import (
 
 
 def _optional_import(module_name: str, attr_name: Optional[str] = None):
+    """Import a module or submodule, returning ``None`` on any failure.
+
+    Supports dotted names like ``"PIL.Image"`` so that packages with lazy
+    submodule imports (e.g., Pillow 11+) can be loaded correctly. When
+    ``module_name`` is a package and ``attr_name`` is given, the full
+    ``module_name.attr_name`` path is imported to bypass lazy-loading
+    inconsistencies, then the attribute is resolved.
+    """
     try:
         import importlib
 
+        if attr_name is None:
+            return importlib.import_module(module_name)
+
+        # First try the lazy-friendly path: import the full dotted name so
+        # Pillow 11+ (and similar) actually loads the submodule.
+        try:
+            full = importlib.import_module(f"{module_name}.{attr_name}")
+            return getattr(full, attr_name, full)
+        except Exception:
+            pass
+
+        # Fallback: import the parent and look up the attribute (matches
+        # the legacy behavior for packages that expose submodules eagerly).
         module = importlib.import_module(module_name)
-        return getattr(module, attr_name) if attr_name else module
+        return getattr(module, attr_name, module)
     except Exception:
         return None
 
@@ -58,8 +79,16 @@ def _load_dotenv() -> None:
 _load_dotenv()
 
 Faker = _optional_import("faker", "Faker")
-Image = _optional_import("PIL", "Image")
-ImageDraw = _optional_import("PIL", "ImageDraw")
+# ``PIL_Image`` is the ``PIL.Image`` module (provides module-level helpers like
+# ``Image.open``); ``Image`` is the class itself (provides ``Image.new`` etc.).
+# ``PIL_ImageDraw`` and ``ImageDraw`` follow the same module/class split for
+# ``ImageDraw.Draw``. Both forms are needed because Pillow splits helpers and
+# the corresponding class between the module and the class.
+PIL_Image = _optional_import("PIL.Image")
+Image = _optional_import("PIL.Image", "Image") or PIL_Image
+PIL_ImageDraw = _optional_import("PIL.ImageDraw")
+ImageDraw = _optional_import("PIL.ImageDraw", "ImageDraw") or PIL_ImageDraw
+PIL_ImageFont = _optional_import("PIL.ImageFont")
 pil_pixelmatch = _optional_import("pixelmatch.contrib.PIL", "pixelmatch")
 asyncpg = _optional_import("asyncpg")
 redis_asyncio = _optional_import("redis.asyncio")

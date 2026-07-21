@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import random
 import re
 from typing import Any, Dict, List, Optional, Tuple
@@ -13,6 +14,9 @@ import ollama
 from monkeylm.config import (
     Image,
     ImageDraw,
+    PIL_Image,
+    PIL_ImageDraw,
+    PIL_ImageFont,
     OLLAMA_DECISION_OPTIONS,
     Settings,
     _local_service_log,
@@ -885,51 +889,337 @@ def _extract_box_from_prose(content: str) -> Optional[List[float]]:
     return None
 
 
-def _draw_red_box_arrow(image_path: str, box_pct: List[float], context_issue: str, output_path: str) -> bool:
-    """Draw a red bounding box + pointer arrow on a screenshot."""
-    if Image is None or ImageDraw is None:
-        return False
+def _resolve_label_font(font_size: int) -> Any:
+    """Return a PIL ImageFont for label rendering, with a graceful fallback.
+
+    Tries a small set of common TrueType font paths (DejaVu is shipped with
+    most Linux distros and is the safest bet). If nothing usable is found,
+    falls back to PIL's default bitmap font, which is always present but
+    cannot scale. Returning ``None`` only if even the bitmap font is gone,
+    which would indicate a broken Pillow install.
+    """
+    if PIL_ImageFont is None:
+        return None
+    candidate_paths = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
+    ]
+    for path in candidate_paths:
+        try:
+            if os.path.isfile(path):
+                return PIL_ImageFont.truetype(path, font_size)
+        except Exception:
+            continue
     try:
-        with Image.open(image_path) as img:
+        return PIL_ImageFont.load_default()
+    except Exception:
+        return None
+
+
+def _wrap_text_to_lines(text: str, font: Any, max_width: int, draw: Any) -> List[str]:
+    """Greedy word-wrap a string to fit ``max_width`` pixels using ``font``.
+
+    Words longer than a line on their own are hard-broken so a hostile or
+    untranslated description never overflows the bounding box. Stops at
+    three lines and always appends ``...`` to the final line if any words
+    were truncated — keeps the label readable in the PDF plates and
+    preserves the contract that overflow is always marked.
+    """
+    if not text:
+        return []
+    truncated = False
+
+    if font is None or max_width <= 0:
+        # No font → no measurement. Hard-wrap by characters.
+        chunk = max(1, max_width // 10)
+        chunks = [text[i : i + chunk] for i in range(0, len(text), chunk)]
+        if len(chunks) > 3:
+            chunks = chunks[:3]
+            truncated = True
+        if truncated and chunks:
+            last = chunks[-1]
+            keep = max(0, len(last) - 3)
+            chunks[-1] = last[:keep] + "..."
+        return chunks
+
+    words = text.split()
+    lines: List[str] = []
+    current = ""
+
+    for word in words:
+        candidate = f"{current} {word}".strip()
+        try:
+            bbox = draw.textbbox((0, 0), candidate, font=font)
+            width = bbox[2] - bbox[0]
+        except Exception:
+            width = len(candidate) * 7
+        if width <= max_width or not current:
+            current = candidate
+        else:
+            lines.append(current)
+            current = word
+        if len(lines) == 3:
+            # We have three full lines. Whatever's left is truncated.
+            if word != current:
+                truncated = True
+            break
+
+    if current and len(lines) < 3:
+        lines.append(current)
+
+    # If we still have leftover words, the text was truncated.
+    used = sum(len(line.split()) for line in lines)
+    total = len(words)
+    if used < total:
+        truncated = True
+
+    if truncated and lines:
+        last = lines[-1]
+        try:
+            bbox = draw.textbbox((0, 0), last + "...", font=font)
+            if bbox[2] - bbox[0] <= max_width:
+                lines[-1] = last + "..."
+            else:
+                # Truncate the last line by characters.
+                keep = max(0, len(last) - 3)
+                lines[-1] = last[:keep] + "..."
+        except Exception:
+            keep = max(0, len(last) - 3)
+            lines[-1] = last[:keep] + "..."
+
+    return lines
+
+
+def _draw_red_box_arrow(
+    image_path: str,
+    box_pct: List[float],
+    context_issue: str,
+    output_path: str,
+    description: Optional[str] = None,
+    step_num: Optional[int] = None,
+) -> bool:
+    """Draw a red bounding box, pointer arrow, and label on a screenshot.
+
+    The annotation is composed of:
+
+    * A black halo (2px) drawn just outside the red border so the box is
+      visible regardless of the underlying page colors.
+    * A red border whose thickness scales with image size (8-12px on a
+      1920x1080 screenshot, 4px minimum for tiny images).
+    * A red arrow that starts from a corner of the image and points at the
+      nearest corner of the bounding box, with a filled circle at the tail
+      and a black halo for visibility.
+    * A wrapping text label above the box (white text on a near-opaque
+      dark background) that combines the vision-model ``description`` with
+      a short slice of the surrounding ``context_issue`` so a reviewer
+      understands *why* the box is drawn.
+    * A small "Step N" badge in the top-left corner for traceability when
+      multiple plates are reviewed side-by-side in the PDF.
+
+    Returns True only if the file was actually written with annotations.
+    """
+    if Image is None or ImageDraw is None or PIL_Image is None or PIL_ImageDraw is None:
+        # Loud failure: previously this was silent. Surface it so a future
+        # Pillow 11+ lazy-import regression is impossible to miss in the log.
+        msg = (
+            "annotate_relevant_screenshot: PIL symbols unavailable "
+            "(Image/ImageDraw/PIL_Image/PIL_ImageDraw). The annotation drawer "
+            "will fall back to a copy of the original screenshot."
+        )
+        print(f"   ⚠️  {msg}")
+        _local_service_log(msg, os.path.dirname(output_path) or ".")
+        return False
+
+    try:
+        with PIL_Image.open(image_path) as img:
             img = img.convert("RGBA")
             width, height = img.size
-            ymin, xmin, ymax, xmax = box_pct
-            x0 = int(max(0.0, min(1.0, xmin)) * width)
-            y0 = int(max(0.0, min(1.0, ymin)) * height)
-            x1 = int(max(0.0, min(1.0, xmax)) * width)
-            y1 = int(max(0.0, min(1.0, ymax)) * height)
+
+            # ── 1. Normalize the box coordinates ─────────────────────────
+            ymin, xmin, ymax, xmax = (float(v) for v in box_pct)
+            x0 = int(max(0, min(width - 1, xmin * width)))
+            y0 = int(max(0, min(height - 1, ymin * height)))
+            x1 = int(max(0, min(width - 1, xmax * width)))
+            y1 = int(max(0, min(height - 1, ymax * height)))
             if x1 <= x0 or y1 <= y0:
                 return False
 
-            draw = ImageDraw.Draw(img)
-            draw.rectangle([x0, y0, x1, y1], outline="red", width=4)
+            # Scale the border thickness so big screenshots get visible marks.
+            border_w = max(4, min(width, height) // 250)
+            halo_w = border_w + 2
+            arrow_w = max(3, min(width, height) // 400)
+            head_len = max(20, min(width, height) // 30)
 
-            arrow_start = (min(width - 20, x1 + 40), max(20, y0 - 40))
-            arrow_end = ((x0 + x1) // 2, (y0 + y1) // 2)
-            draw.line([arrow_start, arrow_end], fill="red", width=4)
+            draw = PIL_ImageDraw.Draw(img)
 
-            dx = arrow_end[0] - arrow_start[0]
-            dy = arrow_end[1] - arrow_start[1]
+            # ── 2. Box border (black halo + red) ─────────────────────────
+            # Outer black halo gives contrast on bright red/orange UIs.
+            draw.rectangle(
+                [x0 - halo_w // 2, y0 - halo_w // 2, x1 + halo_w // 2, y1 + halo_w // 2],
+                outline=(0, 0, 0, 255),
+                width=halo_w,
+            )
+            draw.rectangle(
+                [x0, y0, x1, y1],
+                outline=(220, 30, 30, 255),
+                width=border_w,
+            )
+
+            # ── 3. Arrow from a far corner toward the nearest box corner ─
+            box_cx, box_cy = (x0 + x1) // 2, (y0 + y1) // 2
+            # Choose the tail corner that is farthest from the box center.
+            corners = [
+                (40, 40),
+                (width - 40, 40),
+                (40, height - 40),
+                (width - 40, height - 40),
+            ]
+            tail = max(corners, key=lambda c: (c[0] - box_cx) ** 2 + (c[1] - box_cy) ** 2)
+            # Aim the arrow at the box corner closest to the tail.
+            box_corners = [(x0, y0), (x1, y0), (x0, y1), (x1, y1)]
+            head_target = min(
+                box_corners,
+                key=lambda c: (c[0] - tail[0]) ** 2 + (c[1] - tail[1]) ** 2,
+            )
+
+            # Tail circle for visual anchor (filled red with black halo).
+            tail_radius = max(8, min(width, height) // 140)
+            draw.ellipse(
+                [
+                    tail[0] - tail_radius - 2,
+                    tail[1] - tail_radius - 2,
+                    tail[0] + tail_radius + 2,
+                    tail[1] + tail_radius + 2,
+                ],
+                fill=(0, 0, 0, 255),
+            )
+            draw.ellipse(
+                [tail[0] - tail_radius, tail[1] - tail_radius, tail[0] + tail_radius, tail[1] + tail_radius],
+                fill=(220, 30, 30, 255),
+            )
+
+            # Arrow line in two passes for the black halo effect.
+            draw.line([tail, head_target], fill=(0, 0, 0, 255), width=arrow_w + 2)
+            draw.line([tail, head_target], fill=(220, 30, 30, 255), width=arrow_w)
+
+            # Arrowhead: compute perpendicular unit vectors.
+            dx = head_target[0] - tail[0]
+            dy = head_target[1] - tail[1]
             length = max(1.0, (dx * dx + dy * dy) ** 0.5)
             ux, uy = dx / length, dy / length
             px, py = -uy, ux
-            head_len = 12
             p1 = (
-                arrow_end[0] + int(head_len * (-ux + 0.5 * px)),
-                arrow_end[1] + int(head_len * (-uy + 0.5 * py)),
+                head_target[0] + int(head_len * (-ux + 0.55 * px)),
+                head_target[1] + int(head_len * (-uy + 0.55 * py)),
             )
             p2 = (
-                arrow_end[0] + int(head_len * (-ux - 0.5 * px)),
-                arrow_end[1] + int(head_len * (-uy - 0.5 * py)),
+                head_target[0] + int(head_len * (-ux - 0.55 * px)),
+                head_target[1] + int(head_len * (-uy - 0.55 * py)),
             )
-            draw.line([p1, arrow_end, p2], fill="red", width=4)
+            draw.polygon(
+                [head_target, p1, p2],
+                fill=(220, 30, 30, 255),
+            )
+            # Outline the polygon in black so the head is visible on red UIs.
+            draw.line([p1, head_target, p2], fill=(0, 0, 0, 255), width=max(2, arrow_w // 2))
 
-            label = context_issue[:80]
-            try:
-                label_y = max(12, y0 - 18)
-                draw.text((x0, label_y), label, fill="red")
-            except Exception:
-                pass
+            # ── 4. Description label above the box ──────────────────────
+            label_text = (description or "").strip()
+            if not label_text:
+                # Fall back to the first line of the defect context so the
+                # plate is never totally silent.
+                label_text = (context_issue or "").strip().splitlines()[0] if context_issue else ""
+            label_text = label_text[:240]
+
+            if label_text:
+                font_size = max(14, min(width, height) // 50)
+                font = _resolve_label_font(font_size)
+                max_label_w = width - 40
+                lines = _wrap_text_to_lines(label_text, font, max_label_w, draw)
+
+                # Measure each line so the background fits the longest.
+                line_widths = []
+                ascent = font_size
+                for line in lines:
+                    try:
+                        if font is not None:
+                            bbox = draw.textbbox((0, 0), line, font=font)
+                            line_widths.append(bbox[2] - bbox[0])
+                            ascent = max(ascent, bbox[3] - bbox[1])
+                        else:
+                            line_widths.append(len(line) * 8)
+                    except Exception:
+                        line_widths.append(len(line) * 8)
+                if line_widths:
+                    label_w = min(max_label_w, max(line_widths) + 24)
+                else:
+                    label_w = 200
+                line_h = int(font_size * 1.25)
+                label_h = line_h * max(1, len(lines)) + 16
+
+                # Position above the box if there's room, otherwise below.
+                label_x = max(20, min(width - label_w - 20, x0))
+                if y0 - label_h - 12 >= 8:
+                    label_y = y0 - label_h - 12
+                else:
+                    label_y = min(height - label_h - 8, y1 + 12)
+
+                # Background: near-opaque dark with a thin red border.
+                draw.rectangle(
+                    [label_x, label_y, label_x + label_w, label_y + label_h],
+                    fill=(15, 15, 20, 235),
+                )
+                draw.rectangle(
+                    [label_x, label_y, label_x + label_w, label_y + label_h],
+                    outline=(220, 30, 30, 255),
+                    width=2,
+                )
+
+                for i, line in enumerate(lines):
+                    try:
+                        if font is not None:
+                            draw.text(
+                                (label_x + 12, label_y + 8 + i * line_h),
+                                line,
+                                fill=(255, 255, 255, 255),
+                                font=font,
+                            )
+                        else:
+                            draw.text(
+                                (label_x + 12, label_y + 8 + i * line_h),
+                                line,
+                                fill=(255, 255, 255, 255),
+                            )
+                    except Exception:
+                        pass
+
+            # ── 5. Step badge in the top-left corner ───────────────────
+            if step_num is not None:
+                badge_text = f"Step {step_num}"
+                badge_font_size = max(12, min(width, height) // 80)
+                badge_font = _resolve_label_font(badge_font_size)
+                try:
+                    if badge_font is not None:
+                        bbox = draw.textbbox((0, 0), badge_text, font=badge_font)
+                        bw = bbox[2] - bbox[0] + 20
+                        bh = bbox[3] - bbox[1] + 12
+                    else:
+                        bw = len(badge_text) * 8 + 20
+                        bh = 26
+                except Exception:
+                    bw, bh = 110, 26
+                bx, by = 16, 16
+                draw.rectangle([bx, by, bx + bw, by + bh], fill=(220, 30, 30, 255))
+                draw.rectangle([bx, by, bx + bw, by + bh], outline=(0, 0, 0, 255), width=2)
+                try:
+                    if badge_font is not None:
+                        draw.text((bx + 10, by + 4), badge_text, fill=(255, 255, 255, 255), font=badge_font)
+                    else:
+                        draw.text((bx + 10, by + 4), badge_text, fill=(255, 255, 255, 255))
+                except Exception:
+                    pass
 
             img.save(output_path)
             return True
@@ -938,10 +1228,24 @@ def _draw_red_box_arrow(image_path: str, box_pct: List[float], context_issue: st
         return False
 
 
-async def annotate_relevant_screenshot(settings: Settings, image_path: str, context_issue: str) -> str:
+async def annotate_relevant_screenshot(
+    settings: Settings,
+    image_path: str,
+    context_issue: str,
+    step_num: Optional[int] = None,
+) -> str:
     """Send a screenshot to the vision model and draw an annotated bounding box.
 
-    Returns the path to the annotated image (may be the original if annotation fails).
+    The model is asked to return ``{"box_2d": [...], "description": "..."}`` in
+    a single call. The box is used to draw a red rectangle with a pointer
+    arrow, and the description is rendered as a wrapping text label above
+    the box. ``step_num`` is rendered as a corner badge for traceability
+    when several plates are reviewed side-by-side in the PDF.
+
+    Returns the path to the annotated image. If the vision model call fails
+    or returns no usable box, the function falls back to copying the source
+    screenshot to ``*_annotated.png`` and returns that path — callers can
+    still display a plate, just without red marks.
     """
     active_model = settings.vision_model or settings.pdf_vision_model
     cloud = _is_cloud_vision_model(active_model)
@@ -955,64 +1259,60 @@ async def annotate_relevant_screenshot(settings: Settings, image_path: str, cont
 
     output_path = image_path.replace(".png", "_annotated.png").replace(".jpg", "_annotated.jpg")
 
-    if cloud:
-        # Cloud vision model (e.g., minimax-m3, gemini-preview)
-        try:
-            response = await asyncio.wait_for(
-                asyncio.to_thread(
-                    ollama.chat,
-                    model=active_model,
-                    messages=[
-                        {
-                            "role": "user",
-                            "content": prompt_text,
-                            "images": [img_b64],
-                        }
-                    ],
-                    format="json",
-                    options={"temperature": 0.0},
-                ),
-                timeout=settings.pdf_vision_timeout_seconds,
-            )
-            content = response.get("message", {}).get("content", "")
-        except Exception as exc:
-            _local_service_log(f"Cloud vision model failed: {exc}", settings.output_dir)
-            return image_path
-    else:
-        # Local vision model (e.g., llama3.2-vision)
-        try:
-            response = await asyncio.wait_for(
-                asyncio.to_thread(
-                    ollama.chat,
-                    model=active_model,
-                    messages=[
-                        {
-                            "role": "user",
-                            "content": prompt_text,
-                            "images": [img_b64],
-                        }
-                    ],
-                    format="json",
-                    options={"temperature": 0.0},
-                ),
-                timeout=settings.pdf_vision_timeout_seconds,
-            )
-            content = response.get("message", {}).get("content", "")
-        except Exception as exc:
-            _local_service_log(f"Local vision model failed: {exc}", settings.output_dir)
-            return image_path
+    chat_kwargs = {
+        "model": active_model,
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt_text,
+                "images": [img_b64],
+            }
+        ],
+        "format": "json",
+        "options": {"temperature": 0.0},
+    }
 
-    # Parse box_2d from response (schema-validated; graceful prose fallback).
+    route_label = "Cloud" if cloud else "Local"
+    try:
+        response = await asyncio.wait_for(
+            asyncio.to_thread(ollama.chat, **chat_kwargs),
+            timeout=settings.pdf_vision_timeout_seconds,
+        )
+        content = response.get("message", {}).get("content", "")
+    except Exception as exc:
+        _local_service_log(f"{route_label} vision model failed: {exc}", settings.output_dir)
+        return image_path
+
+    # Parse box_2d and description from response.
     box: Optional[List[float]] = None
+    description: Optional[str] = None
     if isinstance(content, str):
         box = _parse_vision_box(content)
+        # Look up the description in the same JSON object, if present.
+        try:
+            parsed = _safe_json_parse(content)
+            if isinstance(parsed, dict) and isinstance(parsed.get("description"), str):
+                description = parsed["description"].strip()
+        except Exception:
+            description = None
 
     if box and len(box) == 4:
-        if _draw_red_box_arrow(image_path, box, context_issue, output_path):
+        if _draw_red_box_arrow(
+            image_path,
+            box,
+            context_issue,
+            output_path,
+            description=description,
+            step_num=step_num,
+        ):
             return output_path
 
-    # Fallback: copy original as annotated
+    # Fallback: copy original as annotated.
     import shutil
 
-    shutil.copy2(image_path, output_path)
+    try:
+        shutil.copy2(image_path, output_path)
+    except Exception:
+        # Last-resort: return the source path so the caller still has something.
+        return image_path
     return output_path
