@@ -17,7 +17,7 @@ from .helpers import _extract_target_id, _locator_for_target_id, _resolve_intera
 
 
 async def _action_scroll(page: Page) -> None:
-    await page.evaluate("window.scrollBy(0, arguments[0])", random.choice([-500, 500]))
+    await page.evaluate("delta => window.scrollBy(0, delta)", random.choice([-500, 500]))
 
 
 async def _action_back(page: Page, settings: Any) -> None:
