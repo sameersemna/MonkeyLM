@@ -1,9 +1,4 @@
-"""Backward-compatibility shim for models module.
-
-All functionality has been moved to models/ollama.py, models/vision.py,
-and models/prompts.py. This file re-exports everything for existing
-imports that reference monkeylm.models directly.
-"""
+"""Models module - Ollama client, vision routing, and decision prompts."""
 
 from monkeylm.models.ollama import (
     _ollama_chat_with_retry,

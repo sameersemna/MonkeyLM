@@ -1,9 +1,4 @@
-"""Backward-compatibility shim for browser module.
-
-All functionality has been moved to browser/snapshot.py, browser/lifecycle.py,
-and browser/actions.py. This file re-exports everything for existing
-imports that reference monkeylm.browser directly.
-"""
+"""Browser module - snapshot, lifecycle, and action execution."""
 
 from monkeylm.browser.snapshot import (
     capture_dom_and_layout,

@@ -1,9 +1,4 @@
-"""Backward-compatibility shim for core module.
-
-All functionality has been moved to core/monitor.py, core/worker.py,
-and core/scheduler.py. This file re-exports everything for existing
-imports that reference monkeylm.core directly.
-"""
+"""Core module - monitoring, worker execution, and scheduling."""
 
 from monkeylm.core.monitor import (
     DefectTracker,
@@ -22,8 +17,9 @@ from monkeylm.core.worker import (
     build_worker_user_data_dir,
     with_retry_backoff,
     CURRENT_GLOBAL_STEP,
+    allocate_worker_steps,
 )
-from monkeylm.core.scheduler import main, allocate_worker_steps, test_logs, DEFECTS, NETWORK_MONITOR, PERF_MONITOR
+from monkeylm.core.scheduler import main, test_logs, DEFECTS, NETWORK_MONITOR, PERF_MONITOR
 
 __all__ = [
     "DefectTracker",

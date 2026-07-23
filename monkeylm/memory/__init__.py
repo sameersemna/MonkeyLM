@@ -1,9 +1,4 @@
-"""Backward-compatibility shim for memory module.
-
-All functionality has been moved to memory/postgres.py, memory/redis.py,
-and memory/qdrant.py. This file re-exports everything for existing
-imports that reference monkeylm.memory directly.
-"""
+"""Memory module - PostgreSQL, Redis, and Qdrant persistence layers."""
 
 from monkeylm.memory.postgres import (
     PersistenceEngine,
