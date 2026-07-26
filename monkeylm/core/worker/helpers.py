@@ -10,9 +10,6 @@ from typing import Any, List, Optional
 from monkeylm.config import Settings, _local_service_log
 
 
-CURRENT_GLOBAL_STEP: int = 0
-
-
 def build_worker_user_data_dir(settings: Settings, worker_id: int) -> str:
     worker_label = f"worker-{worker_id:02d}"
     worker_data_dir = os.path.join(settings.run_user_data_dir, worker_label)

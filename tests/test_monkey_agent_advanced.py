@@ -44,6 +44,7 @@ from monkeylm.models import (
     _is_cloud_vision_model,
     build_decision_prompt,
 )
+from monkeylm.models.prompts.antiloop import _break_action_loop
 from monkeylm.browser import (
     _compute_action_path_hash,
     diff_component_manifests,
@@ -760,6 +761,56 @@ class MonkeyLMTests(unittest.TestCase):
             self.assertEqual(config.VISION_MODEL, "gemini-3-flash-preview")
         finally:
             config.VISION_MODEL = original_vision_model
+
+
+    def test_break_action_loop_blacklist_expires_by_step(self) -> None:
+        """Regression test for a bug where the blacklist's expiry check read a
+        frozen module-level ``CURRENT_GLOBAL_STEP`` that was always 0 (a
+        same-named local variable in the caller silently shadowed it instead
+        of updating it), so blacklisted targets never actually expired. The
+        function now takes ``current_step`` explicitly; this proves entries
+        are pruned once the caller's real step passes their expiry step."""
+
+        class FakeSnapshot:
+            elements = [f"<BUTTON>X</BUTTON> [id={i}]" for i in range(1, 6)]
+
+        loop_state: Dict[str, Any] = {"blacklist": {}, "loop_count": 0}
+
+        _break_action_loop(
+            {"action": "click", "target": "[id=1]"},
+            FakeSnapshot(),
+            "worker-00",
+            current_step=0,
+            loop_state=loop_state,
+            blacklist_expiry_steps=2,
+        )
+        self.assertEqual(loop_state["blacklist"], {"click:[id=1]": 2})
+
+        # Still before expiry (2 > 1): the earlier entry must survive pruning.
+        _break_action_loop(
+            {"action": "click", "target": "[id=2]"},
+            FakeSnapshot(),
+            "worker-00",
+            current_step=1,
+            loop_state=loop_state,
+            blacklist_expiry_steps=2,
+        )
+        self.assertIn("click:[id=1]", loop_state["blacklist"])
+        self.assertIn("click:[id=2]", loop_state["blacklist"])
+
+        # Past expiry for both prior entries (2 <= 5 and 3 <= 5): they must be
+        # pruned before the new one is inserted.
+        _break_action_loop(
+            {"action": "click", "target": "[id=3]"},
+            FakeSnapshot(),
+            "worker-00",
+            current_step=5,
+            loop_state=loop_state,
+            blacklist_expiry_steps=2,
+        )
+        self.assertNotIn("click:[id=1]", loop_state["blacklist"])
+        self.assertNotIn("click:[id=2]", loop_state["blacklist"])
+        self.assertIn("click:[id=3]", loop_state["blacklist"])
 
 
 class MonkeyLMAsyncTests(unittest.IsolatedAsyncioTestCase):

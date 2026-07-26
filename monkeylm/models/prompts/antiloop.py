@@ -7,7 +7,6 @@ import re
 from typing import Any, Dict, List, Optional
 
 from monkeylm.config import Settings, STATE_LOOP_THRESHOLD
-from monkeylm.core import CURRENT_GLOBAL_STEP
 
 
 def apply_state_aware_policy(
@@ -47,6 +46,7 @@ def _break_action_loop(
     action_plan: Dict[str, Any],
     snapshot: Any,
     worker_label: str,
+    current_step: int,
     loop_state: Optional[Dict[str, Any]] = None,
     blacklist_expiry_steps: int = 5,
 ) -> Dict[str, Any]:
@@ -58,11 +58,11 @@ def _break_action_loop(
     loop_state["loop_count"] += 1
 
     loop_state["blacklist"] = {
-        tgt: exp for tgt, exp in loop_state["blacklist"].items() if exp > CURRENT_GLOBAL_STEP
+        tgt: exp for tgt, exp in loop_state["blacklist"].items() if exp > current_step
     }
 
     blacklist_key = f"{current_action}:{current_target}"
-    loop_state["blacklist"][blacklist_key] = CURRENT_GLOBAL_STEP + blacklist_expiry_steps
+    loop_state["blacklist"][blacklist_key] = current_step + blacklist_expiry_steps
     print(f"   └─ ⛓ Blacklisted '{blacklist_key}' for {blacklist_expiry_steps} steps (loop #{loop_state['loop_count']})")
 
     all_targets = _extract_all_target_ids(snapshot.elements)

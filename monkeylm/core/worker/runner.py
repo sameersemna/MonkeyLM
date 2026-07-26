@@ -144,14 +144,13 @@ async def run_worker(
 
             plan = await decide_next_action(settings, state, memory_store=worker_memory, snapshot=snapshot, testing_strategy=testing_strategy)
             retrieval_telemetry = worker_memory.consume_last_search_telemetry()
-            CURRENT_GLOBAL_STEP = step
 
             plan_signature = (plan.get("action", "scroll"), plan.get("target", ""))
             if len(recent_model_plans) >= 3 and all(p == plan_signature for p in recent_model_plans[-3:]):
                 print(f"\U0001f504 Loop detected for {worker_label}; forcing path exploration variance.")
                 loop_detection_state["recent_actions"] = []
                 print(f"   \u251c\u2500 \u26d4 Cleared short-term action history for {worker_label}")
-                plan = _break_action_loop(plan, snapshot, worker_label, loop_state=loop_detection_state, blacklist_expiry_steps=settings.max_steps // 3)
+                plan = _break_action_loop(plan, snapshot, worker_label, step, loop_state=loop_detection_state, blacklist_expiry_steps=settings.max_steps // 3)
             recent_model_plans.append(plan_signature)
             recent_model_plans = recent_model_plans[-3:]
 
