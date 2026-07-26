@@ -132,6 +132,26 @@ fix but left the underlying bug live).
   (re-export private helpers used cross-module or by tests) already
   established for every *other* helper in those two `__init__.py` files.
 
+**Follow-up within Cycle 1 — dead shim files:** The initial repo listing
+showed flat modules (`monkeylm/browser.py`, `monkeylm/models.py`,
+`monkeylm/core.py`, `monkeylm/memory.py`, `monkeylm/reporting.py`)
+coexisting with the new subpackages of the same name. Verified via
+`python3 -c "import monkeylm.browser as b; print(b.__file__)"` that
+Python's import system always resolves the package directory
+(`browser/__init__.py`) over the sibling module (`browser.py`) — so these
+"backward-compatibility shim" files (per their own docstrings) were
+**unreachable dead code**, never imported by anything, despite claiming to
+re-export the same API. Diffed each shim's exports against its package
+`__init__.py` counterpart: `browser.py` and `models.py` were missing
+exactly the same two symbols this cycle already fixed in the real
+packages (further evidence they'd already silently bit-rotted out of
+sync — nobody would notice since they never executed); `core.py`,
+`memory.py`, `reporting.py` matched. Grepped the whole repo for any
+import that would depend on the flat-file path specifically (none found —
+all imports go through the package-level `monkeylm.X` name, which
+resolves correctly regardless). Deleted all five as a separate commit;
+re-ran the full suite and `--help` afterward, no regressions (47 passed).
+
 **Deferred findings (not addressed this cycle):**
 - No `mypy`/`ruff`/`black`/lint config in the repo at all — Phase 1's
   static-check step has nothing to run. Worth adding at least `ruff` in a
@@ -141,13 +161,6 @@ fix but left the underlying bug live).
   Not necessarily wrong for this kind of tool, but means no reproducible
   editable install, no declared Python version support, and
   `requirements.txt` has no hashes/lockfile.
-- Both old flat modules (e.g. `monkeylm/browser.py`,
-  `monkeylm/models.py`) and new subpackages (`monkeylm/browser/`,
-  `monkeylm/models/`) appear to coexist in the tree per the initial
-  `find` listing — needs a follow-up check on whether the flat `.py`
-  files are dead code left over from the refactor (shadowed by the
-  package directories) or something else; if dead, they're a
-  maintenance/confusion hazard and candidates for deletion.
 - CI workflows (`monkeylm-deep-test.yml`, `regression-tests.yml`) were not
   actually run in this cycle (no network/Ollama/Playwright browser
   install available in this environment for a full end-to-end run) — only
