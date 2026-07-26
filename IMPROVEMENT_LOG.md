@@ -472,3 +472,119 @@ checklist item, not just busywork. The DI-adapter section is now the
 clear standing highest-priority item for whoever picks this up next —
 either fix it for real or remove the false promise of a working public
 API.
+
+## Cycle 5 — Fix or fail-loud the DI adapter layer (2026-07-26)
+
+**Design decision (sequential-thinking pass):** initial plan was "fix
+`BrowserProviderAdapter`/`ModelClientAdapter` (assumed pure wiring bugs),
+fail-loud `MemoryStoreAdapter`/`ReportGeneratorAdapter` (assumed genuine
+capability gaps)." That assumption turned out half wrong once the actual
+signatures were checked method-by-method — corrected mid-cycle (see
+below).
+
+**What actually happened, per adapter:**
+
+- **`BrowserProviderAdapter`**: `launch()`/`close()`/`current_page` were
+  already correct. `navigate()`/`snapshot()` called
+  `get_page_state(page, settings=...)`, but the real signature is
+  `get_page_state(page, step_num, phase, output_dir)` — no `settings`
+  kwarg at all. This *is* a genuine, cleanly-fixable wiring bug (the
+  capability fully exists), fixed by adding an internal step counter.
+  `click()`/`type_text()`/`submit_form()` called `execute_action(page,
+  "click", selector, "", settings)`, but the real
+  `execute_action(page, settings, action_plan: Dict, step_num: int,
+  fuzzer, defects, network_monitor, perf_monitor, ...)` needs a
+  structured action-plan dict plus four live session objects that
+  accumulate state across a whole run — not constructible from a bare
+  `(selector)` call. NotImplementedError for these three.
+
+  Notable side-finding: the reason mypy's Cycle 4 pass caught the
+  `settings=` bug on `launch()`'s inner lines but *not* the
+  `navigate`/`click`/etc. bugs is that `self._page = None` in `__init__`
+  had no type annotation, so mypy inferred the attribute's type as
+  `None`-only; after the `if self._page is None: raise` guard, the
+  narrowed type became effectively unreachable/uncheckable, so mypy
+  silently skipped checking the calls below it. Giving it a real
+  `Optional[Page]` annotation (needed anyway to remove the blanket
+  `# type: ignore`s) is what surfaced these additional bugs. Lesson:
+  untyped `None`-only attributes can hide real bugs from a type checker,
+  not just annotation gaps — worth keeping in mind for any future
+  `Optional`-shaped instance attribute in this codebase.
+
+- **`ModelClientAdapter`**: `infer()`/`vision_infer()` had a real,
+  separate bug beyond anything mypy flagged — both called `ollama.chat()`
+  synchronously inside an `async def`, blocking the event loop for the
+  duration of the call (harmless in isolation, but defeats the point of
+  an async DI interface meant to compose with other concurrent work).
+  Fixed with `asyncio.to_thread`, matching `models/ollama.py`'s existing
+  pattern. `analyze_testing_strategy()`/`decide_next_action()`: genuine
+  capability gap after all — the real functions are `async`, and
+  `decide_next_action` hard-requires a `memory_store` (raises
+  `ValueError` without one) that `IModelClient`'s Protocol has no
+  parameter for; the Protocol also has no `async` declaration and
+  `decide_next_action`'s `goal` parameter doesn't exist on the real
+  function at all (it's driven by page state + memory + testing
+  strategy, not a goal string). NotImplementedError for both.
+
+- **`MemoryStoreAdapter`** (all 5 methods) and
+  **`ReportGeneratorAdapter.generate()`**: confirmed as originally
+  suspected — genuine Protocol/reality mismatches, not wiring bugs.
+  `IMemoryStore`'s generic save/load/search/lock contract has no
+  corresponding capability (baseline persistence is private and
+  workflow-specific in `PersistenceEngine`; search lives on a separate
+  `QdrantMemoryStore` class with a different signature; there is no
+  generic resource lock, only the TTL-expiring, no-explicit-release
+  `claim_action_path_lock(path_hash, worker_label)`).
+  `IReportGenerator.generate(results, output_dir, settings) -> str` has
+  no correspondence to the real `generate_*_report(settings, defects,
+  test_logs, browser_launch_info, start_time, end_time) -> None`
+  functions, which need data this method is never given and write files
+  directly rather than returning a path. NotImplementedError for all.
+
+**Why NotImplementedError instead of deleting the functions:** these are
+exported in `__all__` with docstring usage examples, so calling them as
+documented previously raised a confusing `AttributeError`/`TypeError`
+several calls deep. `NotImplementedError` with a message naming the real
+API fails immediately and points the caller at what actually works,
+without inventing new subsystem capability (a generic distributed lock,
+a results-list-to-defects-object translator, synthesizing
+`start_time`/`end_time`/`browser_launch_info` the caller never supplied)
+— that would be designing for a hypothetical future requirement, not
+fixing a bug. Removing the functions outright was considered but
+rejected: nothing currently calls them successfully (verified: zero test
+coverage, never called by the real entrypoint), so nothing regresses
+either way, and keeping the symbols importable with an honest error
+preserves discoverability for whoever picks up the real fix later.
+Updated all four factories' docstrings so the `Example:`/`Note:` blocks
+state plainly which methods work and which raise — the previous
+`create_report_generator` example (`report_path = await
+generator.generate(...)`) would have failed immediately as documented,
+which is worse than no example.
+
+**Tests:** added `tests/test_di_adapters.py` (12 tests) — one per
+NotImplementedError path plus the `ValueError` for an unsupported report
+format. These don't need a live browser, database, or Ollama server: all
+the stubbed methods raise before touching any real I/O.
+
+**Verification:** 60 tests pass (48 + 12 new, no regressions). `mypy
+monkeylm/` → `Success: no issues found in 53 source files` (down from 31
+`# type: ignore`-suppressed errors — the suppressions are gone because
+the underlying calls are gone too, replaced with type-correct
+`NotImplementedError` raises or real fixes). `ruff check .` clean.
+`python3 -m monkeylm --help` unaffected — none of this touches the real
+CLI entrypoint's code path.
+
+**Cycle self-assessment:** This closed out the standing top-priority
+item from Cycles 2–4 with more nuance than the initial plan assumed —
+worth noting as a reminder that "looks like a simple wiring bug" needs
+verifying against the real signature every time, not just by category
+guess. Five cycles in: the codebase's exported public API surface no
+longer contains a function that silently does the wrong thing when
+called as documented. Given the DI layer was the last concretely-scoped,
+high-confidence finding from prior cycles, and everything remaining on
+earlier cycles' deferred lists is either environment-constrained (a real
+end-to-end run needs Ollama/network not available here) or a genuinely
+separate initiative (packaging metadata, a from-scratch redesign of
+`IMemoryStore`/`IReportGenerator` against the real architecture), this is
+a good point to report back rather than picking a sixth cycle
+unilaterally.
