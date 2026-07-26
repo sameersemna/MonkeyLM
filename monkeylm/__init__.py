@@ -307,13 +307,17 @@ def create_browser_provider(settings: Optional[Settings] = None) -> IBrowserProv
     Note:
         Currently returns BrowserProviderAdapter which wraps browser.py functions.
         Will be replaced with proper Browser class in Phase 2 refactoring.
+        launch(), navigate(), snapshot(), close(), and current_page work.
+        click(), type_text(), and submit_form() raise NotImplementedError -
+        the real execute_action() needs live fuzzer/defect-tracker/monitor
+        session objects this thin adapter has no way to construct honestly.
+        See IMPROVEMENT_LOG.md Cycle 5.
     """
     from monkeylm.browser import (
-        execute_action,
         get_page_state,
         launch_context_with_fallback,
     )
-    from playwright.async_api import async_playwright
+    from playwright.async_api import async_playwright, BrowserContext, Page, Playwright
 
     if settings is None:
         settings = load_settings()
@@ -323,47 +327,62 @@ def create_browser_provider(settings: Optional[Settings] = None) -> IBrowserProv
 
         def __init__(self, settings: Settings):
             self._settings = settings
-            self._playwright = None
-            self._context = None
-            self._page = None
+            self._playwright: Optional[Playwright] = None
+            self._context: Optional[BrowserContext] = None
+            self._page: Optional[Page] = None
+            self._step = 0
 
         async def launch(self) -> None:
             from monkeylm import build_worker_user_data_dir
-            self._playwright = await async_playwright().start()  # type: ignore
-            user_data_dir = build_worker_user_data_dir(settings, 0)  # type: ignore
+            self._playwright = await async_playwright().start()
+            user_data_dir = build_worker_user_data_dir(self._settings, 0)
             self._context, _ = await launch_context_with_fallback(
                 self._playwright,
-                settings=settings,
+                settings=self._settings,
                 user_data_dir=user_data_dir,
                 worker_label="DI",
             )
-            self._page = self._context.pages[0] if self._context.pages else await self._context.new_page()  # type: ignore
+            self._page = self._context.pages[0] if self._context.pages else await self._context.new_page()
 
         async def navigate(self, url: str) -> PageSnapshot:
             if self._page is None:
                 raise RuntimeError("Browser not launched. Call launch() first.")
             await self._page.goto(url)
-            return await get_page_state(self._page, settings=self._settings)
+            self._step += 1
+            return await get_page_state(self._page, self._step, phase="di-navigate", output_dir=self._settings.output_dir)
 
         async def snapshot(self) -> PageSnapshot:
             if self._page is None:
                 raise RuntimeError("Browser not launched. Call launch() first.")
-            return await get_page_state(self._page, settings=self._settings)
+            self._step += 1
+            return await get_page_state(self._page, self._step, phase="di-snapshot", output_dir=self._settings.output_dir)
+
+        # click/type_text/submit_form are intentionally not implemented: the real
+        # execute_action(page, settings, action_plan, step_num, fuzzer, defects,
+        # network_monitor, perf_monitor, ...) takes a structured action_plan dict
+        # plus live fuzzer/defect-tracker/network-monitor/perf-monitor session
+        # objects that carry accumulated state across a whole run. A thin
+        # (selector) / (selector, text) adapter method can't honestly construct
+        # those - see IMPROVEMENT_LOG.md Cycle 5.
 
         async def click(self, selector: str) -> None:
-            if self._page is None:
-                raise RuntimeError("Browser not launched. Call launch() first.")
-            await execute_action(self._page, "click", selector, "", self._settings)
+            raise NotImplementedError(
+                "BrowserProviderAdapter.click: the real execute_action() needs a "
+                "structured action_plan dict plus live fuzzer/defects/network_monitor/"
+                "perf_monitor session objects that this thin adapter has no way to "
+                "honestly construct. Use monkeylm.browser.execute_action directly "
+                "within a real worker run instead."
+            )
 
         async def type_text(self, selector: str, text: str) -> None:
-            if self._page is None:
-                raise RuntimeError("Browser not launched. Call launch() first.")
-            await execute_action(self._page, "type", selector, text, self._settings)
+            raise NotImplementedError(
+                "BrowserProviderAdapter.type_text: same limitation as click() - see its error."
+            )
 
         async def submit_form(self, selector: str) -> None:
-            if self._page is None:
-                raise RuntimeError("Browser not launched. Call launch() first.")
-            await execute_action(self._page, "submit", selector, "", self._settings)
+            raise NotImplementedError(
+                "BrowserProviderAdapter.submit_form: same limitation as click() - see its error."
+            )
 
         async def close(self) -> None:
             if self._context:
@@ -398,6 +417,13 @@ def create_memory_store(settings: Optional[Settings] = None) -> IMemoryStore:
     Note:
         Currently returns MemoryStoreAdapter which wraps memory.py PersistenceEngine.
         Will be replaced with proper MemoryManager class in Phase 2 refactoring.
+        initialize() and close() work. save_state(), load_state(),
+        search_memory(), acquire_lock(), and release_lock() all raise
+        NotImplementedError - IMemoryStore's generic contract has no
+        corresponding capability in the real subsystem (baseline persistence
+        is private/workflow-specific, semantic search lives on the separate
+        QdrantMemoryStore class, and there is no generic resource lock).
+        See IMPROVEMENT_LOG.md Cycle 5.
     """
     from monkeylm.memory import PersistenceEngine
 
@@ -416,6 +442,20 @@ def create_memory_store(settings: Optional[Settings] = None) -> IMemoryStore:
         async def initialize(self) -> None:
             await self._engine.initialize()
 
+        # IMemoryStore's generic save/load/search/lock contract has no
+        # corresponding capability in the real memory subsystem (see
+        # IMPROVEMENT_LOG.md Cycle 5). PersistenceEngine's baseline logic is
+        # private and workflow-specific (_upsert_baseline takes
+        # domain/page_route/dom_structure_hash/component_manifest/
+        # is_golden_standard - not "a PageSnapshot under a domain/route id"),
+        # semantic search lives on the separate QdrantMemoryStore class with a
+        # different signature (search_similar_layouts(page_state, limit)), and
+        # there is no generic resource lock - only claim_action_path_lock(
+        # path_hash, worker_label), which is TTL-expiring with no explicit
+        # release. Building real implementations here means inventing new
+        # subsystem capability, not fixing a wiring bug. Failing loud instead
+        # of the previous silent AttributeError.
+
         async def save_state(
             self,
             domain: str,
@@ -423,7 +463,11 @@ def create_memory_store(settings: Optional[Settings] = None) -> IMemoryStore:
             snapshot: PageSnapshot,
             metadata: Dict[str, Any],
         ) -> str:
-            return await self._engine.save_baseline(snapshot, domain, route)  # type: ignore
+            raise NotImplementedError(
+                "MemoryStoreAdapter.save_state: PersistenceEngine has no generic "
+                "save primitive - baseline persistence is private and workflow-"
+                "specific (see PersistenceEngine.analyze_route_regression)."
+            )
 
         async def load_state(
             self,
@@ -431,7 +475,10 @@ def create_memory_store(settings: Optional[Settings] = None) -> IMemoryStore:
             route: str,
             state_id: Optional[str] = None,
         ) -> Optional[PageSnapshot]:
-            return await self._engine.load_baseline(domain, route)  # type: ignore
+            raise NotImplementedError(
+                "MemoryStoreAdapter.load_state: PersistenceEngine has no generic "
+                "load primitive matching this contract."
+            )
 
         async def search_memory(
             self,
@@ -439,17 +486,29 @@ def create_memory_store(settings: Optional[Settings] = None) -> IMemoryStore:
             domain: Optional[str] = None,
             limit: int = 20,
         ) -> List[Dict[str, Any]]:
-            return await self._engine.search_similar(query, limit)  # type: ignore
+            raise NotImplementedError(
+                "MemoryStoreAdapter.search_memory: semantic search lives on "
+                "monkeylm.memory.QdrantMemoryStore.search_similar_layouts(page_state, limit), "
+                "a different class with a different signature than IMemoryStore "
+                "expects. Use QdrantMemoryStore directly instead."
+            )
 
         async def acquire_lock(
             self,
             resource_key: str,
             ttl_seconds: int,
         ) -> bool:
-            return await self._engine.acquire_lock(resource_key, ttl_seconds)  # type: ignore
+            raise NotImplementedError(
+                "MemoryStoreAdapter.acquire_lock: no generic resource lock exists. "
+                "The real primitive is PersistenceEngine.claim_action_path_lock(path_hash, worker_label), "
+                "which is TTL-expiring with no explicit release and a different key shape."
+            )
 
         async def release_lock(self, resource_key: str) -> None:
-            await self._engine.release_lock(resource_key)  # type: ignore
+            raise NotImplementedError(
+                "MemoryStoreAdapter.release_lock: no generic resource lock exists "
+                "to release - see acquire_lock's error for detail."
+            )
 
         async def close(self) -> None:
             await self._engine.close()
@@ -474,13 +533,14 @@ def create_model_client(settings: Optional[Settings] = None) -> IModelClient:
     Note:
         Currently returns ModelClientAdapter which wraps models.py functions.
         Will be replaced with proper ModelClient class in Phase 2 refactoring.
+        infer(), vision_infer(), and stream() work. analyze_testing_strategy()
+        and decide_next_action() raise NotImplementedError - the real
+        run_application_discovery()/decide_next_action() are async, need a
+        memory_store this Protocol never provides, and don't take a "goal"
+        parameter. See IMPROVEMENT_LOG.md Cycle 5.
     """
+    import asyncio
     import ollama
-    from monkeylm.models import (
-        build_decision_prompt,
-        decide_next_action as _decide_next_action,
-        run_application_discovery,
-    )
 
     if settings is None:
         settings = load_settings()
@@ -499,7 +559,8 @@ def create_model_client(settings: Optional[Settings] = None) -> IModelClient:
             top_p: float = 0.9,
             max_tokens: Optional[int] = None,
         ) -> Dict[str, Any]:
-            response = ollama.chat(
+            response = await asyncio.to_thread(
+                ollama.chat,
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
                 options={"temperature": temperature, "top_p": top_p},
@@ -521,7 +582,8 @@ def create_model_client(settings: Optional[Settings] = None) -> IModelClient:
             from pathlib import Path
             with open(Path(image_path), "rb") as f:
                 image_data = base64.b64encode(f.read()).decode()
-            response = ollama.chat(
+            response = await asyncio.to_thread(
+                ollama.chat,
                 model=model,
                 messages=[{
                     "role": "user",
@@ -555,7 +617,21 @@ def create_model_client(settings: Optional[Settings] = None) -> IModelClient:
             self,
             page_snapshot: PageSnapshot,
         ) -> Dict[str, Any]:
-            return run_application_discovery(page_snapshot, self._settings)  # type: ignore
+            # IModelClient declares this as a sync method returning Dict[str, Any],
+            # but the real run_application_discovery(settings, page_state: str) is
+            # async and returns Optional[TestingStrategy] (a dataclass, not a
+            # dict), and needs page_state text from state_to_prompt(), not the raw
+            # PageSnapshot. The Protocol shape doesn't match the real capability -
+            # see IMPROVEMENT_LOG.md Cycle 5. Failing loud rather than silently
+            # calling the wrong thing.
+            raise NotImplementedError(
+                "ModelClientAdapter.analyze_testing_strategy: IModelClient's sync "
+                "Dict[str, Any] contract does not match run_application_discovery's "
+                "real async signature (settings, page_state: str) -> "
+                "Optional[TestingStrategy]. Call "
+                "monkeylm.models.run_application_discovery(settings, state_to_prompt(page_snapshot)) "
+                "directly instead."
+            )
 
         def decide_next_action(
             self,
@@ -563,8 +639,21 @@ def create_model_client(settings: Optional[Settings] = None) -> IModelClient:
             goal: str,
             history: List[Dict[str, Any]],
         ) -> Dict[str, Any]:
-            prompt = build_decision_prompt(page_snapshot, goal, history, self._settings)  # type: ignore
-            return _decide_next_action(prompt, page_snapshot, self._settings)  # type: ignore
+            # Same category of Protocol/reality mismatch: the real
+            # decide_next_action(settings, page_state, memory_store, ...) is async,
+            # requires a memory_store (raises ValueError without one), and has no
+            # "goal" parameter at all - it isn't goal-directed, it drives from
+            # page state + memory + testing strategy. There is no honest way to
+            # implement this signature without inventing behavior. See
+            # IMPROVEMENT_LOG.md Cycle 5.
+            raise NotImplementedError(
+                "ModelClientAdapter.decide_next_action: IModelClient's "
+                "(page_snapshot, goal, history) contract has no correspondence to "
+                "the real decide_next_action(settings, page_state, memory_store, ...), "
+                "which is async and requires a memory_store. Call "
+                "monkeylm.models.decide_next_action(settings, page_state, memory_store=...) "
+                "directly instead."
+            )
 
     return ModelClientAdapter(settings)
 
@@ -584,22 +673,25 @@ def create_report_generator(
 
     Raises:
         ValueError: If format is not supported.
+        NotImplementedError: generate() always raises this for a supported
+            format - see the Note below.
 
     Example:
         >>> from monkeylm import create_report_generator
         >>> generator = create_report_generator("markdown")
-        >>> report_path = await generator.generate(results, "./reports", settings)
 
     Note:
         Currently returns adapter wrapping reporting.py generators.
         Will be replaced with proper generator classes in Phase 2 refactoring.
+        generate() raises NotImplementedError for every supported format:
+        IReportGenerator's (results, output_dir, settings) -> str contract
+        has no correspondence to the real generate_*_report(settings,
+        defects, test_logs, browser_launch_info, start_time, end_time) ->
+        None functions, which need data this method is never given and
+        write files directly rather than returning a path. Call
+        monkeylm.reporting functions directly instead. See
+        IMPROVEMENT_LOG.md Cycle 5.
     """
-    from monkeylm.reporting import (
-        generate_markdown_report,
-        generate_pdf_report,
-        generate_json_summary,
-    )
-
     if settings is None:
         settings = load_settings()
 
@@ -616,13 +708,23 @@ def create_report_generator(
             output_dir: str,
             settings: Any,
         ) -> str:
-            if self._format == "markdown":
-                return await generate_markdown_report(results, output_dir, self._settings)  # type: ignore
-            elif self._format == "pdf":
-                return await generate_pdf_report(results, output_dir, self._settings)  # type: ignore
-            elif self._format == "json":
-                return await generate_json_summary(results, output_dir, self._settings)  # type: ignore
-            else:
+            # IReportGenerator.generate(results, output_dir, settings) -> str has
+            # no correspondence to the real generate_*_report(settings, defects,
+            # test_logs, browser_launch_info, start_time, end_time) -> None
+            # functions: they take a `defects` object and `test_logs` (not a
+            # `results` list), also need browser_launch_info/start_time/end_time
+            # this method is never given, write files directly using
+            # settings.output_dir (ignoring the `output_dir` param entirely), and
+            # return None, not a path string. See IMPROVEMENT_LOG.md Cycle 5.
+            if self._format not in {"markdown", "pdf", "json"}:
                 raise ValueError(f"Unsupported format: {self._format}")
+            raise NotImplementedError(
+                f"ReportGeneratorAdapter.generate({self._format}): IReportGenerator's "
+                "(results, output_dir, settings) -> str contract does not match the real "
+                f"generate_{self._format}_report(settings, defects, test_logs, "
+                "browser_launch_info, start_time, end_time) -> None signature. Call "
+                "monkeylm.reporting functions directly with the run's actual defects/"
+                "test_logs/timing data instead."
+            )
 
     return ReportGeneratorAdapter(format, settings)
