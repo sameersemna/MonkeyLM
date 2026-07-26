@@ -107,7 +107,7 @@ async def _ollama_chat_with_retry(
     messages: List[Dict[str, str]],
     timeout_seconds: float,
     max_retries: int = 3,
-) -> Optional[Dict[str, Any]]:
+) -> Optional[ollama.ChatResponse]:
     print(f"   └─ 🤖 Calling {model} (timeout={timeout_seconds}s, retries={max_retries})")
 
     base_delay = 1.0

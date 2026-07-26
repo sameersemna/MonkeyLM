@@ -137,10 +137,10 @@ async def _action_type(page: Page, settings: Any, target: str, value: str, actio
 
     payload_value = value
     payload_reason = action_strategy
-    for payload in input_payloads:
-        if payload.get("target") == target:
-            payload_value = payload.get("value", value)
-            payload_reason = payload.get("reason", action_strategy)
+    for payload_entry in input_payloads:
+        if payload_entry.get("target") == target:
+            payload_value = payload_entry.get("value", value)
+            payload_reason = payload_entry.get("reason", action_strategy)
             break
 
     locator = await _locator_for_target_id(page, target)

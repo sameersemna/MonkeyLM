@@ -311,23 +311,22 @@ async def annotate_relevant_screenshot(
 
     output_path = image_path.replace(".png", "_annotated.png").replace(".jpg", "_annotated.jpg")
 
-    chat_kwargs = {
-        "model": active_model,
-        "messages": [
-            {
-                "role": "user",
-                "content": prompt_text,
-                "images": [img_b64],
-            }
-        ],
-        "format": "json",
-        "options": {"temperature": 0.0},
-    }
-
     route_label = "Cloud" if cloud else "Local"
     try:
         response = await asyncio.wait_for(
-            asyncio.to_thread(ollama.chat, **chat_kwargs),
+            asyncio.to_thread(
+                ollama.chat,
+                model=active_model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": prompt_text,
+                        "images": [img_b64],
+                    }
+                ],
+                format="json",
+                options={"temperature": 0.0},
+            ),
             timeout=settings.pdf_vision_timeout_seconds,
         )
         content = response.get("message", {}).get("content", "")

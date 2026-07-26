@@ -16,3 +16,12 @@ select = [
     "SIM", # flake8-simplify
     "I",   # isort
 ]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+exclude = [
+    "playwright_user_data",
+    "reports",
+    ".kilo",
+]
