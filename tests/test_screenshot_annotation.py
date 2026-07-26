@@ -172,11 +172,7 @@ def test_silent_fallback_warning_logged(capsys, monkeypatch):
     monkeypatch.setattr(monkeylm_config, "ImageDraw", None)
     monkeypatch.setattr(monkeylm_config, "PIL_Image", None)
     monkeypatch.setattr(monkeylm_config, "PIL_ImageDraw", None)
-    monkeypatch.setattr(models, "Image", None)
-    monkeypatch.setattr(models, "ImageDraw", None)
-    monkeypatch.setattr(models, "PIL_Image", None)
-    monkeypatch.setattr(models, "PIL_ImageDraw", None)
-    monkeypatch.setattr(models, "_local_service_log", lambda msg, _dir: captured.append(msg))
+    monkeypatch.setattr(monkeylm_config, "_local_service_log", lambda msg, _dir: captured.append(msg))
 
     with tempfile.TemporaryDirectory() as td:
         src = os.path.join(td, "src.png")

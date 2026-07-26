@@ -13,6 +13,7 @@ from monkeylm.models.vision import (
     _build_vision_annotation_prompt,
     _parse_vision_box,
     _draw_red_box_arrow,
+    _wrap_text_to_lines,
 )
 from monkeylm.models.prompts import (
     decide_next_action,
@@ -38,6 +39,7 @@ __all__ = [
     "_build_vision_annotation_prompt",
     "_parse_vision_box",
     "_draw_red_box_arrow",
+    "_wrap_text_to_lines",
     "decide_next_action",
     "run_application_discovery",
     "parse_action_plan_response",

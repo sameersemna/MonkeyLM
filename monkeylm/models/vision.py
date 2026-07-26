@@ -10,15 +10,8 @@ from typing import Any, Dict, List, Optional
 
 import ollama
 
-from monkeylm.config import (
-    Image,
-    ImageDraw,
-    PIL_Image,
-    PIL_ImageDraw,
-    PIL_ImageFont,
-    Settings,
-    _local_service_log,
-)
+from monkeylm import config
+from monkeylm.config import PIL_ImageFont, Settings
 from monkeylm.models.ollama import _sanitize_prompt_input, _safe_json_parse
 
 
@@ -160,17 +153,17 @@ def _draw_red_box_arrow(
     description: Optional[str] = None,
     step_num: Optional[int] = None,
 ) -> bool:
-    if Image is None or ImageDraw is None or PIL_Image is None or PIL_ImageDraw is None:
+    if config.Image is None or config.ImageDraw is None or config.PIL_Image is None or config.PIL_ImageDraw is None:
         msg = (
             "annotate_relevant_screenshot: PIL symbols unavailable "
             "(Image/ImageDraw/PIL_Image/PIL_ImageDraw). The annotation drawer "
             "will fall back to a copy of the original screenshot."
         )
         print(f"   ⚠️  {msg}")
-        _local_service_log(msg, os.path.dirname(output_path) or ".")
+        config._local_service_log(msg, os.path.dirname(output_path) or ".")
         return False
     try:
-        with PIL_Image.open(image_path) as img:
+        with config.PIL_Image.open(image_path) as img:
             img = img.convert("RGBA")
             width, height = img.size
             ymin, xmin, ymax, xmax = (float(v) for v in box_pct)
@@ -184,7 +177,7 @@ def _draw_red_box_arrow(
             halo_w = border_w + 2
             arrow_w = max(3, min(width, height) // 400)
             head_len = max(20, min(width, height) // 30)
-            draw = PIL_ImageDraw.Draw(img)
+            draw = config.PIL_ImageDraw.Draw(img)
             draw.rectangle(
                 [x0 - halo_w // 2, y0 - halo_w // 2, x1 + halo_w // 2, y1 + halo_w // 2],
                 outline=(0, 0, 0, 255),
@@ -297,7 +290,7 @@ def _draw_red_box_arrow(
             img.save(output_path)
             return True
     except Exception as exc:
-        _local_service_log(f"Failed to draw annotation box for {image_path}: {exc}")
+        config._local_service_log(f"Failed to draw annotation box for {image_path}: {exc}")
         return False
 
 
@@ -339,7 +332,7 @@ async def annotate_relevant_screenshot(
         )
         content = response.get("message", {}).get("content", "")
     except Exception as exc:
-        _local_service_log(f"{route_label} vision model failed: {exc}", settings.output_dir)
+        config._local_service_log(f"{route_label} vision model failed: {exc}", settings.output_dir)
         return image_path
 
     box: Optional[List[float]] = None

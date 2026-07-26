@@ -23,6 +23,7 @@ from monkeylm.browser.actions import (
     _resolve_interaction_mode,
     _fill_select_option,
     _resolve_form_boundary,
+    _compute_action_path_hash,
 )
 
 __all__ = [
@@ -44,4 +45,5 @@ __all__ = [
     "_resolve_interaction_mode",
     "_fill_select_option",
     "_resolve_form_boundary",
+    "_compute_action_path_hash",
 ]
