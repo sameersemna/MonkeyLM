@@ -177,3 +177,99 @@ adoption, dead-code cleanup) is substantial multi-session engineering
 work, further cycles should be run as focused follow-ups rather than
 bundled into one pass — see deferred findings above for the prioritized
 starting point.
+
+## Cycle 2 — Dependency audit + lint tooling adoption (2026-07-26)
+
+**Dependency/CVE audit (Phase 2 research: `pip-audit` against the real
+PyPI/OSV advisory database, chosen over web search since it queries
+ground-truth vulnerability data rather than relying on search-result
+recall):**
+- `pip-audit -r requirements.txt` → **no known vulnerabilities** in any
+  pinned dependency (Faker 40.31.0, ollama 0.6.2, Pillow 12.3.0,
+  pixelmatch 0.4.0, playwright 1.61.0, asyncpg 0.31.0, redis 8.0.1,
+  httpx 0.28.1, python-dotenv 1.2.2, reportlab 5.0.0).
+- Checked each pin against latest on PyPI (`pip index versions`): all
+  current except `Faker` (40.31.0 vs 40.36.0 — trivial patch bump, no
+  advisory, not touched). No action needed this cycle.
+
+**Lint tooling adoption (Phase 2 research: `context7` docs for
+`astral-sh/ruff` — confirmed the current recommended default and
+"popular" rule sets, since Ruff's rule catalog/config surface changes
+frequently and training-data knowledge could be stale):**
+- Added `pyproject.toml` with `[tool.ruff]`, `select = ["E", "F", "UP",
+  "B", "SIM", "I"]` (pycodestyle, Pyflakes, pyupgrade, bugbear, simplify,
+  isort) — Ruff's own docs list this as the common/recommended
+  popular-rule combination beyond the zero-config default (`E4/E7/E9/F`).
+  Excluded `playwright_user_data/`, `reports/`, `.kilo/` (generated
+  artifacts / vendored tooling, not source).
+- `ruff check .` surfaced 23 findings, all low-severity and mechanical:
+  20 unused imports (`F401`) and 3 ambiguous single-letter variable names
+  `l` in `scripts/backfill_annotations.py` (`E741`). No correctness bugs
+  among them individually — but see the runner.py finding below, which
+  ruff's F401 pass on `.helpers import CURRENT_GLOBAL_STEP` incidentally
+  surfaced.
+  *Fix:* `ruff check --fix` for the 18 auto-fixable unused imports;
+  manually reviewed and removed the remaining 2 unused imports (confirmed
+  via grep that neither was referenced anywhere, including as a
+  re-export test import); manually renamed `l` → `log`/`entry` in the 3
+  ambiguous-name spots. `ruff check .` is now clean; did **not** run
+  `ruff format` (would have reformatted 48 of the repo's ~69 files —
+  pure style churn unrelated to any finding, would bloat the diff and
+  blame history for no functional benefit; left as a future option, not
+  applied).
+- Verified: 47/47 tests still pass, `python3 -m monkeylm --help`
+  unaffected, `py_compile` clean on every touched file.
+
+**Significant finding surfaced but NOT fixed this cycle — flagged per
+the "never quietly work around retry/idempotency-adjacent bugs" rule:**
+
+`monkeylm/core/worker/runner.py:147` does `CURRENT_GLOBAL_STEP = step`
+inside `_run_worker_with_limit`, after having imported
+`CURRENT_GLOBAL_STEP` from `.helpers` (`helpers.py:13`, a module-level
+`int = 0`). This assignment has **no effect outside the function** — in
+Python, assigning to a name only rebinds it in the current scope (here,
+a local variable inside the async function, since there's no `global`
+declaration); it does not mutate `helpers.CURRENT_GLOBAL_STEP`, which
+stays `0` forever. `ruff` flagged the import as unused precisely because
+the code never *reads* the imported value, only (uselessly) overwrites a
+same-named local — that's what led to this discovery.
+
+Consumers read the "shared" counter via `monkeylm.core.CURRENT_GLOBAL_STEP`
+(re-exported through `core/__init__.py` → `core/worker/__init__.py` →
+`worker/helpers.py`), notably `monkeylm/models/prompts/antiloop.py`:
+```python
+{tgt: exp for tgt, exp in loop_state["blacklist"].items() if exp > CURRENT_GLOBAL_STEP}
+```
+Since `CURRENT_GLOBAL_STEP` is always `0` there, this comparison is
+`exp > 0`, which is true for essentially every blacklist entry ever
+inserted (`exp` is computed as `CURRENT_GLOBAL_STEP + blacklist_expiry_steps`
+at insertion time, itself always `>= blacklist_expiry_steps > 0`). Net
+effect: **blacklisted click/action targets in the anti-repeat-loop
+mechanism likely never expire for the lifetime of a run**, silently
+degrading exploration diversity on long runs instead of the intended
+"forget after N steps" behavior. This looks like a real, live bug (not
+theoretical) — plausibly present since before the refactor, unmasked
+only now because ruff's unused-import check happened to shine a light on
+the dead assignment.
+
+Not fixed here because: (a) it's a behavior change to a core worker
+loop-detection code path, not a lint/style issue, and deserves its own
+Phase 2 research + design (options include a proper `helpers.CURRENT_GLOBAL_STEP
+= step` qualified write, threading `step` explicitly into
+`_break_action_loop`/`antiloop.py` instead of relying on shared mutable
+module state, or moving the counter into `settings`/a passed-in state
+object); (b) it needs a regression test proving the blacklist actually
+expires, which doesn't exist yet; (c) squeezing a worker-loop-detection
+behavior fix into a lint-adoption commit would violate the "one logical
+change per commit" rule. **Recommended as Cycle 3's primary focus.**
+
+**Test results:** 47 passed before and after (no regressions); `ruff
+check .` went from not-configured → 23 findings → 0 findings.
+
+**Cycle self-assessment:** Dependency posture is clean (no CVEs, versions
+current) and lint tooling is now in place to catch this whole class of
+future mistakes automatically. The `CURRENT_GLOBAL_STEP` finding is more
+valuable than everything else in this cycle combined — it's a genuine,
+currently-live correctness bug in a core testing-diversity mechanism.
+Recommend Cycle 3 fix it with a proper regression test before doing
+anything else.
