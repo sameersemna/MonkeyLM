@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
-import os
 import random
 import re
 import urllib.parse
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Any, Dict, Literal, Optional, Tuple
 
 from playwright.async_api import Dialog, Page
 

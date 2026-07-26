@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import random
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List
 
 from playwright.async_api import Page
 
 from monkeylm.config import _local_service_log
 from monkeylm.browser.lifecycle import resilient_page_goto, wait_for_page_ready
-from monkeylm.browser.snapshot import get_page_state
 from monkeylm.types import PageSnapshot
 
 from .helpers import _extract_target_id, _locator_for_target_id, _resolve_interaction_mode, _fill_select_option, _resolve_form_boundary

@@ -6,7 +6,6 @@ import os
 from datetime import datetime
 from typing import Any, Dict, List
 
-from monkeylm.config import _REPORTLAB_AVAILABLE
 from monkeylm.memory import _secure_atomic_write
 from monkeylm.reporting.utils import redact_sensitive_content
 from monkeylm.reporting.telemetry import summarize_semantic_memory_telemetry

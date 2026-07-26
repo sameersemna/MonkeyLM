@@ -294,7 +294,6 @@ def create_browser_provider(settings: Optional[Settings] = None) -> IBrowserProv
         Will be replaced with proper Browser class in Phase 2 refactoring.
     """
     from monkeylm.browser import (
-        capture_dom_and_layout,
         execute_action,
         get_page_state,
         launch_context_with_fallback,

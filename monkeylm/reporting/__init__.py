@@ -7,7 +7,6 @@ from monkeylm.reporting.accountability import summarize_vibe_coding_accountabili
 from monkeylm.reporting.defects import (
     _compile_defect_tickets,
     _group_defects,
-    _derive_severity as _defects_derive_severity,
     _extract_reproduction_steps,
     _SEVERITY_MAP,
     _ROOT_CAUSE_TEMPLATES,

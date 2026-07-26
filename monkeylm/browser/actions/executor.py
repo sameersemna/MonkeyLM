@@ -19,7 +19,6 @@ from monkeylm.browser.snapshot import (
     compute_max_layout_shift,
     compare_screenshots_pixelmatch,
 )
-from monkeylm.browser.lifecycle import wait_for_page_ready
 from monkeylm.types import PageSnapshot
 
 from .helpers import _locator_for_target_id

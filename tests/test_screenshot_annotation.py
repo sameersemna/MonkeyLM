@@ -16,9 +16,7 @@ import json
 import os
 import sys
 import tempfile
-from typing import List
 
-import pytest
 
 # Make ``monkeylm`` importable when running from the repo root.
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
@@ -31,7 +29,6 @@ from monkeylm import config as monkeylm_config  # noqa: E402
 from monkeylm.models import (  # noqa: E402
     _draw_red_box_arrow,
     _parse_vision_box,
-    _safe_json_parse,
 )
 
 

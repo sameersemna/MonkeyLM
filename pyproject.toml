@@ -1,0 +1,18 @@
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+exclude = [
+    "playwright_user_data",
+    "reports",
+    ".kilo",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle
+    "F",   # Pyflakes
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "SIM", # flake8-simplify
+    "I",   # isort
+]

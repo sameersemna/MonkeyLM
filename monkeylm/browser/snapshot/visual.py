@@ -5,12 +5,9 @@ import subprocess
 from typing import Any, Dict
 
 from monkeylm.config import (
-    LAYOUT_SHIFT_THRESHOLD_PX,
-    VISUAL_DIFF_THRESHOLD_RATIO,
     Image,
     PIL_Image,
     pil_pixelmatch,
-    _local_service_log,
 )
 from .state import _sanitize_filename
 from monkeylm.types import PageSnapshot

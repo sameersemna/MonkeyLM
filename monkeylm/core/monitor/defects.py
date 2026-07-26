@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import random
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from monkeylm.config import Faker, _normalize_defect
 

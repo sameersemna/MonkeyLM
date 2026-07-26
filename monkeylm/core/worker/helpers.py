@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import random
-from typing import Any, Dict, List, Optional
+from typing import Any, List, Optional
 
 from monkeylm.config import Settings, _local_service_log
 

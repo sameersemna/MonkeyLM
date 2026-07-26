@@ -249,13 +249,13 @@ async def backfill_async(
         run_data = json.load(f)
 
     logs = run_data.get("logs", [])
-    annotated_logs = [l for l in logs if l.get("screenshot_annotated")]
+    annotated_logs = [log for log in logs if log.get("screenshot_annotated")]
     if not annotated_logs:
         print(f"No annotated screenshots found in {run_dir}")
         return {"total": 0, "annotated": 0, "redrew": 0, "no_box": 0, "failed": 0}
 
     if single_step is not None:
-        annotated_logs = [l for l in annotated_logs if l.get("step") == single_step]
+        annotated_logs = [log for log in annotated_logs if log.get("step") == single_step]
         if not annotated_logs:
             raise SystemExit(f"No annotated screenshot for step {single_step}")
     if limit is not None:
@@ -281,7 +281,7 @@ async def backfill_async(
     # Build a quick step→log mapping so we can write descriptions back to
     # results.json in place once the run completes.
     by_step: Dict[int, Dict[str, Any]] = {
-        l.get("step"): l for l in run_data.get("logs", []) if l.get("step") is not None
+        entry.get("step"): entry for entry in run_data.get("logs", []) if entry.get("step") is not None
     }
 
     for idx, log in enumerate(annotated_logs):

@@ -25,7 +25,7 @@ from monkeylm.core.monitor import (
 )
 from monkeylm.types import WorkerRunResult
 
-from .helpers import CURRENT_GLOBAL_STEP, build_worker_user_data_dir, with_retry_backoff
+from .helpers import build_worker_user_data_dir, with_retry_backoff
 
 
 async def _run_worker_with_limit(

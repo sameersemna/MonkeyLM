@@ -6,7 +6,7 @@ import asyncio
 import base64
 import os
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, List, Optional
 
 import ollama
 
