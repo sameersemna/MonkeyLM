@@ -368,3 +368,107 @@ remaining on the deferred list is either environment-constrained (a real
 end-to-end run) or a bigger standalone effort (mypy adoption, packaging
 metadata), this is a natural checkpoint to report back rather than
 picking the next cycle unilaterally.
+
+## Cycle 4 — Adopt mypy (2026-07-26)
+
+**Research (`context7`, `python/mypy` official docs on adopting mypy on
+an existing codebase):** confirmed the recommended approach is to get a
+subset passing cleanly first — start small, use `ignore_missing_imports`
+for third-party stub gaps, and targeted `# type: ignore` comments for
+pre-existing issues not being fixed yet, rather than either boiling the
+ocean or skipping straight to `--strict`.
+
+**Findings:** `mypy monkeylm/ --ignore-missing-imports` surfaced 39
+errors across 4 files on the first run. Triaged each by whether the code
+path is real and exercised, versus the known-broken DI scaffolding from
+`91dea6b` (see Cycle 2/3 notes — same section already flagged there).
+
+*Real bugs, fixed:*
+- `browser/actions/actions.py::_action_type` — the loop variable
+  `for payload in input_payloads:` (a `Dict[str, Any]`) was reused later
+  in the same function as `payload = payload_value or fuzzer.next_payload()`
+  (a `str`). Not currently crashing (the loop's `payload` is dead after
+  its `break`), but a genuine shadowing hazard — a future edit anywhere
+  after the loop that touches `payload` expecting the dict would silently
+  operate on a string instead. Renamed the loop variable to
+  `payload_entry`.
+- `models/ollama.py::_ollama_chat_with_retry` — annotated to return
+  `Optional[Dict[str, Any]]`, but actually returns `ollama.ChatResponse`.
+  Checked whether this was a real bug (i.e. do callers' dict-style
+  `response["message"]["content"]` accesses actually work): confirmed
+  `ChatResponse` extends `ollama._types.SubscriptableBaseModel`, which
+  implements `__getitem__`, so dict-style access is valid at runtime —
+  this was an annotation-accuracy fix (`Optional[ollama.ChatResponse]`),
+  not a behavior change.
+- `models/vision.py::annotate_relevant_screenshot` —
+  `asyncio.to_thread(ollama.chat, **chat_kwargs)` broke mypy's overload
+  resolution for `ollama.chat` (a `**kwargs`-unpack-vs-overloads
+  limitation). `ollama.py`'s own working call site uses explicit named
+  kwargs and doesn't hit this; converted `vision.py`'s call to match —
+  same runtime behavior, now type-checks cleanly.
+
+*Deferred, loudly flagged — not fixed this cycle:* all remaining 31
+errors are confined to `monkeylm/__init__.py`'s "Dependency Injection
+Factory Functions" section (`create_browser_provider`,
+`create_memory_store`, `create_model_client`, `create_report_generator`),
+first spotted as a code smell in Cycle 2's ruff pass and now fully
+characterized. Every adapter calls its wrapped module with the wrong
+argument order/shape, or a method that plain doesn't exist:
+`MemoryStoreAdapter.save_state` calls
+`PersistenceEngine.save_baseline` (doesn't exist — the real method is
+private `_upsert_baseline(domain, page_route, dom_structure_hash,
+component_manifest, is_golden_standard)`, an entirely different shape);
+`search_memory` calls `PersistenceEngine.search_similar` (search
+actually lives on `QdrantMemoryStore.search_similar_layouts`, a different
+class entirely); `acquire_lock`/`release_lock` have no equivalent at all
+in the real Redis-backed `claim_action_path_lock(path_hash, worker_label)`
+mechanism (TTL-based, no explicit release). `ModelClientAdapter` and
+`ReportGeneratorAdapter` call `run_application_discovery`,
+`build_decision_prompt`, `decide_next_action`, and all three report
+generators with arguments in the wrong order/type entirely.
+
+Confirmed via grep this section has **zero test coverage** and is
+**never called by the real CLI entrypoint** (`core.main` /
+`core/scheduler.py`) — so the breakage is currently latent. But it IS
+exported in `__all__` with docstring `>>>` usage examples
+(`>>> memory = create_memory_store(); await memory.initialize()`), so
+any user who follows the documented example would hit an
+`AttributeError` or `TypeError` immediately. Not fixed here because
+properly wiring it needs real design decisions first (e.g., what should
+`IMemoryStore`'s generic lock contract even mean against the actual
+Redis TTL-lock design, which has no explicit release?) — that's
+architecture work, not a mypy-adoption-cycle patch. Added a detailed
+comment block directly above the section in the source plus targeted
+`# type: ignore` markers (one per still-flagged line) so mypy stays
+useful for the rest of the file without masking future *new* mistakes
+elsewhere in it. **Recommended as a dedicated future cycle**: either
+finish wiring the DI layer correctly against the real subsystem APIs, or
+remove it from `__all__`/docs until it is.
+
+**Config:** added `[tool.mypy]` to `pyproject.toml`
+(`python_version = "3.11"`, `ignore_missing_imports = true`, same
+exclude list as `[tool.ruff]`). Note: `mypy .` (whole repo) hits an
+unrelated mypy module-resolution quirk — `tests/test_screenshot_annotation.py`
+gets discovered twice under different module names
+(`test_screenshot_annotation` vs `tests.test_screenshot_annotation`)
+because `tests/` has no `__init__.py` (deliberate, so pytest's rootdir
+discovery works normally). Documented `mypy monkeylm/` (the package
+only) as the command to run; not adding `tests/__init__.py` to work
+around this since it could affect pytest's own discovery behavior and
+wasn't worth the risk for a cosmetic mypy convenience this cycle.
+
+**Verification:** `mypy monkeylm/` → `Success: no issues found in 53
+source files`. Full suite: 48 passed (no regressions from the 3 real
+fixes). `ruff check .` clean. `py_compile` clean on all touched files.
+`python3 -m monkeylm --help` unaffected.
+
+**Cycle self-assessment:** High value again — mypy adoption itself is
+useful going forward, and it caught a real (if currently benign)
+variable-shadowing bug in the worker's form-filling path, plus fully
+characterized the scope of the DI-adapter breakage that Cycle 2 could
+only gesture at. Four cycles in, the pattern is holding: each new tool
+adopted (ruff, then mypy) surfaces genuine findings beyond its own
+checklist item, not just busywork. The DI-adapter section is now the
+clear standing highest-priority item for whoever picks this up next —
+either fix it for real or remove the false promise of a working public
+API.
