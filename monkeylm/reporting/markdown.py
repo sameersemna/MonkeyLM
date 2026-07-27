@@ -12,6 +12,15 @@ from monkeylm.reporting.telemetry import summarize_semantic_memory_telemetry
 from monkeylm.reporting.accountability import summarize_vibe_coding_accountability, _derive_severity
 from monkeylm.reporting.accessibility import _compile_accessibility_violations
 from monkeylm.reporting.defects import _compile_defect_tickets
+from monkeylm.reporting.dedup import dedupe_findings
+
+
+def _fmt_occurrence(item: Dict[str, Any]) -> str:
+    count = item.get("occurrence_count", 1)
+    step_range = item.get("step_range")
+    if count and count > 1 and step_range:
+        return f" (seen {count}x, steps {step_range[0]}-{step_range[1]})"
+    return ""
 
 
 def generate_markdown_report(
@@ -132,8 +141,8 @@ Actions included: Clicking, Typing, Form Submission, Modal Handling, and State E
 
     md_content += "## Security Risks\n"
     if defects.security_risks:
-        for item in defects.security_risks:
-            md_content += f"- Step {item['step']}: {item['type']} on `{item.get('target', '')}` at {item['url']}\n"
+        for item in dedupe_findings(defects.security_risks):
+            md_content += f"- Step {item['step']}: {item['type']} on `{item.get('target', '')}` at {item['url']}{_fmt_occurrence(item)}\n"
     else:
         md_content += "- None detected.\n"
 
@@ -226,38 +235,38 @@ Actions included: Clicking, Typing, Form Submission, Modal Handling, and State E
 
     md_content += "\n## Performance Bottlenecks\n"
     if defects.performance_bottlenecks:
-        for item in defects.performance_bottlenecks:
-            md_content += f"- Step {item['step']}: {item['type']} ({item.get('duration_ms', item.get('heap_delta_bytes', item.get('fps')) )})\n"
+        for item in dedupe_findings(defects.performance_bottlenecks):
+            md_content += f"- Step {item['step']}: {item['type']} ({item.get('duration_ms', item.get('heap_delta_bytes', item.get('fps')) )}){_fmt_occurrence(item)}\n"
     else:
         md_content += "- None detected.\n"
 
     md_content += "\n## Visual Regressions\n"
-    visual_items = defects.visual_regressions + defects.layout_instability
+    visual_items = dedupe_findings(defects.visual_regressions + defects.layout_instability)
     if visual_items:
         for item in visual_items:
-            md_content += f"- Step {item['step']}: {item['type']} on {item['url']}\n"
+            md_content += f"- Step {item['step']}: {item['type']} on {item['url']}{_fmt_occurrence(item)}\n"
     else:
         md_content += "- None detected.\n"
 
     md_content += "\n## Baseline Regressions\n"
     if defects.regression_findings:
-        for item in defects.regression_findings:
+        for item in dedupe_findings(defects.regression_findings):
             md_content += (
                 f"- Step {item['step']}: [{item['severity']}] {item['type']} "
                 f"at {item['domain']}{item['page_route']} "
-                f"(missing: {len(item.get('missing_components', []))})\n"
+                f"(missing: {len(item.get('missing_components', []))}){_fmt_occurrence(item)}\n"
             )
     else:
         md_content += "- None detected.\n"
 
     md_content += "\n## Context Anomalies\n"
     if defects.context_anomalies:
-        for item in defects.context_anomalies[:50]:
+        for item in dedupe_findings(defects.context_anomalies)[:50]:
             action_ctx = item.get("action", "") or "?"
             step_num = item.get("step", "?")
             anomaly_type = item.get("type", "unknown")
             message = (item.get("message", "") or "")[:200]
-            md_content += f"- Step {step_num}: [{anomaly_type}] on action `{action_ctx}` at {item.get('url', '?')}\n"
+            md_content += f"- Step {step_num}: [{anomaly_type}] on action `{action_ctx}` at {item.get('url', '?')}{_fmt_occurrence(item)}\n"
             if message:
                 md_content += f"  - `{message}`\n"
     else:
@@ -265,22 +274,32 @@ Actions included: Clicking, Typing, Form Submission, Modal Handling, and State E
 
     md_content += "\n## UX Flow Freezes\n"
     if defects.ux_flow_freezes:
-        for item in defects.ux_flow_freezes[:50]:
+        for item in dedupe_findings(defects.ux_flow_freezes)[:50]:
             step_num = item.get("step", "?")
             desc = (item.get("description", "") or "")[:250]
-            md_content += f"- Step {step_num}: `{desc}`\n"
+            md_content += f"- Step {step_num}: `{desc}`{_fmt_occurrence(item)}\n"
     else:
         md_content += "- None detected.\n"
 
     md_content += "\n## Validation Failures\n"
     if defects.validation_failures:
-        for item in defects.validation_failures[:50]:
+        for item in dedupe_findings(defects.validation_failures)[:50]:
             step_num = item.get("step", "?")
             probe = item.get("probe_name", "") or "unknown"
             target = item.get("target", "") or "?"
             fail_type = item.get("type", "unknown")
             desc = (item.get("description", "") or "")[:250]
-            md_content += f"- Step {step_num}: [{fail_type}] field `{target}` probe `{probe}` — `{desc}`\n"
+            md_content += f"- Step {step_num}: [{fail_type}] field `{target}` probe `{probe}` — `{desc}`{_fmt_occurrence(item)}\n"
+    else:
+        md_content += "- None detected.\n"
+
+    md_content += "\n## Capture Diagnostics\n"
+    capture_diagnostics = getattr(defects, "capture_diagnostics", [])
+    if capture_diagnostics:
+        for item in dedupe_findings(capture_diagnostics)[:50]:
+            step_num = item.get("step", "?")
+            msg = item.get("message", "") or item.get("type", "")
+            md_content += f"- Step {step_num}: `{msg}`{_fmt_occurrence(item)}\n"
     else:
         md_content += "- None detected.\n"
 

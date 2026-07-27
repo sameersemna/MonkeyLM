@@ -11,6 +11,7 @@ from monkeylm.config import (
     _REPORTLAB_AVAILABLE,
 )
 from monkeylm.reporting.accountability import summarize_vibe_coding_accountability, _derive_severity
+from monkeylm.reporting.dedup import dedupe_findings
 
 
 if _REPORTLAB_AVAILABLE:
@@ -208,7 +209,15 @@ def generate_pdf_report(
             screenshot_basename = item.get("screenshot_path", "")
 
             header_style, header_bg = _severity_color(severity)
-            header_text = f"[{severity.upper()}] {category_label}: Step {step} — {item_type}"
+            occurrence_count = item.get("occurrence_count", 1)
+            step_range = item.get("step_range")
+            if occurrence_count and occurrence_count > 1 and step_range:
+                header_text = (
+                    f"[{severity.upper()}] {category_label}: {item_type} "
+                    f"— seen {occurrence_count}x (steps {step_range[0]}-{step_range[1]})"
+                )
+            else:
+                header_text = f"[{severity.upper()}] {category_label}: Step {step} — {item_type}"
 
             row_specs: List[tuple] = []
             row_specs.append((Paragraph(header_text, header_style), header_bg))
@@ -289,12 +298,14 @@ def generate_pdf_report(
             ("Context Anomalies", defects.context_anomalies),
             ("UX Flow Freezes", defects.ux_flow_freezes),
             ("Validation Failures", defects.validation_failures),
+            ("Capture Diagnostics", getattr(defects, "capture_diagnostics", [])),
         ]
 
         any_defects = False
-        for category_label, items in all_defect_sections:
-            if not items:
+        for category_label, raw_items in all_defect_sections:
+            if not raw_items:
                 continue
+            items = dedupe_findings(raw_items)
             any_defects = True
             story.append(Paragraph(category_label, styles["Heading3"]))
             story.append(Spacer(1, 0.05 * inch))

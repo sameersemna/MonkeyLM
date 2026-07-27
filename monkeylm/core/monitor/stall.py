@@ -53,5 +53,13 @@ class StallDetector:
                 "structure_hash": sentinel.get("structure_hash", "unknown"),
             }
             self.defects.add("ux_flow_freezes", finding)
+            # Once a freeze is declared, drop the window instead of leaving it in
+            # place. Without this, every subsequent step re-satisfies the same
+            # "last N steps identical" condition and re-declares the same freeze
+            # again and again for the rest of the run, turning one real freeze
+            # into hundreds of duplicate report entries. Requiring a fresh
+            # `threshold`-length stuck window before re-declaring still catches a
+            # freeze that persists, just without the per-step spam.
+            self._history = []
             return finding
         return None

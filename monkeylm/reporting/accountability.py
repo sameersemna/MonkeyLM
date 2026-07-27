@@ -3,6 +3,8 @@
 from __future__ import annotations
 from typing import Any, Dict, List
 
+from monkeylm.reporting.dedup import dedupe_findings
+
 
 def summarize_vibe_coding_accountability(defects: Any) -> Dict[str, Any]:
     """Compute regression drift index and details from the DefectTracker."""
@@ -69,7 +71,12 @@ def summarize_vibe_coding_accountability(defects: Any) -> Dict[str, Any]:
         collection = getattr(defects, cat, None)
         if not collection:
             continue
-        for d in collection:
+        # Dedupe before counting: the same root cause (a stuck freeze, a static
+        # a11y violation on an unchanging page, etc.) is re-observed and logged
+        # on every step it persists across, which would otherwise inflate the
+        # headline defect count by 1-2 orders of magnitude without reflecting
+        # any additional distinct app issues.
+        for d in dedupe_findings(collection):
             severity = _derive_severity(cat, d)
             if severity in ("CRITICAL", "HIGH", "MEDIUM"):
                 app_defect_count += 1

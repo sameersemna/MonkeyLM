@@ -76,7 +76,11 @@ async def run_worker(
     worker_a11y_checker = A11yChecker(worker_defects)
     worker_perf_monitor = PerformanceMonitor(worker_defects)
     worker_anomaly_sensor = BrowserAnomalySensor(worker_defects)
-    worker_stall_detector = StallDetector(worker_defects, threshold=settings.max_steps // 4 if settings.max_steps >= 8 else 3)
+    # Waiting for a quarter of the whole run to elapse before declaring a freeze
+    # burns a huge chunk of the step/time budget sitting on a state that was
+    # already distinguishable much earlier. Cap the window so freezes surface
+    # quickly regardless of how many total steps the run is configured for.
+    worker_stall_detector = StallDetector(worker_defects, threshold=min(15, max(5, settings.max_steps // 4)) if settings.max_steps >= 8 else 3)
     worker_validation_prober = ValidationProber(worker_defects, probe_frequency=3)
 
     worker_memory = QdrantMemoryStore(settings)
@@ -208,10 +212,18 @@ async def run_worker(
 
             try:
                 post_snapshot = await get_page_state(page, step, phase="stall", output_dir=settings.output_dir)
-                worker_stall_detector.record_state(step, post_snapshot.url, post_snapshot.structure_hash, str(plan.get("action", "")))
-                stall_finding = worker_stall_detector.check_for_stall(step, plan.get("action", "scroll"))
-                if stall_finding:
-                    print(f"\u26a0\ufe0f {worker_label} STALL DETECTED at step {step}: page state unchanged across multiple steps")
+                if post_snapshot.is_empty_capture:
+                    # Don't let an empty capture (no real page content) masquerade as
+                    # an "unchanged state" freeze \u2014 it's a capture problem, not a UX
+                    # flow issue. capture_diagnostics already got a finding for this
+                    # step via execute_action; skip feeding the stall detector so it
+                    # doesn't declare (and keep re-declaring) a bogus freeze.
+                    pass
+                else:
+                    worker_stall_detector.record_state(step, post_snapshot.url, post_snapshot.structure_hash, str(plan.get("action", "")))
+                    stall_finding = worker_stall_detector.check_for_stall(step, plan.get("action", "scroll"))
+                    if stall_finding:
+                        print(f"\u26a0\ufe0f {worker_label} STALL DETECTED at step {step}: page state unchanged across multiple steps")
             except Exception as stall_exc:
                 _local_service_log(f"{worker_label} stall detection failed: {stall_exc}", settings.output_dir)
 

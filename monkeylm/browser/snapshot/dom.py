@@ -115,7 +115,10 @@ async def capture_dom_and_layout(page: Page) -> Dict[str, Any]:
             };
 
             const interactives = Array.from(document.querySelectorAll(
-                'button, a, input, select, textarea, [role="button"], [onclick], form'
+                'button, a, input, select, textarea, form, [onclick], ' +
+                '[role="button"], [role="link"], [role="checkbox"], [role="radio"], ' +
+                '[role="switch"], [role="tab"], [role="menuitem"], [role="option"], ' +
+                '[tabindex], [contenteditable="true"]'
             ));
             const tags = [];
             const anchors = {};
@@ -234,6 +237,8 @@ async def capture_dom_and_layout(page: Page) -> Dict[str, Any]:
             ).length;
 
             const structure = tags.map(t => t.replace(/text=".*?"/, 'text=""')).join('|');
+            const bodyTextLength = (document.body?.innerText || '').trim().length;
+            const bodyChildCount = document.body ? document.body.querySelectorAll('*').length : 0;
 
             return {
                 url: window.location.href,
@@ -246,6 +251,8 @@ async def capture_dom_and_layout(page: Page) -> Dict[str, Any]:
                 disabledControls,
                 formControls,
                 forms,
+                bodyTextLength,
+                bodyChildCount,
             };
         }"""
     )

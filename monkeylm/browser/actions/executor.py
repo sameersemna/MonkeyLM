@@ -117,12 +117,27 @@ async def execute_action(
         after_snapshot = await get_page_state(page, step_num, phase="after", output_dir=settings.output_dir)
         perf_after = await perf_monitor.snapshot(page)
 
-        max_shift = compute_max_layout_shift(before_snapshot, after_snapshot)
-        if before_snapshot.url == after_snapshot.url and max_shift > LAYOUT_SHIFT_THRESHOLD_PX:
-            defects.add("layout_instability", {"step": step_num, "type": "layout-instability", "max_shift_px": max_shift, "url": sanitize_for_storage(after_snapshot.url, max_len=1024), "before_hash": before_snapshot.structure_hash, "after_hash": after_snapshot.structure_hash})
+        if before_snapshot.is_empty_capture or after_snapshot.is_empty_capture:
+            # An empty-string content hash means the capture saw no page content at
+            # all (stale/detached frame, mid-navigation, or a selector mismatch),
+            # not a real layout collapse. Surface it as its own diagnostic instead
+            # of feeding it into layout/collapse detectors, which would otherwise
+            # misreport it as a distinct app defect on every subsequent step.
+            defects.add("capture_diagnostics", {
+                "step": step_num,
+                "type": "empty-page-capture",
+                "phase": "after" if after_snapshot.is_empty_capture else "before",
+                "url": sanitize_for_storage(after_snapshot.url, max_len=1024),
+                "message": f"Empty page capture at step {step_num} — investigate navigation/load state.",
+                "content_hash": after_snapshot.structure_hash,
+            })
+        else:
+            max_shift = compute_max_layout_shift(before_snapshot, after_snapshot)
+            if before_snapshot.url == after_snapshot.url and max_shift > LAYOUT_SHIFT_THRESHOLD_PX:
+                defects.add("layout_instability", {"step": step_num, "type": "layout-instability", "max_shift_px": max_shift, "url": sanitize_for_storage(after_snapshot.url, max_len=1024), "before_hash": before_snapshot.structure_hash, "after_hash": after_snapshot.structure_hash})
 
-        if before_snapshot.url == after_snapshot.url and len(after_snapshot.elements) < max(1, int(len(before_snapshot.elements) * 0.5)):
-            defects.add("layout_instability", {"step": step_num, "type": "dom-collapse", "before_elements": len(before_snapshot.elements), "after_elements": len(after_snapshot.elements), "url": sanitize_for_storage(after_snapshot.url, max_len=1024)})
+            if before_snapshot.url == after_snapshot.url and len(after_snapshot.elements) < max(1, int(len(before_snapshot.elements) * 0.5)):
+                defects.add("layout_instability", {"step": step_num, "type": "dom-collapse", "before_elements": len(before_snapshot.elements), "after_elements": len(after_snapshot.elements), "url": sanitize_for_storage(after_snapshot.url, max_len=1024)})
 
         visual_diff = compare_screenshots_pixelmatch(before_snapshot.screenshot_path, after_snapshot.screenshot_path, step_num, output_dir=settings.output_dir)
         if visual_diff.get("diff_ratio", 0.0) > VISUAL_DIFF_THRESHOLD_RATIO and before_snapshot.url == after_snapshot.url:

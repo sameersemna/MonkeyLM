@@ -179,6 +179,7 @@ class PageSnapshot:
     timestamp: float = 0.0
     form_controls: List[FormControlRecord] = field(default_factory=list)
     forms: List[FormRecord] = field(default_factory=list)
+    is_empty_capture: bool = False
 
 
 # ── Worker / run result types ─────────────────────────────────────────────────

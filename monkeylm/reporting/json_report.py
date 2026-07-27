@@ -67,6 +67,7 @@ def generate_json_summary(
             "context_anomalies": defects.context_anomalies,
             "ux_flow_freezes": defects.ux_flow_freezes,
             "validation_failures": defects.validation_failures,
+            "capture_diagnostics": getattr(defects, "capture_diagnostics", []),
         },
         "compiled_defect_tickets": [t.to_dict() for t in _compile_defect_tickets(defects, test_logs)],
         "network_injections": network_injections,
