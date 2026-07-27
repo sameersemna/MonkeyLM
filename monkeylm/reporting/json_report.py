@@ -38,6 +38,16 @@ def generate_json_summary(
         "ollama_timeout_seconds": settings.ollama_timeout_seconds,
         "redis_path_lock_ttl_seconds": settings.redis_path_lock_ttl_seconds,
         "graceful_shutdown_requested": graceful_shutdown_requested,
+        "qdrant_config": {
+            # Recorded so "providers: {hash: N}" in semantic_memory_telemetry
+            # can be read correctly: it's expected/correct when
+            # embedding_provider_configured == "hash", and only a real
+            # problem (silent fallback) when it's "ollama" but the observed
+            # provider or telemetry fallback_count says otherwise.
+            "embedding_provider_configured": settings.qdrant_embedding_provider,
+            "embedding_model_configured": settings.qdrant_embedding_model,
+            "rerank_enabled_configured": settings.qdrant_rerank_enabled,
+        },
         "retry_policy": {
             "worker_navigation_retries": settings.worker_navigation_retries,
             "worker_qdrant_init_retries": settings.worker_qdrant_init_retries,

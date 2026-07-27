@@ -309,6 +309,10 @@ Actions included: Clicking, Typing, Form Submission, Modal Handling, and State E
     providers = telemetry.get("providers", {})
 
     md_content += "\n## Semantic Memory Telemetry\n"
+    md_content += (
+        f"- Configured embedding provider: `{settings.qdrant_embedding_provider}` "
+        f"(model: `{settings.qdrant_embedding_model}`)\n"
+    )
     md_content += f"- Retrieval events: {retrieval.get('events', 0)} (ok: {retrieval.get('ok', 0)})\n"
     md_content += f"- Avg retrieval total: {retrieval.get('avg_total_ms', 0.0)} ms\n"
     md_content += f"- Avg Qdrant search: {retrieval.get('avg_qdrant_search_ms', 0.0)} ms\n"
@@ -323,6 +327,19 @@ Actions included: Clicking, Typing, Form Submission, Modal Handling, and State E
         md_content += f"- Providers observed: {provider_line}\n"
     else:
         md_content += "- Providers observed: none\n"
+    fallback_count = telemetry.get("fallback_count", 0)
+    if fallback_count:
+        md_content += (
+            f"- ⚠️ **{fallback_count} embedding call(s) silently fell back to hash vectors** "
+            f"after the configured `{settings.qdrant_embedding_provider}` provider failed mid-run. "
+            f"Check the service connectivity log for the underlying error.\n"
+        )
+    elif settings.qdrant_embedding_provider != "hash" and settings.qdrant_embedding_provider not in providers:
+        md_content += (
+            f"- ⚠️ Configured provider is `{settings.qdrant_embedding_provider}` but every observed "
+            f"call used `hash` — the provider likely failed during the startup probe (see service "
+            f"log) and got permanently downgraded before any steps ran.\n"
+        )
 
     md_content += "\n## Action Log\n\n| Step | Action | Target | Status |\n|---|---|---|---|\n"
     for log in test_logs:

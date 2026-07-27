@@ -34,9 +34,12 @@ def summarize_semantic_memory_telemetry(test_logs: List[Dict[str, Any]]) -> Dict
     write_upsert_ms = [float(evt.get("qdrant_upsert_ms", 0.0)) for evt in write_ok]
 
     provider_counts: Dict[str, int] = {}
+    fallback_count = 0
     for evt in retrieval_ok + write_ok:
         provider = str(evt.get("provider_used", "unknown"))
         provider_counts[provider] = provider_counts.get(provider, 0) + 1
+        if evt.get("fallback_used"):
+            fallback_count += 1
 
     rerank_applied_count = len([evt for evt in retrieval_ok if evt.get("rerank_applied")])
 
@@ -57,4 +60,9 @@ def summarize_semantic_memory_telemetry(test_logs: List[Dict[str, Any]]) -> Dict
             "avg_qdrant_upsert_ms": round(_avg(write_upsert_ms), 3),
         },
         "providers": provider_counts,
+        # `providers` alone can't tell you whether "hash" means "hash was the
+        # configured default" or "ollama was requested and silently fell
+        # back on every call." fallback_count is the direct signal: it's only
+        # nonzero when a real embedding attempt failed and got downgraded.
+        "fallback_count": fallback_count,
     }

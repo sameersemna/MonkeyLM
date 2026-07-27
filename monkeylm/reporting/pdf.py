@@ -11,6 +11,7 @@ from monkeylm.config import (
     _REPORTLAB_AVAILABLE,
 )
 from monkeylm.reporting.accountability import summarize_vibe_coding_accountability, _derive_severity
+from monkeylm.reporting.defects import _compile_defect_tickets
 from monkeylm.reporting.dedup import dedupe_findings
 
 
@@ -197,51 +198,62 @@ def generate_pdf_report(
                 return header_warning_style, colors.HexColor("#f39c12")
             return header_info_style, colors.HexColor("#2c3e50")
 
-        def _build_audit_card(item: Dict[str, Any], category_label: str) -> tuple:
-            step = item.get("step", "n/a")
-            item_type = item.get("type", "unknown")
-            severity = item.get("severity", "info")
-            selector = item.get("selector", "(none)")
-            html_snippet = item.get("html_snippet", "")
-            failure_reason = item.get("failure_reason", "")
-            remediation_advice = item.get("remediation_advice", "Manual review required.")
-            url = item.get("url", "")
-            screenshot_basename = item.get("screenshot_path", "")
+        def _build_ticket_card(ticket: Any) -> tuple:
+            """Render one *compiled, deduplicated* DefectTicket as a card.
 
-            header_style, header_bg = _severity_color(severity)
-            occurrence_count = item.get("occurrence_count", 1)
-            step_range = item.get("step_range")
-            if occurrence_count and occurrence_count > 1 and step_range:
+            This consumes the same `_compile_defect_tickets` output the
+            Markdown report's "Engineering Defect Tickets" section uses,
+            instead of the raw per-step finding lists -- a single root cause
+            re-observed on every step it persists (a stuck freeze, a static
+            a11y violation on a page that never changes) produces one ticket
+            here, not one card per raw observation.
+            """
+            raw_defects = ticket.raw_defects or []
+            occurrence_count = len(raw_defects)
+            steps = sorted({d.get("step") for d in raw_defects if d.get("step") is not None})
+            step_range = (steps[0], steps[-1]) if steps else None
+
+            header_style, header_bg = _severity_color(ticket.severity)
+            if occurrence_count > 1 and step_range:
                 header_text = (
-                    f"[{severity.upper()}] {category_label}: {item_type} "
-                    f"— seen {occurrence_count}x (steps {step_range[0]}-{step_range[1]})"
+                    f"[{ticket.severity}] {ticket.defect_uid} \u2014 {ticket.title} "
+                    f"\u2014 seen {occurrence_count}x (steps {step_range[0]}-{step_range[1]})"
                 )
             else:
-                header_text = f"[{severity.upper()}] {category_label}: Step {step} — {item_type}"
+                first_step = steps[0] if steps else "n/a"
+                header_text = f"[{ticket.severity}] {ticket.defect_uid} \u2014 {ticket.title} \u2014 Step {first_step}"
 
             row_specs: List[tuple] = []
             row_specs.append((Paragraph(header_text, header_style), header_bg))
 
-            selector_line_parts = [f"Selector: {_xml_escape(selector)}"]
-            if url:
-                selector_line_parts.append(f"URL: {_xml_escape(url)}")
+            selector_line_parts = [f"Selector: {_xml_escape(ticket.target_selector or '(none)')}"]
+            if ticket.target_url:
+                selector_line_parts.append(f"URL: {_xml_escape(ticket.target_url)}")
             row_specs.append((Paragraph(" | ".join(selector_line_parts), selector_style), colors.white))
 
-            if html_snippet:
-                truncated_html = _xml_escape(html_snippet[:400])
-                if len(html_snippet) > 400:
+            if ticket.description:
+                row_specs.append(
+                    (Paragraph(_xml_escape(ticket.description[:400]), description_style), colors.HexColor("#fafafa"))
+                )
+
+            if ticket.html_snippet:
+                truncated_html = _xml_escape(ticket.html_snippet[:400])
+                if len(ticket.html_snippet) > 400:
                     truncated_html += " ... (truncated)"
                 row_specs.append((Paragraph(truncated_html, code_block_style), colors.HexColor("#f0f0f0")))
 
-            if not html_snippet and failure_reason:
-                row_specs.append(
-                    (Paragraph(_xml_escape(failure_reason[:300]), description_style), colors.HexColor("#fafafa"))
-                )
-
-            if remediation_advice and remediation_advice != "Manual review required.":
+            if ticket.root_cause_analysis:
                 row_specs.append(
                     (
-                        Paragraph(f"\U0001f6e0\ufe0f REMEDIATION TASK: {_xml_escape(remediation_advice)}", remediation_style),
+                        Paragraph(f"<b>Root Cause:</b> {_xml_escape(ticket.root_cause_analysis)}", description_style),
+                        colors.HexColor("#fafafa"),
+                    )
+                )
+
+            if ticket.remediation_instruction:
+                row_specs.append(
+                    (
+                        Paragraph(f"\U0001f6e0\ufe0f REMEDIATION TASK: {_xml_escape(ticket.remediation_instruction)}", remediation_style),
                         colors.HexColor("#f0fff4"),
                     )
                 )
@@ -262,6 +274,7 @@ def generate_pdf_report(
                 style_cmds.append(("BACKGROUND", (0, row_idx), (0, row_idx), bg_color))
 
             ticket_table.setStyle(TableStyle(style_cmds))
+            screenshot_basename = ticket.after_screenshot or ticket.before_screenshot or ""
             return ticket_table, screenshot_basename
 
         def _build_scaled_image(basename: str, max_width: float = 6.5) -> Optional[Any]:
@@ -285,33 +298,22 @@ def generate_pdf_report(
 
         embedded_screenshots: Set[str] = set()
 
-        all_defect_sections = [
-            ("Security Risks", defects.security_risks),
-            ("Accessibility Violations", defects.accessibility_violations),
-            ("Performance Bottlenecks", defects.performance_bottlenecks),
-            ("Baseline Regressions", defects.regression_findings),
-            ("Visual Regressions", defects.visual_regressions),
-            ("Layout Instability", defects.layout_instability),
-            ("Race Findings", defects.race_findings),
-            ("Console Findings", defects.console_findings),
-            ("Boundary Drift", defects.boundary_drift),
-            ("Context Anomalies", defects.context_anomalies),
-            ("UX Flow Freezes", defects.ux_flow_freezes),
-            ("Validation Failures", defects.validation_failures),
-            ("Capture Diagnostics", getattr(defects, "capture_diagnostics", [])),
-        ]
+        # Consume the same compiled/deduplicated ticket data the Markdown
+        # report's "Engineering Defect Tickets" section uses, rather than the
+        # raw per-step finding lists. A single root cause re-observed on
+        # every step it persists across (a stuck freeze, a static a11y
+        # violation on a page that never changes) collapses to one ticket
+        # here, matching the Markdown and JSON reports instead of producing
+        # one card per raw observation.
+        compiled_tickets = _compile_defect_tickets(defects, test_logs)
 
-        any_defects = False
-        for category_label, raw_items in all_defect_sections:
-            if not raw_items:
-                continue
-            items = dedupe_findings(raw_items)
-            any_defects = True
-            story.append(Paragraph(category_label, styles["Heading3"]))
-            story.append(Spacer(1, 0.05 * inch))
+        any_defects = bool(compiled_tickets)
+        if compiled_tickets:
+            story.append(Paragraph("Engineering Defect Tickets", styles["Heading2"]))
+            story.append(Spacer(1, 0.1 * inch))
 
-            for item in items[:50]:
-                ticket_table, screenshot_basename = _build_audit_card(item, category_label)
+            for ticket in compiled_tickets:
+                ticket_table, screenshot_basename = _build_ticket_card(ticket)
                 story.append(ticket_table)
 
                 if screenshot_basename:
@@ -323,6 +325,22 @@ def generate_pdf_report(
 
                 story.append(Spacer(1, 0.1 * inch))
 
+            story.append(Spacer(1, 0.15 * inch))
+
+        # Capture diagnostics (e.g. "empty page capture") are a tooling
+        # health signal, not an app defect ticket, so they're surfaced
+        # separately rather than folded into the ticket list above.
+        capture_diagnostics = dedupe_findings(getattr(defects, "capture_diagnostics", []))
+        if capture_diagnostics:
+            any_defects = True
+            story.append(Paragraph("Capture Diagnostics", styles["Heading3"]))
+            story.append(Spacer(1, 0.05 * inch))
+            for item in capture_diagnostics[:50]:
+                occurrence_count = item.get("occurrence_count", 1)
+                step_range = item.get("step_range")
+                suffix = f" (seen {occurrence_count}x, steps {step_range[0]}-{step_range[1]})" if occurrence_count > 1 and step_range else f" (step {item.get('step', 'n/a')})"
+                msg = item.get("message") or item.get("type") or "empty page capture"
+                story.append(Paragraph(f"⚠️ {_xml_escape(msg)}{suffix}", description_style))
             story.append(Spacer(1, 0.15 * inch))
 
         if not any_defects:
