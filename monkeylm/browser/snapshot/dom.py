@@ -4,10 +4,12 @@ from typing import Any, Dict
 
 from playwright.async_api import Page
 
+from .selectors import INTERACTIVE_ELEMENTS_SELECTOR
+
 
 async def capture_dom_and_layout(page: Page) -> Dict[str, Any]:
     return await page.evaluate(
-        """() => {
+        """(interactiveSelector) => {
             const collectText = (el) => {
                 let txt = el.innerText?.trim()
                     || el.getAttribute('aria-label')
@@ -114,12 +116,7 @@ async def capture_dom_and_layout(page: Page) -> Dict[str, Any]:
                 return 'generic';
             };
 
-            const interactives = Array.from(document.querySelectorAll(
-                'button, a, input, select, textarea, form, [onclick], ' +
-                '[role="button"], [role="link"], [role="checkbox"], [role="radio"], ' +
-                '[role="switch"], [role="tab"], [role="menuitem"], [role="option"], ' +
-                '[tabindex], [contenteditable="true"]'
-            ));
+            const interactives = Array.from(document.querySelectorAll(interactiveSelector));
             const tags = [];
             const anchors = {};
             let visibleIndex = 0;
@@ -254,5 +251,6 @@ async def capture_dom_and_layout(page: Page) -> Dict[str, Any]:
                 bodyTextLength,
                 bodyChildCount,
             };
-        }"""
+        }""",
+        INTERACTIVE_ELEMENTS_SELECTOR,
     )

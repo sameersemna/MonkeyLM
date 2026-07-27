@@ -7,6 +7,8 @@ from typing import Any, List, Optional, Tuple
 
 from playwright.async_api import Page
 
+from monkeylm.browser.snapshot.selectors import INTERACTIVE_ELEMENTS_SELECTOR
+
 
 def _extract_target_id(target: Any) -> Optional[int]:
     if isinstance(target, int):
@@ -34,8 +36,7 @@ async def _locator_for_target_id(page: Page, target_id: Any) -> Optional[Any]:
     parsed_id = _extract_target_id(target_id)
     if parsed_id is None:
         return None
-    selector = "button, a, input, select, textarea, [role='button'], [onclick], form"
-    candidates = page.locator(selector)
+    candidates = page.locator(INTERACTIVE_ELEMENTS_SELECTOR)
     count = await candidates.count()
     visible_index = 0
     for idx in range(count):
