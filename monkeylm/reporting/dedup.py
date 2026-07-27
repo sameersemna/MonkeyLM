@@ -21,6 +21,7 @@ def _dedup_key(item: Dict[str, Any]) -> tuple:
     )
     content_hash = (
         item.get("content_hash")
+        or item.get("state_hash")
         or item.get("structure_hash")
         or item.get("dom_hash")
         or item.get("hash")

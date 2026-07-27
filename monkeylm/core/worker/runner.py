@@ -137,7 +137,13 @@ async def run_worker(
 
             try:
                 snapshot = await get_page_state(page, step, phase="plan", output_dir=settings.output_dir)
-                state_key = f"{snapshot.url}::{snapshot.structure_hash}"
+                # dom_hash (includes element text), not structure_hash (text
+                # stripped) -- otherwise two screens with the same element
+                # *shape* but different content (e.g. an onboarding carousel
+                # that's always "two buttons," different labels each slide)
+                # collide onto the same state_key and get treated as revisits
+                # of an identical state.
+                state_key = f"{snapshot.url}::{snapshot.dom_hash}"
                 local_count = visited_states.get(state_key, 0) + 1
                 redis_count = await persistence_engine.increment_visited_state(state_key)
                 visited_states[state_key] = redis_count if redis_count is not None else local_count
@@ -222,7 +228,7 @@ async def run_worker(
                     # doesn't declare (and keep re-declaring) a bogus freeze.
                     pass
                 else:
-                    worker_stall_detector.record_state(step, post_snapshot.url, post_snapshot.structure_hash, str(plan.get("action", "")))
+                    worker_stall_detector.record_state(step, post_snapshot.url, post_snapshot.dom_hash, str(plan.get("action", "")))
                     stall_finding = worker_stall_detector.check_for_stall(step, plan.get("action", "scroll"))
                     if stall_finding:
                         print(f"\u26a0\ufe0f {worker_label} STALL DETECTED at step {step}: page state unchanged across multiple steps")

@@ -15,11 +15,18 @@ class StallDetector:
         self.threshold = max(2, threshold)
         self._history: List[Dict[str, Any]] = []
 
-    def record_state(self, step: int, url: str, structure_hash: str, action: str = "") -> None:
+    def record_state(self, step: int, url: str, state_hash: str, action: str = "") -> None:
+        # Caller must pass a *content-aware* hash (PageSnapshot.dom_hash, which
+        # includes element text), not PageSnapshot.structure_hash. structure_hash
+        # deliberately strips element text so it can detect pure layout drift
+        # independent of dynamic content -- but that means two completely
+        # different screens with the same shape (e.g. an onboarding carousel
+        # that's always "two buttons," with different labels each slide) hash
+        # identically and register as a false freeze.
         self._history.append({
             "step": step,
             "url": url,
-            "structure_hash": structure_hash,
+            "state_hash": state_hash,
             "action": action,
         })
         if len(self._history) > self.threshold + 2:
@@ -31,7 +38,7 @@ class StallDetector:
             return None
         window = self._history[-self.threshold:]
         urls = set(e["url"] for e in window)
-        hashes = set(e["structure_hash"] for e in window)
+        hashes = set(e["state_hash"] for e in window)
         actions = [e["action"] for e in window]
         all_actions = actions + [current_action]
         passive_actions = {"scroll", "back"}
@@ -44,13 +51,13 @@ class StallDetector:
                 "description": (
                     f"Page state unchanged across {self.threshold} consecutive steps "
                     f"(URL={sentinel.get('url', 'unknown')!r}, "
-                    f"hash={sentinel.get('structure_hash', 'unknown')!r}). "
+                    f"hash={sentinel.get('state_hash', 'unknown')!r}). "
                     f"Actions attempted: {actions}"
                 ),
                 "stall_window_steps": window,
                 "meaningful_actions_in_window": meaningful_count,
                 "url": sentinel.get("url", "unknown"),
-                "structure_hash": sentinel.get("structure_hash", "unknown"),
+                "state_hash": sentinel.get("state_hash", "unknown"),
             }
             self.defects.add("ux_flow_freezes", finding)
             # Once a freeze is declared, drop the window instead of leaving it in

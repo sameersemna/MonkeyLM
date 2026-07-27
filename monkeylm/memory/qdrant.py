@@ -62,6 +62,7 @@ class QdrantMemoryStore:
         self.rerank_model = settings.qdrant_rerank_model
         self.candidate_limit = settings.qdrant_candidate_limit
         self._ollama_embedding_warned = False
+        self._embedding_fallback_warned = False
         self._ollama_rerank_warned = False
         self._last_search_telemetry: Dict[str, Any] = {}
         self._last_write_telemetry: Dict[str, Any] = {}
@@ -105,16 +106,57 @@ class QdrantMemoryStore:
             pass
         return None
 
+    async def _litellm_embed(self, text: str) -> List[float]:
+        """Call a LiteLLM proxy's OpenAI-compatible /v1/embeddings endpoint.
+
+        Unlike `_ollama_embed_sync`, this raises on failure instead of
+        swallowing the error -- the caller needs the real reason (connection
+        refused, wrong model string, non-200 response) to log a loud warning
+        instead of silently degrading to hash vectors with no trace of why.
+        """
+        if httpx is None:
+            raise RuntimeError("httpx is unavailable; cannot reach LiteLLM")
+        base_url = self.settings.qdrant_embedding_litellm_base_url.rstrip("/")
+        headers = {"Content-Type": "application/json"}
+        if self.settings.qdrant_embedding_litellm_api_key:
+            headers["Authorization"] = f"Bearer {self.settings.qdrant_embedding_litellm_api_key}"
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.post(
+                f"{base_url}/v1/embeddings",
+                json={"model": self.embedding_model, "input": text},
+                headers=headers,
+            )
+            if response.status_code >= 400:
+                raise RuntimeError(
+                    f"LiteLLM embeddings endpoint {base_url}/v1/embeddings returned "
+                    f"{response.status_code} for model {self.embedding_model!r}: {response.text[:200]}"
+                )
+            data = response.json()
+        items = data.get("data") or []
+        if items and isinstance(items[0], dict):
+            embedding = items[0].get("embedding")
+            if isinstance(embedding, list) and embedding:
+                return [float(x) for x in embedding]
+        raise RuntimeError(f"LiteLLM embeddings response had no usable embedding: {str(data)[:200]}")
+
     async def _vectorize(self, text: str) -> List[float]:
         if self.embedding_provider == "ollama":
             try:
                 vector = await asyncio.to_thread(self._ollama_embed_sync, text)
                 if vector:
                     return vector
+                raise RuntimeError("Ollama embedding call returned no vector")
             except Exception as exc:
-                if not self._ollama_embedding_warned:
+                if not self._embedding_fallback_warned:
                     _local_service_log(f"Ollama embedding failed, falling back to hash vectors: {exc}", self.settings.output_dir)
-                    self._ollama_embedding_warned = True
+                    self._embedding_fallback_warned = True
+        elif self.embedding_provider == "litellm":
+            try:
+                return await self._litellm_embed(text)
+            except Exception as exc:
+                if not self._embedding_fallback_warned:
+                    _local_service_log(f"LiteLLM embedding failed, falling back to hash vectors: {exc}", self.settings.output_dir)
+                    self._embedding_fallback_warned = True
         return _stable_text_vector(text, self.vector_size)
 
     async def _vectorize_with_telemetry(self, text: str) -> Tuple[List[float], Dict[str, Any]]:
@@ -127,8 +169,23 @@ class QdrantMemoryStore:
                 if vector:
                     elapsed = (time.perf_counter() - started) * 1000.0
                     return vector, {"provider_used": "ollama", "fallback_used": False, "vector_size": len(vector), "vectorize_ms": round(elapsed, 3)}
-            except Exception:
+                raise RuntimeError("Ollama embedding call returned no vector")
+            except Exception as exc:
                 fallback_used = True
+                if not self._embedding_fallback_warned:
+                    _local_service_log(f"Ollama embedding failed, falling back to hash vectors: {exc}", self.settings.output_dir)
+                    self._embedding_fallback_warned = True
+            provider_used = "hash"
+        elif self.embedding_provider == "litellm":
+            try:
+                vector = await self._litellm_embed(text)
+                elapsed = (time.perf_counter() - started) * 1000.0
+                return vector, {"provider_used": "litellm", "fallback_used": False, "vector_size": len(vector), "vectorize_ms": round(elapsed, 3)}
+            except Exception as exc:
+                fallback_used = True
+                if not self._embedding_fallback_warned:
+                    _local_service_log(f"LiteLLM embedding failed, falling back to hash vectors: {exc}", self.settings.output_dir)
+                    self._embedding_fallback_warned = True
             provider_used = "hash"
         vector = _stable_text_vector(text, self.vector_size)
         elapsed = (time.perf_counter() - started) * 1000.0
@@ -173,6 +230,13 @@ class QdrantMemoryStore:
                     self.vector_size = len(probe_vector)
                 else:
                     _local_service_log("Unable to resolve Ollama embedding vector size during startup; falling back to hash vectors.", self.settings.output_dir)
+                    self.embedding_provider = "hash"
+            elif self.embedding_provider == "litellm":
+                try:
+                    probe_vector = await self._litellm_embed("monkeylm semantic memory bootstrap")
+                    self.vector_size = len(probe_vector)
+                except Exception as exc:
+                    _local_service_log(f"Unable to resolve LiteLLM embedding vector size during startup ({exc}); falling back to hash vectors.", self.settings.output_dir)
                     self.embedding_provider = "hash"
             await self._ensure_collection()
             self.enabled = True

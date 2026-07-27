@@ -90,6 +90,8 @@ class Settings:
     qdrant_enable_writes: bool = True
     qdrant_embedding_provider: str = "hash"
     qdrant_embedding_model: str = "nomic-embed-text"
+    qdrant_embedding_litellm_base_url: str = "http://localhost:11435"
+    qdrant_embedding_litellm_api_key: str = ""
     qdrant_rerank_enabled: bool = False
     qdrant_rerank_model: str = "qwen2.5:3b"
     qdrant_candidate_limit: int = 20

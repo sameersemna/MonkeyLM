@@ -18,7 +18,10 @@ def apply_state_aware_policy(
     *,
     loop_break_applied: bool = False,
 ) -> Dict[str, Any]:
-    state_key = f"{snapshot.url}::{snapshot.structure_hash}"
+    # dom_hash (includes element text) rather than structure_hash (text
+    # stripped for layout-only comparisons elsewhere) -- see runner.py's
+    # matching state_key construction for why.
+    state_key = f"{snapshot.url}::{snapshot.dom_hash}"
     revisit_count = state_counts.get(state_key, 0)
     # `state_counts` only ever increases (it's a running visit tally for the
     # whole run), so once any route has been seen more than STATE_LOOP_THRESHOLD

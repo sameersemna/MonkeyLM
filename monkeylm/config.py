@@ -130,6 +130,8 @@ DEFAULT_QDRANT_ENABLE_READS = True
 DEFAULT_QDRANT_ENABLE_WRITES = True
 DEFAULT_QDRANT_EMBEDDING_PROVIDER = "hash"
 DEFAULT_QDRANT_EMBEDDING_MODEL = "nomic-embed-text"
+DEFAULT_QDRANT_EMBEDDING_LITELLM_BASE_URL = "http://localhost:11435"
+DEFAULT_QDRANT_EMBEDDING_LITELLM_API_KEY = ""
 DEFAULT_QDRANT_RERANK_ENABLED = False
 DEFAULT_QDRANT_RERANK_MODEL = "qwen2.5:3b"
 DEFAULT_QDRANT_CANDIDATE_LIMIT = 20
@@ -308,9 +310,10 @@ def parse_cli_args() -> argparse.Namespace:
     parser.add_argument("--qdrant-url", help="Qdrant base URL, for example http://127.0.0.1:6333")
     parser.add_argument("--qdrant-collection", help="Qdrant collection name for semantic memory logs")
     parser.add_argument(
-        "--qdrant-embedding-provider", choices=["hash", "ollama"], help="Embedding backend for Qdrant vectors"
+        "--qdrant-embedding-provider", choices=["hash", "ollama", "litellm"], help="Embedding backend for Qdrant vectors"
     )
-    parser.add_argument("--qdrant-embedding-model", help="Local Ollama embedding model name, e.g. nomic-embed-text")
+    parser.add_argument("--qdrant-embedding-model", help="Embedding model name, e.g. nomic-embed-text or ollama/nomic-embed-text for litellm")
+    parser.add_argument("--qdrant-embedding-litellm-base-url", help="LiteLLM base URL for the litellm embedding provider")
     parser.add_argument("--qdrant-rerank-model", help="Local Ollama model for reranking retrieved memories")
     parser.add_argument(
         "--qdrant-candidate-limit", type=int, help="Number of candidates to fetch from Qdrant before reranking"
@@ -441,6 +444,8 @@ def load_settings(cli_args: Optional[argparse.Namespace] = None) -> Settings:
     s.qdrant_enable_writes = _env_bool("QDRANT_ENABLE_WRITES", default=_env_to_bool(ev_gew, s.qdrant_enable_writes))
     s.qdrant_embedding_provider = _env_str("QDRANT_EMBEDDING_PROVIDER", env_vars.get("QDRANT_EMBEDDING_PROVIDER") or s.qdrant_embedding_provider).lower()
     s.qdrant_embedding_model = _env_str("QDRANT_EMBEDDING_MODEL", env_vars.get("QDRANT_EMBEDDING_MODEL") or s.qdrant_embedding_model)
+    s.qdrant_embedding_litellm_base_url = _env_str("QDRANT_EMBEDDING_LITELLM_BASE_URL", env_vars.get("QDRANT_EMBEDDING_LITELLM_BASE_URL") or s.qdrant_embedding_litellm_base_url).rstrip("/")
+    s.qdrant_embedding_litellm_api_key = _env_str("QDRANT_EMBEDDING_LITELLM_API_KEY", env_vars.get("QDRANT_EMBEDDING_LITELLM_API_KEY") or s.qdrant_embedding_litellm_api_key)
     s.qdrant_admin_action = _env_str("QDRANT_ADMIN_ACTION", env_vars.get("QDRANT_ADMIN_ACTION") or "").lower()
     ev_qre = env_vars.get("QDRANT_RERANK_ENABLED")
     s.qdrant_rerank_enabled = _env_bool("QDRANT_RERANK_ENABLED", default=_env_to_bool(ev_qre, s.qdrant_rerank_enabled))
@@ -510,6 +515,8 @@ def load_settings(cli_args: Optional[argparse.Namespace] = None) -> Settings:
             s.qdrant_embedding_provider = cli_args.qdrant_embedding_provider.strip().lower()
         if getattr(cli_args, "qdrant_embedding_model", None):
             s.qdrant_embedding_model = cli_args.qdrant_embedding_model.strip()
+        if getattr(cli_args, "qdrant_embedding_litellm_base_url", None):
+            s.qdrant_embedding_litellm_base_url = cli_args.qdrant_embedding_litellm_base_url.strip().rstrip("/")
         if getattr(cli_args, "qdrant_rerank_model", None):
             s.qdrant_rerank_model = cli_args.qdrant_rerank_model.strip()
         if getattr(cli_args, "qdrant_candidate_limit", None) is not None:
@@ -814,6 +821,8 @@ QDRANT_ENABLE_READS: bool = DEFAULT_QDRANT_ENABLE_READS
 QDRANT_ENABLE_WRITES: bool = DEFAULT_QDRANT_ENABLE_WRITES
 QDRANT_EMBEDDING_PROVIDER: str = DEFAULT_QDRANT_EMBEDDING_PROVIDER
 QDRANT_EMBEDDING_MODEL: str = DEFAULT_QDRANT_EMBEDDING_MODEL
+QDRANT_EMBEDDING_LITELLM_BASE_URL: str = DEFAULT_QDRANT_EMBEDDING_LITELLM_BASE_URL
+QDRANT_EMBEDDING_LITELLM_API_KEY: str = DEFAULT_QDRANT_EMBEDDING_LITELLM_API_KEY
 QDRANT_RERANK_ENABLED: bool = DEFAULT_QDRANT_RERANK_ENABLED
 QDRANT_RERANK_MODEL: str = DEFAULT_QDRANT_RERANK_MODEL
 QDRANT_CANDIDATE_LIMIT: int = DEFAULT_QDRANT_CANDIDATE_LIMIT
@@ -846,6 +855,8 @@ _RUNTIME_GLOBAL_SCHEMA: Dict[str, Any] = {
     "QDRANT_COLLECTION": str,
     "QDRANT_EMBEDDING_PROVIDER": str,
     "QDRANT_EMBEDDING_MODEL": str,
+    "QDRANT_EMBEDDING_LITELLM_BASE_URL": str,
+    "QDRANT_EMBEDDING_LITELLM_API_KEY": str,
     "QDRANT_RERANK_ENABLED": bool,
     "QDRANT_RERANK_MODEL": str,
     "QDRANT_CANDIDATE_LIMIT": int,
@@ -940,6 +951,7 @@ def apply_runtime_overrides(args: argparse.Namespace) -> None:
         ("qdrant_collection", "QDRANT_COLLECTION"),
         ("qdrant_embedding_provider", "QDRANT_EMBEDDING_PROVIDER"),
         ("qdrant_embedding_model", "QDRANT_EMBEDDING_MODEL"),
+        ("qdrant_embedding_litellm_base_url", "QDRANT_EMBEDDING_LITELLM_BASE_URL"),
         ("qdrant_enable_rerank", "QDRANT_RERANK_ENABLED"),
         ("qdrant_rerank_model", "QDRANT_RERANK_MODEL"),
         ("qdrant_candidate_limit", "QDRANT_CANDIDATE_LIMIT"),
@@ -1004,6 +1016,8 @@ __all__ = [
     "DEFAULT_QDRANT_ENABLE_WRITES",
     "DEFAULT_QDRANT_EMBEDDING_PROVIDER",
     "DEFAULT_QDRANT_EMBEDDING_MODEL",
+    "DEFAULT_QDRANT_EMBEDDING_LITELLM_BASE_URL",
+    "DEFAULT_QDRANT_EMBEDDING_LITELLM_API_KEY",
     "DEFAULT_QDRANT_RERANK_ENABLED",
     "DEFAULT_QDRANT_RERANK_MODEL",
     "DEFAULT_QDRANT_CANDIDATE_LIMIT",
@@ -1067,6 +1081,8 @@ __all__ = [
     "QDRANT_ENABLE_WRITES",
     "QDRANT_EMBEDDING_PROVIDER",
     "QDRANT_EMBEDDING_MODEL",
+    "QDRANT_EMBEDDING_LITELLM_BASE_URL",
+    "QDRANT_EMBEDDING_LITELLM_API_KEY",
     "QDRANT_RERANK_ENABLED",
     "QDRANT_RERANK_MODEL",
     "QDRANT_CANDIDATE_LIMIT",
