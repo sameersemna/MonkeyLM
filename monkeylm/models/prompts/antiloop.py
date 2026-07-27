@@ -15,10 +15,21 @@ def apply_state_aware_policy(
     snapshot: Any,
     state_counts: Dict[str, int],
     seen_click_targets: set,
+    *,
+    loop_break_applied: bool = False,
 ) -> Dict[str, Any]:
     state_key = f"{snapshot.url}::{snapshot.structure_hash}"
     revisit_count = state_counts.get(state_key, 0)
-    if revisit_count > STATE_LOOP_THRESHOLD:
+    # `state_counts` only ever increases (it's a running visit tally for the
+    # whole run), so once any route has been seen more than STATE_LOOP_THRESHOLD
+    # times it stays "over threshold" forever. If `_break_action_loop` already
+    # ran this step, it already picked a fresh, unblacklisted target specifically
+    # to escape a stale state -- forcing random_jump/restart_target right after
+    # would silently discard that choice every time, which in practice means a
+    # handful of popular routes get permanently locked out of real click/type
+    # interaction for the rest of the run. Trust the loop-breaker's choice
+    # instead of immediately overriding it.
+    if revisit_count > STATE_LOOP_THRESHOLD and not loop_break_applied:
         forced = random.choice(["random_jump", "restart_target"])
         return {"action": forced, "target": "", "value": ""}
 

@@ -150,15 +150,17 @@ async def run_worker(
             retrieval_telemetry = worker_memory.consume_last_search_telemetry()
 
             plan_signature = (plan.get("action", "scroll"), plan.get("target", ""))
+            loop_break_applied = False
             if len(recent_model_plans) >= 3 and all(p == plan_signature for p in recent_model_plans[-3:]):
                 print(f"\U0001f504 Loop detected for {worker_label}; forcing path exploration variance.")
                 loop_detection_state["recent_actions"] = []
                 print(f"   \u251c\u2500 \u26d4 Cleared short-term action history for {worker_label}")
                 plan = _break_action_loop(plan, snapshot, worker_label, step, loop_state=loop_detection_state, blacklist_expiry_steps=settings.max_steps // 3)
+                loop_break_applied = True
             recent_model_plans.append(plan_signature)
             recent_model_plans = recent_model_plans[-3:]
 
-            plan = apply_state_aware_policy(settings, plan, snapshot, visited_states, seen_click_targets)
+            plan = apply_state_aware_policy(settings, plan, snapshot, visited_states, seen_click_targets, loop_break_applied=loop_break_applied)
             if plan.get("action") == "click" and plan.get("target"):
                 seen_click_targets.add(plan.get("target"))
 
