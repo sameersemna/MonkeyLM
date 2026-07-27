@@ -108,13 +108,14 @@ def generate_interactive_html_report(
         rule_score = rule.get("impact_score_contribution", 0)
         first_seen = rule.get("occurrence_steps", [])[0] if rule.get("occurrence_steps") else "?"
 
+        critical_color = "#dc3545" if critical_rule > 0 else "#666"
         table_rows += f'''<tr>
           <td><code>{rule_id}</code></td>
           <td><span class="impact-badge impact-{impact.lower()}">{impact}</span></td>
-          <td style="text-align:center; font-weight:bold; color:#dc3545 if critical_rule > 0 else '#666';">{critical_rule}</td>
+          <td style="text-align:center; font-weight:bold; color:{critical_color};">{critical_rule}</td>
           <td style="text-align:center;">{serious_rule}</td>
           <td style="text-align:center; font-weight:bold;">{rule_score:.0f}</td>
-          <td>{first_seen}</td>
+          <td>Step {first_seen}</td>
         </tr>\n'''
 
     html_content = f'''<!DOCTYPE html>
