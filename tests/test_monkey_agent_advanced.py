@@ -10,8 +10,10 @@ import json
 import os
 import random
 import signal
+import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from datetime import datetime
 from typing import Any, Dict, Optional
 
@@ -23,8 +25,10 @@ from monkeylm.config import (
     MAX_ALLOWED_RETRY_BASE_DELAY_SECONDS,
     apply_runtime_overrides,
     build_redis_key,
+    inspect_optional_runtime_dependencies,
     is_in_scope,
     load_settings,
+    parse_cli_args,
     split_domain_and_route,
     validate_runtime_configuration,
     SHUTDOWN_EVENT,
@@ -305,6 +309,27 @@ class MonkeyLMTests(unittest.TestCase):
                 json_output = json.load(handle)
             self.assertEqual(json_output["worker_failures"][0]["failure_reason"], "stuck_state_detected")
 
+    def test_runtime_preflight_is_emitted_in_reports(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            settings = load_settings()
+            settings._output_dir_override = tmp_dir
+            defects = DefectTracker()
+            browser_launch_info = {
+                "runtime_preflight": inspect_optional_runtime_dependencies(),
+            }
+
+            generate_markdown_report(settings, defects, [], browser_launch_info, datetime.now(), datetime.now())
+            with open(os.path.join(tmp_dir, "test_report.md"), "r", encoding="utf-8") as handle:
+                markdown_output = handle.read()
+            self.assertIn("Runtime Preflight", markdown_output)
+            self.assertIn("playwright", markdown_output)
+
+            generate_json_summary(settings, defects, [], browser_launch_info, [], False, datetime.now(), datetime.now())
+            with open(os.path.join(tmp_dir, "results.json"), "r", encoding="utf-8") as handle:
+                json_output = json.load(handle)
+            self.assertIn("runtime_preflight", json_output)
+            self.assertIn("playwright", json_output["runtime_preflight"])
+
     def test_generate_json_summary_contains_seed_and_boundary_drift(self) -> None:
         original_output_dir = config.OUTPUT_DIR
         original_seed = config.ACTIVE_SEED
@@ -581,6 +606,26 @@ class MonkeyLMTests(unittest.TestCase):
         settings.retry_base_delay_seconds = MAX_ALLOWED_RETRY_BASE_DELAY_SECONDS + 0.5
         with self.assertRaises(ValueError):
             validate_runtime_configuration(settings)
+
+    def test_inspect_optional_runtime_dependencies_reports_missing_node_tooling(self) -> None:
+        report = inspect_optional_runtime_dependencies()
+        self.assertIsInstance(report, dict)
+        self.assertIn("node", report)
+        self.assertIn("python", report)
+        self.assertIn("playwright", report)
+        self.assertIn("dotenv", report)
+        self.assertIn("status", report["node"])
+        self.assertIn("status", report["python"])
+
+    def test_parse_cli_args_accepts_inspect_runtime_flag(self) -> None:
+        with patch.object(sys, "argv", ["monkeylm", "--inspect-runtime"]):
+            args = parse_cli_args()
+        self.assertTrue(args.inspect_runtime)
+
+    def test_parse_cli_args_accepts_inspect_runtime_json_flag(self) -> None:
+        with patch.object(sys, "argv", ["monkeylm", "--inspect-runtime-json"]):
+            args = parse_cli_args()
+        self.assertTrue(args.inspect_runtime_json)
 
     def test_build_worker_user_data_dir_returns_distinct_paths(self) -> None:
         settings = load_settings()

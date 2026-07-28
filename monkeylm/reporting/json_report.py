@@ -14,6 +14,13 @@ from monkeylm.reporting.accessibility import _compile_accessibility_violations
 from monkeylm.reporting.defects import _compile_defect_tickets
 
 
+def _build_runtime_preflight_payload(browser_launch_info: Dict[str, Any]) -> Dict[str, Any]:
+    payload = browser_launch_info.get("runtime_preflight")
+    if isinstance(payload, dict):
+        return payload
+    return {}
+
+
 def generate_json_summary(
     settings: Any,
     defects: Any,
@@ -64,6 +71,7 @@ def generate_json_summary(
         "app_defect_count": accountability.get("app_defect_count", 0),
         "browser_launch": browser_launch_info,
         "worker_failures": browser_launch_info.get("worker_failures", []),
+        "runtime_preflight": _build_runtime_preflight_payload(browser_launch_info),
         "defects": {
             "security_risks": defects.security_risks,
             "accessibility_violations_raw": defects.accessibility_violations,

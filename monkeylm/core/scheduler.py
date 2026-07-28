@@ -126,6 +126,8 @@ async def main(settings: Settings) -> None:
     global test_logs
     test_logs = merged_logs
 
+    from monkeylm.config import inspect_optional_runtime_dependencies
+
     browser_launch_info: Dict[str, Any] = {
         "mode": "multi-worker" if len(worker_launches) > 1 else "single-worker",
         "workers": worker_launches,
@@ -136,6 +138,7 @@ async def main(settings: Settings) -> None:
         "headless": settings.headless,
         "root_user_data_dir": settings.run_user_data_dir,
         "graceful_shutdown_requested": GRACEFUL_SHUTDOWN_REQUESTED,
+        "runtime_preflight": inspect_optional_runtime_dependencies(),
     }
 
     end_time = datetime.now()

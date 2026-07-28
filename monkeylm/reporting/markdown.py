@@ -139,6 +139,16 @@ Actions included: Clicking, Typing, Form Submission, Modal Handling, and State E
     else:
         md_content += "\n---\n\n# 🔧 Engineering Defect Tickets\n\n**No defects detected.** ✅\n\n---\n\n"
 
+    runtime_preflight = browser_launch_info.get("runtime_preflight") or {}
+    if runtime_preflight:
+        md_content += "## Runtime Preflight\n"
+        for name, payload in sorted(runtime_preflight.items()):
+            md_content += f"- **{name}**: {payload.get('status', 'unknown')}"
+            if payload.get("detail"):
+                md_content += f" — {payload['detail']}"
+            md_content += "\n"
+        md_content += "\n"
+
     if browser_launch_info.get("worker_failures"):
         md_content += "## Runtime Failures\n"
         for item in browser_launch_info["worker_failures"]:

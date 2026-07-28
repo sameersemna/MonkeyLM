@@ -11,6 +11,7 @@ import argparse
 import asyncio
 import os
 import random
+import shutil
 import signal
 from datetime import datetime
 from pathlib import Path
@@ -306,6 +307,16 @@ def parse_cli_args() -> argparse.Namespace:
         help="Consecutive repeated-state steps before a stuck-state failure is declared",
     )
     parser.add_argument("--seed", type=int, help="Random seed for deterministic test replay")
+    parser.add_argument(
+        "--inspect-runtime",
+        action="store_true",
+        help="Inspect optional runtime dependencies and exit without starting the monkey run",
+    )
+    parser.add_argument(
+        "--inspect-runtime-json",
+        action="store_true",
+        help="Emit runtime dependency inspection as JSON and exit without starting the monkey run",
+    )
     parser.add_argument("--window-size", help="Browser window size as WIDTH,HEIGHT or WIDTHxHEIGHT")
     parser.add_argument("--postgres-dsn", help="PostgreSQL connection string")
     parser.add_argument("--redis-url", help="Redis connection URL")
@@ -566,7 +577,65 @@ def load_settings(cli_args: Optional[argparse.Namespace] = None) -> Settings:
     return s
 
 
+def inspect_optional_runtime_dependencies() -> Dict[str, Dict[str, Any]]:
+    """Check for optional runtime tools and Python packages that support the harness."""
+    report: Dict[str, Dict[str, Any]] = {}
+
+    python_bin = shutil.which("python") or shutil.which("python3")
+    if python_bin:
+        report["python"] = {
+            "status": "ok",
+            "path": python_bin,
+            "detail": "Python runtime is available for the harness entrypoint.",
+        }
+    else:
+        report["python"] = {
+            "status": "missing",
+            "path": None,
+            "detail": "Python interpreter was not found on PATH.",
+        }
+
+    node_bin = shutil.which("node")
+    if node_bin:
+        report["node"] = {
+            "status": "ok",
+            "path": node_bin,
+            "detail": "Node.js is available for optional pixelmatch visual diff fallback.",
+        }
+    else:
+        report["node"] = {
+            "status": "missing",
+            "path": None,
+            "detail": "Node.js is not installed; visual diff fallback will rely on Python-only paths.",
+        }
+
+    for module_name in ("playwright", "dotenv"):
+        try:
+            import importlib
+
+            importlib.import_module(module_name)
+            report[module_name] = {
+                "status": "ok",
+                "path": None,
+                "detail": f"Python package '{module_name}' is importable.",
+            }
+        except Exception as exc:  # pragma: no cover - import availability varies by environment
+            report[module_name] = {
+                "status": "missing",
+                "path": None,
+                "detail": f"Python package '{module_name}' is not importable: {exc}",
+            }
+
+    return report
+
+
 def validate_runtime_configuration(settings: Settings) -> None:
+    dependency_report = inspect_optional_runtime_dependencies()
+    if dependency_report.get("node", {}).get("status") != "ok":
+        print(
+            "⚠️ Optional runtime dependency check: Node.js not found on PATH; visual diff fallback may be limited."
+        )
+
     if settings.max_steps_per_worker > settings.max_steps:
         raise ValueError(
             "MAX_STEPS_PER_WORKER must be less than or equal to MAX_STEPS "

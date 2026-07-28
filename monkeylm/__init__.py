@@ -96,6 +96,7 @@ from monkeylm.config import (
     normalize_action_plan,
     split_domain_and_route,
     build_redis_key,
+    inspect_optional_runtime_dependencies,
 )
 from monkeylm.core import (
     main,
@@ -240,6 +241,7 @@ __all__ = [
     "normalize_action_plan",
     "split_domain_and_route",
     "build_redis_key",
+    "inspect_optional_runtime_dependencies",
     "capture_dom_and_layout",
     "compare_screenshots_pixelmatch",
     "diff_component_manifests",
