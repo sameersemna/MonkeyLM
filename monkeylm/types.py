@@ -68,6 +68,8 @@ class Settings:
     worker_qdrant_init_retries: int = 1
     worker_boundary_recovery_retries: int = 1
     retry_base_delay_seconds: float = 0.75
+    step_timeout_seconds: float = 30.0
+    stuck_state_threshold: int = 6
 
     headless: bool = True
     browser_window_size: str = "1920,1080"
@@ -198,6 +200,9 @@ class WorkerRunResult:
     defects: Any
     network_injections: List[Dict[str, Any]]
     launch_info: Dict[str, Any]
+    failure_reason: Optional[str] = None
+    failure_artifact: Optional[str] = None
+    failure_context: Optional[Dict[str, Any]] = None
 
 
 # ── Defect ticket ─────────────────────────────────────────────────────────────

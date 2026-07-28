@@ -139,6 +139,18 @@ Actions included: Clicking, Typing, Form Submission, Modal Handling, and State E
     else:
         md_content += "\n---\n\n# 🔧 Engineering Defect Tickets\n\n**No defects detected.** ✅\n\n---\n\n"
 
+    if browser_launch_info.get("worker_failures"):
+        md_content += "## Runtime Failures\n"
+        for item in browser_launch_info["worker_failures"]:
+            md_content += f"- Worker {item.get('worker_id')}: {item.get('failure_reason')}"
+            if item.get("failure_artifact"):
+                md_content += f" (artifact: `{item['failure_artifact']}`)"
+            md_content += "\n"
+            ctx = item.get("failure_context") or {}
+            if ctx:
+                md_content += f"  - Context: `{json.dumps(ctx, sort_keys=True)}`\n"
+        md_content += "\n"
+
     md_content += "## Security Risks\n"
     if defects.security_risks:
         for item in dedupe_findings(defects.security_risks):

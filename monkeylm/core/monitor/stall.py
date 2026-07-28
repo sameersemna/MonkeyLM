@@ -47,7 +47,8 @@ class StallDetector:
             sentinel = (window or [{}])[0] if window else {}
             finding = {
                 "step": step,
-                "type": "ux-flow-freeze",
+                "type": "stuck_state_detected",
+                "reason": "stuck_state_detected",
                 "description": (
                     f"Page state unchanged across {self.threshold} consecutive steps "
                     f"(URL={sentinel.get('url', 'unknown')!r}, "

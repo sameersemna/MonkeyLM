@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import json
 from typing import Any, Dict, List, Tuple
 
 from monkeylm.config import (
@@ -12,6 +14,7 @@ from monkeylm.config import (
     is_in_scope,
     SHUTDOWN_EVENT,
 )
+from monkeylm.core.monitor import sanitize_for_storage
 from monkeylm.core.monitor import (
     DefectTracker,
     Fuzzer,
@@ -26,6 +29,21 @@ from monkeylm.core.monitor import (
 from monkeylm.types import WorkerRunResult
 
 from .helpers import build_worker_user_data_dir, with_retry_backoff
+
+
+async def _execute_step_with_timeout(coro: Any, *, timeout_seconds: float) -> Any:
+    return await asyncio.wait_for(coro, timeout=timeout_seconds)
+
+
+def classify_runtime_failure(exc: Exception | None) -> str | None:
+    if exc is None:
+        return None
+    error_text = str(exc).lower()
+    if "sandbox" in error_text or "no-sandbox" in error_text or "launch failed" in error_text:
+        return "sandbox"
+    if "timeout" in error_text or "timed out" in error_text:
+        return "timeout"
+    return None
 
 
 async def _run_worker_with_limit(
@@ -70,6 +88,7 @@ async def run_worker(
     from monkeylm.memory import QdrantMemoryStore
 
     worker_label = f"worker-{worker_id:02d}"
+    os.makedirs(settings.output_dir, exist_ok=True)
     worker_defects = DefectTracker()
     worker_fuzzer = Fuzzer()
     worker_network_monitor = NetworkMonitor(worker_defects)
@@ -80,7 +99,7 @@ async def run_worker(
     # burns a huge chunk of the step/time budget sitting on a state that was
     # already distinguishable much earlier. Cap the window so freezes surface
     # quickly regardless of how many total steps the run is configured for.
-    worker_stall_detector = StallDetector(worker_defects, threshold=min(15, max(5, settings.max_steps // 4)) if settings.max_steps >= 8 else 3)
+    worker_stall_detector = StallDetector(worker_defects, threshold=max(3, settings.stuck_state_threshold))
     worker_validation_prober = ValidationProber(worker_defects, probe_frequency=3)
 
     worker_memory = QdrantMemoryStore(settings)
@@ -89,6 +108,9 @@ async def run_worker(
     seen_click_targets: set = set()
     recent_model_plans: List[Tuple[str, str]] = []
     completed_steps = 0
+    failure_reason: str | None = None
+    failure_artifact: str | None = None
+    failure_context: Dict[str, Any] | None = None
 
     loop_detection_state: Dict[str, Any] = {"blacklist": {}, "loop_count": 0, "recent_actions": []}
     worker_data_dir = build_worker_user_data_dir(settings, worker_id)
@@ -172,7 +194,54 @@ async def run_worker(
 
             worker_anomaly_sensor.set_action_context(step, f"{plan.get('action', '?')}:{plan.get('target', '')}")
 
-            _, log_entry = await execute_action(page, settings, plan, step, worker_fuzzer, worker_defects, worker_network_monitor, worker_perf_monitor, log_sink=worker_logs, persistence_engine=persistence_engine, worker_id=worker_id, validation_prober=worker_validation_prober)
+            try:
+                _, log_entry = await _execute_step_with_timeout(
+                    execute_action(
+                        page,
+                        settings,
+                        plan,
+                        step,
+                        worker_fuzzer,
+                        worker_defects,
+                        worker_network_monitor,
+                        worker_perf_monitor,
+                        log_sink=worker_logs,
+                        persistence_engine=persistence_engine,
+                        worker_id=worker_id,
+                        validation_prober=worker_validation_prober,
+                    ),
+                    timeout_seconds=settings.step_timeout_seconds,
+                )
+            except asyncio.TimeoutError as timeout_exc:
+                failure_reason = "step_timeout"
+                failure_context = {
+                    "step": step,
+                    "action": plan.get("action", ""),
+                    "target": plan.get("target", ""),
+                    "timeout_seconds": settings.step_timeout_seconds,
+                    "url": sanitize_for_storage(page.url, max_len=2048),
+                }
+                print(f"⏰ {worker_label} step {step} timed out after {settings.step_timeout_seconds}s; stopping run.")
+                await page.screenshot(path=os.path.join(settings.output_dir, f"timeout_step_{step}.png"))
+                failure_artifact = f"timeout_step_{step}.png"
+                worker_defects.add("console_findings", {
+                    "step": step,
+                    "type": "step-timeout",
+                    "failure_reason": "step_timeout",
+                    "url": sanitize_for_storage(page.url, max_len=2048),
+                    "selector": sanitize_for_storage(plan.get("target", "") or "(none)", max_len=256),
+                    "remediation_advice": "Increase the step timeout or investigate a frozen or blocked target page.",
+                })
+                break
+            except Exception as exc:
+                runtime_failure = classify_runtime_failure(exc)
+                if runtime_failure == "sandbox":
+                    failure_reason = "sandbox"
+                    failure_context = {"step": step, "error": str(exc), "url": sanitize_for_storage(page.url, max_len=2048)}
+                    print(f"🧱 {worker_label} sandbox failure at step {step}: {exc}")
+                    break
+                raise
+
             log_entry["worker_id"] = worker_id
             log_entry["memory_retrieval"] = retrieval_telemetry
 
@@ -231,7 +300,33 @@ async def run_worker(
                     worker_stall_detector.record_state(step, post_snapshot.url, post_snapshot.dom_hash, str(plan.get("action", "")))
                     stall_finding = worker_stall_detector.check_for_stall(step, plan.get("action", "scroll"))
                     if stall_finding:
-                        print(f"\u26a0\ufe0f {worker_label} STALL DETECTED at step {step}: page state unchanged across multiple steps")
+                        failure_reason = stall_finding.get("reason", "stuck_state_detected")
+                        failure_context = {
+                            "step": step,
+                            "action": plan.get("action", ""),
+                            "target": plan.get("target", ""),
+                            "url": sanitize_for_storage(post_snapshot.url, max_len=2048),
+                            "dom_hash": post_snapshot.dom_hash,
+                            "threshold": settings.stuck_state_threshold,
+                        }
+                        failure_artifact = f"stuck_state_step_{step}.json"
+                        artifact_path = os.path.join(settings.output_dir, failure_artifact)
+                        with open(artifact_path, "w", encoding="utf-8") as artifact_file:
+                            json.dump(
+                                {
+                                    "reason": failure_reason,
+                                    "step": step,
+                                    "action": plan.get("action", ""),
+                                    "target": plan.get("target", ""),
+                                    "url": post_snapshot.url,
+                                    "dom_hash": post_snapshot.dom_hash,
+                                    "stall_window_steps": [entry.get("step") for entry in stall_finding.get("stall_window_steps", [])],
+                                },
+                                artifact_file,
+                                indent=2,
+                            )
+                        print(f"⚠️ {worker_label} STALL DETECTED at step {step}: page state unchanged across multiple steps")
+                        break
             except Exception as stall_exc:
                 _local_service_log(f"{worker_label} stall detection failed: {stall_exc}", settings.output_dir)
 
@@ -249,4 +344,15 @@ async def run_worker(
         if context is not None:
             await context.close()
 
-    return WorkerRunResult(worker_id=worker_id, allocated_steps=allocated_steps, completed_steps=completed_steps, logs=worker_logs, defects=worker_defects, network_injections=list(worker_network_monitor.injected_events), launch_info=launch_info)
+    return WorkerRunResult(
+        worker_id=worker_id,
+        allocated_steps=allocated_steps,
+        completed_steps=completed_steps,
+        logs=worker_logs,
+        defects=worker_defects,
+        network_injections=list(worker_network_monitor.injected_events),
+        launch_info=launch_info,
+        failure_reason=failure_reason,
+        failure_artifact=failure_artifact,
+        failure_context=failure_context,
+    )

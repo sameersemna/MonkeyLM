@@ -39,6 +39,8 @@ from monkeylm.core import (
     with_retry_backoff,
     test_logs,
 )
+from monkeylm.core.monitor import StallDetector
+from monkeylm.core.worker.runner import _execute_step_with_timeout, classify_runtime_failure
 from monkeylm.models import (
     _build_vision_annotation_prompt,
     _is_cloud_vision_model,
@@ -248,6 +250,60 @@ class MonkeyLMTests(unittest.TestCase):
         config.WORKER_QDRANT_INIT_RETRIES = original_qdrant_retries
         config.WORKER_BOUNDARY_RECOVERY_RETRIES = original_boundary_retries
         config.RETRY_BASE_DELAY_SECONDS = original_base_delay
+
+    def test_stall_detector_marks_stuck_state_detected(self) -> None:
+        defects = DefectTracker()
+        detector = StallDetector(defects, threshold=3)
+
+        for step, action in enumerate(["restart_target", "restart_target", "restart_target"], start=1):
+            detector.record_state(step, "https://example.com/", "same-hash", action)
+
+        finding = detector.check_for_stall(4, "restart_target")
+
+        self.assertIsNotNone(finding)
+        self.assertEqual(finding.get("type"), "stuck_state_detected")
+        self.assertEqual(finding.get("reason"), "stuck_state_detected")
+        self.assertEqual(len(defects.ux_flow_freezes), 1)
+
+    def test_execute_step_with_timeout_raises_timeout_error(self) -> None:
+        async def slow_coro() -> str:
+            await asyncio.sleep(0.05)
+            return "done"
+
+        with self.assertRaises(TimeoutError):
+            asyncio.run(_execute_step_with_timeout(slow_coro(), timeout_seconds=0.001))
+
+    def test_classify_runtime_failure_detects_sandbox_errors(self) -> None:
+        self.assertEqual(classify_runtime_failure(RuntimeError("sandbox launch failed")), "sandbox")
+        self.assertIsNone(classify_runtime_failure(RuntimeError("page crashed")))
+
+    def test_runtime_failures_are_emitted_in_reports(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            settings = load_settings()
+            settings._output_dir_override = tmp_dir
+            defects = DefectTracker()
+            browser_launch_info = {
+                "worker_failures": [
+                    {
+                        "worker_id": 1,
+                        "failure_reason": "stuck_state_detected",
+                        "failure_artifact": "stuck_state_step_3.json",
+                        "failure_context": {"step": 3, "url": "https://example.com/"},
+                    }
+                ]
+            }
+
+            generate_markdown_report(settings, defects, [], browser_launch_info, datetime.now(), datetime.now())
+            with open(os.path.join(tmp_dir, "test_report.md"), "r", encoding="utf-8") as handle:
+                markdown_output = handle.read()
+            self.assertIn("Runtime Failures", markdown_output)
+            self.assertIn("stuck_state_detected", markdown_output)
+            self.assertIn("stuck_state_step_3.json", markdown_output)
+
+            generate_json_summary(settings, defects, [], browser_launch_info, [], False, datetime.now(), datetime.now())
+            with open(os.path.join(tmp_dir, "results.json"), "r", encoding="utf-8") as handle:
+                json_output = json.load(handle)
+            self.assertEqual(json_output["worker_failures"][0]["failure_reason"], "stuck_state_detected")
 
     def test_generate_json_summary_contains_seed_and_boundary_drift(self) -> None:
         original_output_dir = config.OUTPUT_DIR

@@ -116,6 +116,9 @@ async def main(settings: Settings) -> None:
                 "worker_id": result.worker_id,
                 "allocated_steps": result.allocated_steps,
                 "completed_steps": result.completed_steps,
+                "failure_reason": result.failure_reason,
+                "failure_artifact": result.failure_artifact,
+                "failure_context": result.failure_context,
             }
         )
 
@@ -127,6 +130,7 @@ async def main(settings: Settings) -> None:
         "mode": "multi-worker" if len(worker_launches) > 1 else "single-worker",
         "workers": worker_launches,
         "worker_completion": worker_completion,
+        "worker_failures": [entry for entry in worker_completion if entry.get("failure_reason")],
         "window_size": settings.browser_window_size,
         "no_viewport": settings.no_viewport,
         "headless": settings.headless,

@@ -63,6 +63,7 @@ def generate_json_summary(
         "regression_drift_index": accountability.get("regression_drift_index"),
         "app_defect_count": accountability.get("app_defect_count", 0),
         "browser_launch": browser_launch_info,
+        "worker_failures": browser_launch_info.get("worker_failures", []),
         "defects": {
             "security_risks": defects.security_risks,
             "accessibility_violations_raw": defects.accessibility_violations,

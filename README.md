@@ -78,6 +78,8 @@ The advanced runner now supports both environment-variable configuration and CLI
 | `WORKER_QDRANT_INIT_RETRIES` | `1` | Retry count for worker-level Qdrant initialization. |
 | `WORKER_BOUNDARY_RECOVERY_RETRIES` | `1` | Retry count for out-of-scope boundary recovery navigation. |
 | `RETRY_BASE_DELAY_SECONDS` | `0.75` | Base backoff delay in seconds (exponential with jitter). |
+| `STEP_TIMEOUT_SECONDS` | `30` | Per-step timeout before the worker aborts the run with a structured runtime failure. |
+| `STUCK_STATE_THRESHOLD` | `6` | Consecutive repeated-state steps required before a stuck-state failure is declared. |
 | `HEADLESS` | `true` | Run browser headless when enabled. |
 | `BROWSER_WINDOW_SIZE` | `1920,1080` | Browser launch size (`width,height` or `widthxheight`). |
 | `NO_VIEWPORT` | `true` | Use window size directly instead of Playwright viewport emulation. |
@@ -142,6 +144,8 @@ python3 monkey_agent_advanced.py
 | `--worker-qdrant-init-retries` | Override retries for worker Qdrant initialization. |
 | `--worker-boundary-recovery-retries` | Override retries for boundary recovery navigation. |
 | `--retry-base-delay-seconds` | Override base retry delay for exponential backoff. |
+| `--step-timeout-seconds` | Override the per-step timeout before the worker aborts the run. |
+| `--stuck-state-threshold` | Override the repeated-state window that triggers stuck-state failure detection. |
 | `--redis-prefix` | Override Redis key prefix. |
 | `--redis-path-lock-ttl-seconds` | Override cross-worker action-path lock TTL. |
 | `--window-size` | Override browser window size. |
@@ -184,6 +188,8 @@ python3 monkey_agent_advanced.py \
 	--worker-qdrant-init-retries 2 \
 	--worker-boundary-recovery-retries 2 \
 	--retry-base-delay-seconds 1.0 \
+	--step-timeout-seconds 15 \
+	--stuck-state-threshold 4 \
 	--window-size "1600,900" \
 	--headless \
 	--no-viewport

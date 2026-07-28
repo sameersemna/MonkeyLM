@@ -111,6 +111,8 @@ DEFAULT_WORKER_NAVIGATION_RETRIES = 2
 DEFAULT_WORKER_QDRANT_INIT_RETRIES = 1
 DEFAULT_WORKER_BOUNDARY_RECOVERY_RETRIES = 1
 DEFAULT_RETRY_BASE_DELAY_SECONDS = 0.75
+DEFAULT_STEP_TIMEOUT_SECONDS = 30.0
+DEFAULT_STUCK_STATE_THRESHOLD = 6
 MAX_ALLOWED_RETRIES = 10
 MAX_ALLOWED_RETRY_BASE_DELAY_SECONDS = 10.0
 DEFAULT_HEADLESS = True
@@ -291,6 +293,18 @@ def parse_cli_args() -> argparse.Namespace:
         default=None,
         help="Base retry delay in seconds for worker backoff",
     )
+    parser.add_argument(
+        "--step-timeout-seconds",
+        type=float,
+        default=None,
+        help="Per-step timeout for the worker loop before the run fails fast",
+    )
+    parser.add_argument(
+        "--stuck-state-threshold",
+        type=int,
+        default=None,
+        help="Consecutive repeated-state steps before a stuck-state failure is declared",
+    )
     parser.add_argument("--seed", type=int, help="Random seed for deterministic test replay")
     parser.add_argument("--window-size", help="Browser window size as WIDTH,HEIGHT or WIDTHxHEIGHT")
     parser.add_argument("--postgres-dsn", help="PostgreSQL connection string")
@@ -418,6 +432,10 @@ def load_settings(cli_args: Optional[argparse.Namespace] = None) -> Settings:
 
     raw_rbd = env_vars.get("RETRY_BASE_DELAY_SECONDS")
     s.retry_base_delay_seconds = max(0.1, float(raw_rbd) if raw_rbd is not None else s.retry_base_delay_seconds)
+    raw_step_timeout = env_vars.get("STEP_TIMEOUT_SECONDS")
+    s.step_timeout_seconds = max(1.0, float(raw_step_timeout) if raw_step_timeout is not None else s.step_timeout_seconds)
+    raw_stuck_threshold = env_vars.get("STUCK_STATE_THRESHOLD")
+    s.stuck_state_threshold = max(2, int(raw_stuck_threshold) if raw_stuck_threshold is not None else s.stuck_state_threshold)
     ev_headless = env_vars.get("HEADLESS")
     s.headless = _env_bool("HEADLESS", default=_env_to_bool(ev_headless, s.headless))
     raw_bws = env_vars.get("BROWSER_WINDOW_SIZE") or os.getenv("BROWSER_WINDOW_SIZE") or s.browser_window_size
@@ -484,6 +502,10 @@ def load_settings(cli_args: Optional[argparse.Namespace] = None) -> Settings:
             s.worker_boundary_recovery_retries = max(0, int(cli_args.worker_boundary_recovery_retries))
         if getattr(cli_args, "retry_base_delay_seconds", None) is not None:
             s.retry_base_delay_seconds = max(0.1, float(cli_args.retry_base_delay_seconds))
+        if getattr(cli_args, "step_timeout_seconds", None) is not None:
+            s.step_timeout_seconds = max(1.0, float(cli_args.step_timeout_seconds))
+        if getattr(cli_args, "stuck_state_threshold", None) is not None:
+            s.stuck_state_threshold = max(2, int(cli_args.stuck_state_threshold))
         if getattr(cli_args, "headless", None) is not None:
             s.headless = bool(cli_args.headless)
         if getattr(cli_args, "window_size", None):
