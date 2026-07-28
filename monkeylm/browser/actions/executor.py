@@ -22,6 +22,7 @@ from monkeylm.browser.snapshot import (
 from monkeylm.types import PageSnapshot
 
 from .helpers import _locator_for_target_id
+from .interaction import collect_failure_context, detect_click_interception, recover_nonresponsive_state
 from .actions import (
     _action_scroll,
     _action_back,
@@ -104,6 +105,13 @@ async def execute_action(
         elif action == "submit_form":
             await _action_submit_form(page, settings, target, input_payloads, action_strategy, step_num, before_snapshot, validation_prober, log_entry)
         elif action == "click":
+            locator = await _locator_for_target_id(page, target)
+            if locator is not None:
+                interception = await detect_click_interception(page, locator, target)
+                if interception.get("is_blocked"):
+                    raise RuntimeError(
+                        f"click_intercepted:{interception.get('reason')}|top={interception.get('top_element')}|target={interception.get('target_element')}"
+                    )
             await _action_click(page, target)
         elif action == "type":
             await _action_type(page, settings, target, value, action_strategy, input_payloads, step_num, before_snapshot, fuzzer, defects, validation_prober, log_entry)
@@ -160,6 +168,21 @@ async def execute_action(
         log_entry["status"] = "FAILED"
         log_entry["error"] = error_msg
         print(f"💥 Error: {error_msg}")
+
+        try:
+            failure_context = await collect_failure_context(page, step=step_num, action=action, target=target, error=error_msg)
+            log_entry["failure_context"] = failure_context
+            defects.add("console_findings", {
+                "step": step_num,
+                "type": f"failure-context:{action}",
+                "severity": "error",
+                "selector": sanitize_for_storage(target, max_len=256) if target.strip() else "(none)",
+                "failure_reason": sanitize_for_storage(error_msg[:300], max_len=512),
+                "url": sanitize_for_storage(page.url, max_len=1024),
+                "details": sanitize_for_storage(json.dumps(failure_context, sort_keys=True)[:4000], max_len=4000),
+            })
+        except Exception:
+            pass
 
         screenshot_name = f"error_step_{step_num}.png"
         try:

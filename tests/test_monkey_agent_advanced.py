@@ -56,12 +56,17 @@ from monkeylm.browser import (
     diff_component_manifests,
     launch_context_with_fallback,
 )
+from monkeylm.browser.actions.interaction import (
+    collect_failure_context,
+    detect_click_interception,
+)
 from monkeylm.memory import PersistenceEngine, QdrantMemoryStore
 from monkeylm.reporting import (
     generate_json_summary,
     generate_markdown_report,
     summarize_vibe_coding_accountability,
 )
+from monkeylm.reporting.json_report import generate_json_summary as generate_json_summary_direct
 
 
 class MonkeyLMTests(unittest.TestCase):
@@ -277,8 +282,48 @@ class MonkeyLMTests(unittest.TestCase):
         with self.assertRaises(TimeoutError):
             asyncio.run(_execute_step_with_timeout(slow_coro(), timeout_seconds=0.001))
 
+    def test_detect_click_interception_detects_overlay_blocking(self) -> None:
+        class DummyLocator:
+            async def bounding_box(self) -> Dict[str, float]:
+                return {"x": 10.0, "y": 10.0, "width": 20.0, "height": 20.0}
+
+        class DummyPage:
+            def __init__(self) -> None:
+                self.url = "https://example.com/"
+
+            async def evaluate(self, script: str, *args: Any) -> Dict[str, Any]:
+                return {
+                    "is_blocked": True,
+                    "reason": "overlay_blocked",
+                    "top_element": "div",
+                    "target_element": "button",
+                    "top_text": "dialog",
+                }
+
+            async def content(self) -> str:
+                return "<html><body><div>overlay</div></body></html>"
+
+        findings = asyncio.run(detect_click_interception(DummyPage(), DummyLocator(), "1"))
+        self.assertTrue(findings["is_blocked"])
+        self.assertEqual(findings["reason"], "overlay_blocked")
+
+    def test_collect_failure_context_includes_last_action_url_and_dom_snippet(self) -> None:
+        class DummyPage:
+            def __init__(self) -> None:
+                self.url = "https://example.com/"
+
+            async def content(self) -> str:
+                return "<html><body><button>Continue</button></body></html>"
+
+        context = asyncio.run(collect_failure_context(DummyPage(), step=7, action="click", target="1", error="timed out"))
+        self.assertEqual(context["step"], 7)
+        self.assertEqual(context["last_action"], "click")
+        self.assertEqual(context["url"], "https://example.com/")
+        self.assertIn("Continue", context["dom_context"])
+
     def test_classify_runtime_failure_detects_sandbox_errors(self) -> None:
         self.assertEqual(classify_runtime_failure(RuntimeError("sandbox launch failed")), "sandbox")
+        self.assertEqual(classify_runtime_failure(RuntimeError("timed out while waiting for element")), "timeout")
         self.assertIsNone(classify_runtime_failure(RuntimeError("page crashed")))
 
     def test_runtime_failures_are_emitted_in_reports(self) -> None:
@@ -329,6 +374,31 @@ class MonkeyLMTests(unittest.TestCase):
                 json_output = json.load(handle)
             self.assertIn("runtime_preflight", json_output)
             self.assertIn("playwright", json_output["runtime_preflight"])
+
+    def test_json_report_emits_failure_context_samples(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            settings = load_settings()
+            settings._output_dir_override = tmp_dir
+            defects = DefectTracker()
+            test_logs = [{
+                "step": 2,
+                "status": "FAILED",
+                "action": "click",
+                "target": "1",
+                "error": "timed out",
+                "failure_context": {
+                    "step": 2,
+                    "last_action": "click",
+                    "url": "https://example.com/",
+                    "dom_context": "<button>Continue</button>",
+                },
+            }]
+
+            generate_json_summary_direct(settings, defects, test_logs, {}, [], False, datetime.now(), datetime.now())
+            with open(os.path.join(tmp_dir, "results.json"), "r", encoding="utf-8") as handle:
+                json_output = json.load(handle)
+            self.assertEqual(len(json_output["failure_context_samples"]), 1)
+            self.assertEqual(json_output["failure_context_samples"][0]["action"], "click")
 
     def test_generate_json_summary_contains_seed_and_boundary_drift(self) -> None:
         original_output_dir = config.OUTPUT_DIR

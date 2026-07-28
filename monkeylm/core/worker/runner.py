@@ -29,6 +29,7 @@ from monkeylm.core.monitor import (
 from monkeylm.types import WorkerRunResult
 
 from .helpers import build_worker_user_data_dir, with_retry_backoff
+from monkeylm.browser.actions.interaction import recover_nonresponsive_state
 
 
 async def _execute_step_with_timeout(coro: Any, *, timeout_seconds: float) -> Any:
@@ -224,6 +225,11 @@ async def run_worker(
                 print(f"⏰ {worker_label} step {step} timed out after {settings.step_timeout_seconds}s; stopping run.")
                 await page.screenshot(path=os.path.join(settings.output_dir, f"timeout_step_{step}.png"))
                 failure_artifact = f"timeout_step_{step}.png"
+                try:
+                    recovery = await recover_nonresponsive_state(page, settings, step=step, action=plan.get("action", ""), target=plan.get("target", ""), error="step_timeout")
+                    failure_context["recovery"] = recovery
+                except Exception:
+                    pass
                 worker_defects.add("console_findings", {
                     "step": step,
                     "type": "step-timeout",
@@ -231,6 +237,7 @@ async def run_worker(
                     "url": sanitize_for_storage(page.url, max_len=2048),
                     "selector": sanitize_for_storage(plan.get("target", "") or "(none)", max_len=256),
                     "remediation_advice": "Increase the step timeout or investigate a frozen or blocked target page.",
+                    "recovery": sanitize_for_storage(json.dumps(failure_context.get("recovery", {}), sort_keys=True)[:2000], max_len=2000),
                 })
                 break
             except Exception as exc:

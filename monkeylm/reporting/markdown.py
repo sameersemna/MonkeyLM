@@ -100,6 +100,10 @@ Actions included: Clicking, Typing, Form Submission, Modal Handling, and State E
             md_content += f"\n### Step {log['step']}: {log['action']} failed\n"
             md_content += f"- **Target:** `{log['target']}`\n"
             md_content += f"- **Error:** `{log['error']}`\n"
+            failure_context = log.get("failure_context") or {}
+            if failure_context:
+                md_content += f"- **Last URL:** `{failure_context.get('url', '')}`\n"
+                md_content += f"- **DOM Context:** `{failure_context.get('dom_context', '')[:400]}`\n"
             if log["screenshot"]:
                 md_content += f"- **Screenshot:** `![Screenshot](./{log['screenshot']})`\n"
 

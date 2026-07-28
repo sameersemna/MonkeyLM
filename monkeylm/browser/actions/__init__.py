@@ -7,6 +7,11 @@ from .helpers import (
     _resolve_form_boundary,
     _resolve_interaction_mode,
 )
+from .interaction import (
+    collect_failure_context,
+    detect_click_interception,
+    recover_nonresponsive_state,
+)
 from .executor import (
     _compute_action_path_hash,
     execute_action,

@@ -93,6 +93,16 @@ def generate_json_summary(
         "semantic_memory_telemetry": semantic_memory_telemetry,
         "vibe_coding_accountability": accountability,
         "logs": test_logs,
+        "failure_context_samples": [
+            {
+                "step": log.get("step"),
+                "action": log.get("action"),
+                "error": log.get("error"),
+                "failure_context": log.get("failure_context"),
+            }
+            for log in test_logs
+            if log.get("status") != "SUCCESS" and log.get("failure_context")
+        ],
     }
     output_path = os.path.join(settings.output_dir, "results.json")
     redacted_summary = redact_sensitive_content(json.dumps(summary, indent=2))
