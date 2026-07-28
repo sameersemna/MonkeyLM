@@ -161,6 +161,7 @@ ALLOWED_ACTIONS = {
     "type",
     "submit_form",
     "handle_modal",
+    "press_key",
     "scroll",
     "back",
     "random_jump",

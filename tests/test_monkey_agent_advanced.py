@@ -28,6 +28,7 @@ from monkeylm.config import (
     inspect_optional_runtime_dependencies,
     is_in_scope,
     load_settings,
+    normalize_action_plan,
     parse_cli_args,
     split_domain_and_route,
     validate_runtime_configuration,
@@ -44,7 +45,7 @@ from monkeylm.core import (
     test_logs,
 )
 from monkeylm.core.monitor import StallDetector
-from monkeylm.core.worker.runner import _execute_step_with_timeout, classify_runtime_failure
+from monkeylm.core.worker.runner import _execute_step_with_timeout, classify_runtime_failure, write_failure_debug_artifact
 from monkeylm.models import (
     _build_vision_annotation_prompt,
     _is_cloud_vision_model,
@@ -282,6 +283,33 @@ class MonkeyLMTests(unittest.TestCase):
         with self.assertRaises(TimeoutError):
             asyncio.run(_execute_step_with_timeout(slow_coro(), timeout_seconds=0.001))
 
+    def test_normalize_action_plan_accepts_press_key(self) -> None:
+        plan = normalize_action_plan({"action": "press_key", "value": "Escape"})
+        self.assertEqual(plan["action"], "press_key")
+        self.assertEqual(plan["value"], "Escape")
+
+    def test_write_failure_debug_artifact_emits_recent_state_buffer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            settings = load_settings()
+            settings._output_dir_override = tmp_dir
+            history = [
+                {"step": 1, "action": "scroll", "url": "https://example.com/", "dom_hash": "hash-a"},
+                {"step": 2, "action": "click", "url": "https://example.com/", "dom_hash": "hash-b"},
+            ]
+            artifact_path = write_failure_debug_artifact(
+                settings,
+                step=3,
+                failure_reason="step_timeout",
+                failure_context={"step": 3, "action": "type", "target": "[id=2]", "url": "https://example.com/"},
+                recent_history=history,
+            )
+            self.assertTrue(os.path.exists(artifact_path))
+            with open(artifact_path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+            self.assertEqual(payload["failure_reason"], "step_timeout")
+            self.assertEqual(payload["recent_history"][0]["action"], "scroll")
+            self.assertEqual(payload["recent_history"][1]["dom_hash"], "hash-b")
+
     def test_detect_click_interception_detects_overlay_blocking(self) -> None:
         class DummyLocator:
             async def bounding_box(self) -> Dict[str, float]:
@@ -336,7 +364,7 @@ class MonkeyLMTests(unittest.TestCase):
                     {
                         "worker_id": 1,
                         "failure_reason": "stuck_state_detected",
-                        "failure_artifact": "stuck_state_step_3.json",
+                        "failure_artifact": "failure_debug_step_3.json",
                         "failure_context": {"step": 3, "url": "https://example.com/"},
                     }
                 ]
@@ -347,7 +375,7 @@ class MonkeyLMTests(unittest.TestCase):
                 markdown_output = handle.read()
             self.assertIn("Runtime Failures", markdown_output)
             self.assertIn("stuck_state_detected", markdown_output)
-            self.assertIn("stuck_state_step_3.json", markdown_output)
+            self.assertIn("failure_debug_step_3.json", markdown_output)
 
             generate_json_summary(settings, defects, [], browser_launch_info, [], False, datetime.now(), datetime.now())
             with open(os.path.join(tmp_dir, "results.json"), "r", encoding="utf-8") as handle:

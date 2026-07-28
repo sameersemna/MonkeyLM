@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import json
+from datetime import datetime
 from typing import Any, Dict, List, Tuple
 
 from monkeylm.config import (
@@ -45,6 +46,30 @@ def classify_runtime_failure(exc: Exception | None) -> str | None:
     if "timeout" in error_text or "timed out" in error_text:
         return "timeout"
     return None
+
+
+def write_failure_debug_artifact(
+    settings: Settings,
+    *,
+    step: int,
+    failure_reason: str,
+    failure_context: Dict[str, Any] | None,
+    recent_history: List[Dict[str, Any]] | None = None,
+    launch_info: Dict[str, Any] | None = None,
+) -> str:
+    artifact_name = f"failure_debug_step_{step}.json"
+    artifact_path = os.path.join(settings.output_dir, artifact_name)
+    payload = {
+        "step": step,
+        "failure_reason": failure_reason,
+        "failure_context": failure_context or {},
+        "recent_history": recent_history or [],
+        "launch_info": launch_info or {},
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+    }
+    with open(artifact_path, "w", encoding="utf-8") as artifact_file:
+        json.dump(payload, artifact_file, indent=2)
+    return artifact_path
 
 
 async def _run_worker_with_limit(
@@ -108,6 +133,7 @@ async def run_worker(
     visited_states: Dict[str, int] = {}
     seen_click_targets: set = set()
     recent_model_plans: List[Tuple[str, str]] = []
+    recent_state_history: List[Dict[str, Any]] = []
     completed_steps = 0
     failure_reason: str | None = None
     failure_artifact: str | None = None
@@ -193,6 +219,16 @@ async def run_worker(
             if plan.get("action") == "click" and plan.get("target"):
                 seen_click_targets.add(plan.get("target"))
 
+            recent_state_history.append({
+                "step": step,
+                "action": str(plan.get("action", "")),
+                "target": str(plan.get("target", "")),
+                "url": sanitize_for_storage(snapshot.url, max_len=2048),
+                "dom_hash": snapshot.dom_hash,
+            })
+            if len(recent_state_history) > 8:
+                recent_state_history = recent_state_history[-8:]
+
             worker_anomaly_sensor.set_action_context(step, f"{plan.get('action', '?')}:{plan.get('target', '')}")
 
             try:
@@ -224,7 +260,14 @@ async def run_worker(
                 }
                 print(f"⏰ {worker_label} step {step} timed out after {settings.step_timeout_seconds}s; stopping run.")
                 await page.screenshot(path=os.path.join(settings.output_dir, f"timeout_step_{step}.png"))
-                failure_artifact = f"timeout_step_{step}.png"
+                failure_artifact = os.path.basename(write_failure_debug_artifact(
+                    settings,
+                    step=step,
+                    failure_reason="step_timeout",
+                    failure_context=failure_context,
+                    recent_history=recent_state_history,
+                    launch_info=launch_info,
+                ))
                 try:
                     recovery = await recover_nonresponsive_state(page, settings, step=step, action=plan.get("action", ""), target=plan.get("target", ""), error="step_timeout")
                     failure_context["recovery"] = recovery
@@ -245,6 +288,14 @@ async def run_worker(
                 if runtime_failure == "sandbox":
                     failure_reason = "sandbox"
                     failure_context = {"step": step, "error": str(exc), "url": sanitize_for_storage(page.url, max_len=2048)}
+                    failure_artifact = os.path.basename(write_failure_debug_artifact(
+                        settings,
+                        step=step,
+                        failure_reason="sandbox",
+                        failure_context=failure_context,
+                        recent_history=recent_state_history,
+                        launch_info=launch_info,
+                    ))
                     print(f"🧱 {worker_label} sandbox failure at step {step}: {exc}")
                     break
                 raise
@@ -316,22 +367,19 @@ async def run_worker(
                             "dom_hash": post_snapshot.dom_hash,
                             "threshold": settings.stuck_state_threshold,
                         }
-                        failure_artifact = f"stuck_state_step_{step}.json"
-                        artifact_path = os.path.join(settings.output_dir, failure_artifact)
-                        with open(artifact_path, "w", encoding="utf-8") as artifact_file:
-                            json.dump(
-                                {
-                                    "reason": failure_reason,
-                                    "step": step,
-                                    "action": plan.get("action", ""),
-                                    "target": plan.get("target", ""),
-                                    "url": post_snapshot.url,
-                                    "dom_hash": post_snapshot.dom_hash,
-                                    "stall_window_steps": [entry.get("step") for entry in stall_finding.get("stall_window_steps", [])],
-                                },
-                                artifact_file,
-                                indent=2,
-                            )
+                        failure_artifact = os.path.basename(write_failure_debug_artifact(
+                            settings,
+                            step=step,
+                            failure_reason=failure_reason,
+                            failure_context={
+                                **failure_context,
+                                "stall_window_steps": [entry.get("step") for entry in stall_finding.get("stall_window_steps", [])],
+                                "url": sanitize_for_storage(post_snapshot.url, max_len=2048),
+                                "dom_hash": post_snapshot.dom_hash,
+                            },
+                            recent_history=recent_state_history,
+                            launch_info=launch_info,
+                        ))
                         print(f"⚠️ {worker_label} STALL DETECTED at step {step}: page state unchanged across multiple steps")
                         break
             except Exception as stall_exc:

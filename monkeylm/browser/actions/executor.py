@@ -31,6 +31,7 @@ from .actions import (
     _action_handle_modal,
     _action_submit_form,
     _action_click,
+    _action_press_key,
     _action_type,
 )
 
@@ -102,6 +103,8 @@ async def execute_action(
             await _action_random_jump(page)
         elif action == "handle_modal":
             await _action_handle_modal(page)
+        elif action == "press_key":
+            await _action_press_key(page, value or "Enter")
         elif action == "submit_form":
             await _action_submit_form(page, settings, target, input_payloads, action_strategy, step_num, before_snapshot, validation_prober, log_entry)
         elif action == "click":

@@ -124,6 +124,13 @@ async def _action_submit_form(page: Page, settings: Any, target: str, input_payl
                 raise Exception("Form found but no inputs or submit button")
 
 
+async def _action_press_key(page: Page, key: str) -> None:
+    normalized_key = (key or "Enter").strip()
+    if not normalized_key:
+        normalized_key = "Enter"
+    await page.keyboard.press(normalized_key)
+
+
 async def _action_click(page: Page, target: str) -> None:
     locator = await _locator_for_target_id(page, target)
     if locator:

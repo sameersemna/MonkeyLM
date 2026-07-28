@@ -51,11 +51,12 @@ def build_decision_prompt(
     base_actions = [
         '1. "click": Click a button or link.',
         '2. "type": Type a single value into one input field.',
+        '3. "press_key": Press a keyboard shortcut such as Escape, Enter, or Tab.',
         '4. "handle_modal": If a modal/dialog is detected, try to close it (click \'X\', \'Cancel\', \'Close\') or accept it.',
         '5. "scroll": Scroll the page.',
     ]
     if has_valid_forms:
-        base_actions.insert(2, '3. "submit_form": Fill a form and submit it. Use this when a valid <form> with a submit button is present.')
+        base_actions.insert(3, '4. "submit_form": Fill a form and submit it. Use this when a valid <form> with a submit button is present.')
 
     actions_text = "\n".join(base_actions)
 
