@@ -13,6 +13,7 @@ import signal
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 from datetime import datetime
 from typing import Any, Dict, Optional
@@ -275,6 +276,36 @@ class MonkeyLMTests(unittest.TestCase):
         self.assertEqual(finding.get("type"), "stuck_state_detected")
         self.assertEqual(finding.get("reason"), "stuck_state_detected")
         self.assertEqual(len(defects.ux_flow_freezes), 1)
+
+    def test_stall_detector_ignores_recent_loop_break_window(self) -> None:
+        defects = DefectTracker()
+        detector = StallDetector(defects, threshold=3)
+
+        detector.record_state(1, "https://example.com/", "same-hash", "click")
+        detector.record_state(2, "https://example.com/", "same-hash", "click")
+        detector.record_state(3, "https://example.com/", "same-hash", "click", loop_break_applied=True)
+
+        finding = detector.check_for_stall(4, "click")
+
+        self.assertIsNone(finding)
+        self.assertEqual(len(defects.ux_flow_freezes), 0)
+
+    def test_break_action_loop_falls_back_to_scroll_when_no_alternatives(self) -> None:
+        snapshot = SimpleNamespace(elements=["[id=1] <BUTTON>Save</BUTTON>"])
+        plan = {"action": "click", "target": "[id=1]"}
+
+        result = _break_action_loop(
+            plan,
+            snapshot,
+            "worker-01",
+            3,
+            loop_state={"blacklist": {"click:[id=1]": 5}, "loop_count": 1},
+            blacklist_expiry_steps=5,
+        )
+
+        self.assertEqual(result["action"], "scroll")
+        self.assertEqual(result["target"], "")
+        self.assertEqual(result["value"], "")
 
     def test_execute_step_with_timeout_raises_timeout_error(self) -> None:
         async def slow_coro() -> str:

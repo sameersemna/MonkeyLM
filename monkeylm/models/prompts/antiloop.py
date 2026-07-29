@@ -101,6 +101,6 @@ def _break_action_loop(
         print(f"   -> 🔄 {worker_label} loop break: switching to {chosen_action} on {chosen_target} (excluding {len(blacklisted_targets)} blacklisted targets)")
         return {"action": chosen_action, "target": chosen_target, "value": "", "action_strategy": "", "input_payloads": []}
 
-    fallback = random.choice(["scroll", "random_jump", "restart_target"])
+    fallback = "scroll"
     print(f"   -> 🔄 {worker_label} loop break: no alternative selectors; using {fallback}")
     return {"action": fallback, "target": "", "value": "", "action_strategy": "", "input_payloads": []}

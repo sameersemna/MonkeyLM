@@ -399,7 +399,13 @@ async def run_worker(
                     # doesn't declare (and keep re-declaring) a bogus freeze.
                     pass
                 else:
-                    worker_stall_detector.record_state(step, post_snapshot.url, post_snapshot.dom_hash, str(plan.get("action", "")))
+                    worker_stall_detector.record_state(
+                        step,
+                        post_snapshot.url,
+                        post_snapshot.dom_hash,
+                        str(plan.get("action", "")),
+                        loop_break_applied=loop_break_applied,
+                    )
                     stall_finding = worker_stall_detector.check_for_stall(step, plan.get("action", "scroll"))
                     if stall_finding:
                         failure_reason = stall_finding.get("reason", "stuck_state_detected")

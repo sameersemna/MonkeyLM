@@ -14,8 +14,17 @@ class StallDetector:
         self.defects = defects
         self.threshold = max(2, threshold)
         self._history: List[Dict[str, Any]] = []
+        self._cooldown_until_step: Optional[int] = None
 
-    def record_state(self, step: int, url: str, state_hash: str, action: str = "") -> None:
+    def record_state(
+        self,
+        step: int,
+        url: str,
+        state_hash: str,
+        action: str = "",
+        *,
+        loop_break_applied: bool = False,
+    ) -> None:
         # Caller must pass a *content-aware* hash (PageSnapshot.dom_hash, which
         # includes element text), not PageSnapshot.structure_hash. structure_hash
         # deliberately strips element text so it can detect pure layout drift
@@ -28,7 +37,13 @@ class StallDetector:
             "url": url,
             "state_hash": state_hash,
             "action": action,
+            "loop_break_applied": loop_break_applied,
         })
+        if loop_break_applied:
+            self._cooldown_until_step = max(
+                self._cooldown_until_step or 0,
+                step + max(1, self.threshold // 2),
+            )
         if len(self._history) > self.threshold + 2:
             excess = len(self._history) - (self.threshold + 1)
             self._history = self._history[excess:]
@@ -36,7 +51,11 @@ class StallDetector:
     def check_for_stall(self, step: int, current_action: str) -> Optional[Dict[str, Any]]:
         if len(self._history) < self.threshold:
             return None
+        if self._cooldown_until_step is not None and step <= self._cooldown_until_step:
+            return None
         window = self._history[-self.threshold:]
+        if any(entry.get("loop_break_applied", False) for entry in window):
+            return None
         urls = set(e["url"] for e in window)
         hashes = set(e["state_hash"] for e in window)
         actions = [e["action"] for e in window]
@@ -69,5 +88,6 @@ class StallDetector:
             # `threshold`-length stuck window before re-declaring still catches a
             # freeze that persists, just without the per-step spam.
             self._history = []
+            self._cooldown_until_step = None
             return finding
         return None
