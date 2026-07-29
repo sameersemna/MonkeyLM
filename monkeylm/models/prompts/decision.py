@@ -70,10 +70,14 @@ def build_decision_prompt(
         )
         security_summary = "; ".join(testing_strategy.security_focus[:5])
         edge_cases_summary = "; ".join(testing_strategy.edge_cases_to_test[:5])
+        discovery_bias = ""
+        lower_page_state = page_state.lower()
+        if any(keyword in lower_page_state for keyword in ["browse", "search", "bookmark"]):
+            discovery_bias = "\nPriority bias: if a browse/search/bookmark control is available, prefer interacting with it before unrelated content."
         persona_context = f"""
 ## Cognitive Testing Strategy (Application Discovery)
 Application Domain: {testing_strategy.app_domain}
-Strategy: {testing_strategy.strategy_summary}
+Strategy: {testing_strategy.strategy_summary}{discovery_bias}
 
 Active Personas (embody one per action):
 {personas_summary}

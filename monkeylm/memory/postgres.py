@@ -24,9 +24,9 @@ from monkeylm.config import (
 
 _baseline_logger = logging.getLogger("monkeylm.baseline")
 if not _baseline_logger.handlers:
-    _baseline_logger.setLevel(logging.INFO)
+    _baseline_logger.setLevel(logging.WARNING)
     _handler = logging.StreamHandler()
-    _handler.setFormatter(logging.Formatter("%(asctime)s [BASELINE] %(message)s"))
+    _handler.setFormatter(logging.Formatter("%(message)s"))
     _baseline_logger.addHandler(_handler)
 
 

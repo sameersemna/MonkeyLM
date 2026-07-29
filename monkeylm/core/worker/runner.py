@@ -108,9 +108,11 @@ async def run_worker(
         wait_for_page_ready,
         launch_context_with_fallback,
         handle_dialog,
+        resilient_page_goto,
         execute_action,
     )
     from monkeylm.models import decide_next_action, apply_state_aware_policy, _break_action_loop, run_application_discovery
+    from monkeylm.models.prompts.discovery import refresh_testing_strategy
     from monkeylm.memory import QdrantMemoryStore
 
     worker_label = f"worker-{worker_id:02d}"
@@ -158,8 +160,15 @@ async def run_worker(
         page.on("console", _console_listener)
         await worker_a11y_checker.inject_init_script(page)
 
-        print(f"\U0001f680 Starting {worker_label} on {settings.target_url} with {allocated_steps} steps...")
-        await with_retry_backoff(f"{worker_label} initial navigation", lambda: page.goto(settings.target_url, wait_until="domcontentloaded", timeout=45000), retries=settings.worker_navigation_retries, initial_delay_seconds=settings.retry_base_delay_seconds)
+        print(f"\U0001f680 Starting {worker_label} on {settings.target_url} ({allocated_steps} steps)")
+        await resilient_page_goto(
+            page,
+            settings.target_url,
+            wait_until="domcontentloaded",
+            timeout=45000,
+            phase=f"{worker_label} initial navigation",
+            max_retries=max(1, settings.worker_navigation_retries),
+        )
         await wait_for_page_ready(page, f"{worker_label}-initial-navigation")
 
         await worker_network_monitor.install(page)
@@ -182,7 +191,7 @@ async def run_worker(
                 break
 
             step = start_step + idx
-            print(f"\n--- {worker_label} step {step}/{settings.max_steps} ---")
+            print(f"\n[{worker_label}] step {step}/{settings.max_steps}")
 
             try:
                 snapshot = await get_page_state(page, step, phase="plan", output_dir=settings.output_dir)
@@ -198,9 +207,10 @@ async def run_worker(
                 visited_states[state_key] = redis_count if redis_count is not None else local_count
                 state = state_to_prompt(snapshot)
             except Exception as exc:
-                print(f"   -> \U0001f6a8 {worker_label} failed to get state: {exc}. Skipping step.")
+                print(f"   -> ⚠️ {worker_label} state capture failed; skipping step.")
                 continue
 
+            testing_strategy = refresh_testing_strategy(testing_strategy, state)
             plan = await decide_next_action(settings, state, memory_store=worker_memory, snapshot=snapshot, testing_strategy=testing_strategy)
             retrieval_telemetry = worker_memory.consume_last_search_telemetry()
 
@@ -380,7 +390,7 @@ async def run_worker(
                             recent_history=recent_state_history,
                             launch_info=launch_info,
                         ))
-                        print(f"⚠️ {worker_label} STALL DETECTED at step {step}: page state unchanged across multiple steps")
+                        print(f"⚠️ {worker_label} stall detected at step {step}")
                         break
             except Exception as stall_exc:
                 _local_service_log(f"{worker_label} stall detection failed: {stall_exc}", settings.output_dir)

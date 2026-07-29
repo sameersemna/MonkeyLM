@@ -506,6 +506,9 @@ def load_settings(cli_args: Optional[argparse.Namespace] = None) -> Settings:
             s.workers = max(1, int(cli_args.workers))
         if getattr(cli_args, "max_steps_per_worker", None) is not None:
             s.max_steps_per_worker = max(1, int(cli_args.max_steps_per_worker))
+
+    if s.max_steps_per_worker > s.max_steps:
+        s.max_steps_per_worker = s.max_steps
         if getattr(cli_args, "worker_navigation_retries", None) is not None:
             s.worker_navigation_retries = max(0, int(cli_args.worker_navigation_retries))
         if getattr(cli_args, "worker_qdrant_init_retries", None) is not None:

@@ -676,6 +676,27 @@ class MonkeyLMTests(unittest.TestCase):
         self.assertIn('"input_payloads": [', prompt)
         self.assertIn(']', prompt)
 
+    def test_build_decision_prompt_includes_discovery_strategy_context(self) -> None:
+        from monkeylm.types import TestingStrategy, PersonaGoal, CriticalFlow
+
+        strategy = TestingStrategy(
+            app_domain="Quran app",
+            primary_personas=[PersonaGoal(name="Reader", description="Reads verses", behaviors=["navigates content"])] ,
+            critical_flows=[CriticalFlow(name="browse_and_search", description="Find content", steps=["browse", "search"])],
+            edge_cases_to_test=["empty search"],
+            security_focus=["input validation"],
+            strategy_summary="Prioritize browsing and searching",
+        )
+        prompt = build_decision_prompt(
+            "Title: Noble Quran\nButtons: Browse, Search",
+            memory_logs=[],
+            testing_strategy=strategy,
+        )
+
+        self.assertIn("Quran app", prompt)
+        self.assertIn("browse_and_search", prompt)
+        self.assertIn("Prioritize browsing and searching", prompt)
+
     def test_qdrant_parse_rerank_response(self) -> None:
         store = QdrantMemoryStore(load_settings())
         parsed = store._parse_rerank_response('{"ranked_indices": [2, 0, 1]}')
@@ -685,6 +706,11 @@ class MonkeyLMTests(unittest.TestCase):
         allocations = allocate_worker_steps(total_steps=10, worker_count=3, per_worker_cap=4)
         self.assertEqual(sum(allocations), 10)
         self.assertTrue(all(count <= 4 for count in allocations))
+
+    def test_load_settings_clamps_worker_cap_to_total_steps(self) -> None:
+        settings = load_settings(argparse.Namespace(max_steps=3, max_steps_per_worker=None))
+        self.assertEqual(settings.max_steps, 3)
+        self.assertEqual(settings.max_steps_per_worker, 3)
 
     def test_validate_runtime_configuration_rejects_invalid_per_worker_cap(self) -> None:
         settings = load_settings()

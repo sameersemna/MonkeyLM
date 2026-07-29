@@ -108,7 +108,10 @@ async def _ollama_chat_with_retry(
     timeout_seconds: float,
     max_retries: int = 3,
 ) -> Optional[ollama.ChatResponse]:
-    print(f"   └─ 🤖 Calling {model} (timeout={timeout_seconds}s, retries={max_retries})")
+    if settings.ollama_model and model != settings.ollama_model:
+        print(f"   └─ 🤖 Calling fallback model {model}")
+    else:
+        print(f"   └─ 🤖 Calling {model}")
 
     base_delay = 1.0
     last_exc: Optional[Exception] = None

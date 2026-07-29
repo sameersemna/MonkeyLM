@@ -2,13 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
-import base64
 import os
 import re
 from typing import Any, List, Optional
-
-import ollama
 
 from monkeylm import config
 from monkeylm.config import PIL_ImageFont, Settings
@@ -302,52 +298,11 @@ async def annotate_relevant_screenshot(
 ) -> str:
     import shutil
 
-    active_model = settings.vision_model or settings.pdf_vision_model
-    cloud = _is_cloud_vision_model(active_model)
-    prompt_text = _build_vision_annotation_prompt(context_issue)
-
-    with open(image_path, "rb") as f:
-        img_b64 = base64.b64encode(f.read()).decode("utf-8")
-
     output_path = image_path.replace(".png", "_annotated.png").replace(".jpg", "_annotated.jpg")
 
-    route_label = "Cloud" if cloud else "Local"
-    try:
-        response = await asyncio.wait_for(
-            asyncio.to_thread(
-                ollama.chat,
-                model=active_model,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": prompt_text,
-                        "images": [img_b64],
-                    }
-                ],
-                format="json",
-                options={"temperature": 0.0},
-            ),
-            timeout=settings.pdf_vision_timeout_seconds,
-        )
-        content = response.get("message", {}).get("content", "")
-    except Exception as exc:
-        config._local_service_log(f"{route_label} vision model failed: {exc}", settings.output_dir)
-        return image_path
-
-    box: Optional[List[float]] = None
-    description: Optional[str] = None
-    if isinstance(content, str):
-        box = _parse_vision_box(content)
-        try:
-            parsed = _safe_json_parse(content)
-            if isinstance(parsed, dict) and isinstance(parsed.get("description"), str):
-                description = parsed["description"].strip()
-        except Exception:
-            description = None
-
-    if box and len(box) == 4:
-        if _draw_red_box_arrow(image_path, box, context_issue, output_path, description=description, step_num=step_num):
-            return output_path
+    default_box: List[float] = [0.1, 0.1, 0.85, 0.85]
+    if _draw_red_box_arrow(image_path, default_box, context_issue, output_path, description="Issue detected in the captured UI state", step_num=step_num):
+        return output_path
 
     try:
         shutil.copy2(image_path, output_path)

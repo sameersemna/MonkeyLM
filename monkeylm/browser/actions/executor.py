@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import hashlib
 import os
 from typing import Any, Dict, List, Optional, Tuple
@@ -112,10 +114,20 @@ async def execute_action(
             if locator is not None:
                 interception = await detect_click_interception(page, locator, target)
                 if interception.get("is_blocked"):
-                    raise RuntimeError(
-                        f"click_intercepted:{interception.get('reason')}|top={interception.get('top_element')}|target={interception.get('target_element')}"
-                    )
-            await _action_click(page, target)
+                    print(f"   -> 🔒 Click intercepted for {target}; falling back to scroll instead of retrying blocked target")
+                    await _action_scroll(page)
+                    log_entry["action"] = "scroll"
+                    log_entry["target"] = ""
+                    log_entry["status"] = "RECOVERED_INTERCEPTION"
+                    log_entry["error"] = None
+                else:
+                    await _action_click(page, target)
+            else:
+                await _action_scroll(page)
+                log_entry["action"] = "scroll"
+                log_entry["target"] = ""
+                log_entry["status"] = "RECOVERED_MISSING_TARGET"
+                log_entry["error"] = None
         elif action == "type":
             await _action_type(page, settings, target, value, action_strategy, input_payloads, step_num, before_snapshot, fuzzer, defects, validation_prober, log_entry)
 
@@ -230,10 +242,25 @@ async def execute_action(
                 active_vision_model = settings.vision_model or settings.pdf_vision_model
                 print(f"   └─ 📸 Annotating screenshot with {active_vision_model}...")
                 original_path = os.path.join(settings.output_dir, log_entry["screenshot"])
-                annotated_path = await annotate_relevant_screenshot(settings, original_path, context_issue, step_num=step_num)
-                if annotated_path != original_path:
-                    log_entry["screenshot"] = os.path.basename(annotated_path)
-                    log_entry["screenshot_annotated"] = True
+                timeout_seconds = min(2.0, max(0.5, float(getattr(settings, "pdf_vision_timeout_seconds", 60.0)) * 0.02))
+                annotation_task = asyncio.create_task(
+                    annotate_relevant_screenshot(settings, original_path, context_issue, step_num=step_num)
+                )
+                try:
+                    annotated_path = await asyncio.wait_for(annotation_task, timeout=timeout_seconds)
+                    if annotated_path != original_path:
+                        log_entry["screenshot"] = os.path.basename(annotated_path)
+                        log_entry["screenshot_annotated"] = True
+                except asyncio.TimeoutError:
+                    annotation_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await annotation_task
+                    _local_service_log(f"Annotation hook timed out at step {step_num}; continuing without annotation.", settings.output_dir)
+                except Exception as exc:
+                    annotation_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await annotation_task
+                    _local_service_log(f"Annotation hook failed at step {step_num}: {exc}", settings.output_dir)
             except Exception as exc:
                 _local_service_log(f"Annotation hook failed at step {step_num}: {exc}", settings.output_dir)
 
