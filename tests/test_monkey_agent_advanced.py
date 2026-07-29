@@ -60,6 +60,7 @@ from monkeylm.browser import (
 from monkeylm.browser.actions.interaction import (
     collect_failure_context,
     detect_click_interception,
+    recover_nonresponsive_state,
 )
 from monkeylm.memory import PersistenceEngine, QdrantMemoryStore
 from monkeylm.reporting import (
@@ -347,12 +348,57 @@ class MonkeyLMTests(unittest.TestCase):
         self.assertEqual(context["step"], 7)
         self.assertEqual(context["last_action"], "click")
         self.assertEqual(context["url"], "https://example.com/")
-        self.assertIn("Continue", context["dom_context"])
+        self.assertIn("Continue", context["compact_dom_snapshot"])
+
+    def test_collect_failure_context_includes_runtime_errors(self) -> None:
+        class DummyPage:
+            def __init__(self) -> None:
+                self.url = "https://example.com/"
+
+            async def content(self) -> str:
+                return "<html><body><button>Continue</button></body></html>"
+
+        context = asyncio.run(
+            collect_failure_context(
+                DummyPage(),
+                step=8,
+                action="click",
+                target="2",
+                error="overlay blocked",
+                runtime_errors=[{"type": "error", "message": "TypeError: failed"}],
+            )
+        )
+        self.assertEqual(context["failure_category"], "page_blocked")
+        self.assertEqual(context["runtime_errors"][0]["message"], "TypeError: failed")
+
+    def test_recover_nonresponsive_state_reports_reload_details(self) -> None:
+        class DummyPage:
+            def __init__(self) -> None:
+                self.url = "https://example.com/"
+                self.reload_calls = 0
+
+            async def reload(self, timeout: int = 0) -> None:
+                self.reload_calls += 1
+                raise RuntimeError("net::ERR_FAILED")
+
+            async def goto(self, *args: Any, **kwargs: Any) -> None:
+                return None
+
+            async def wait_for_load_state(self, *args: Any, **kwargs: Any) -> None:
+                return None
+
+        settings = load_settings()
+        settings._target_url_override = "https://example.com/"
+        recovery = asyncio.run(recover_nonresponsive_state(DummyPage(), settings, step=4, action="click", target="3", error="timed out"))
+        self.assertTrue(recovery["attempted"])
+        self.assertFalse(recovery["success"])
+        self.assertTrue(any("reload_attempt_1" in detail for detail in recovery["details"]))
 
     def test_classify_runtime_failure_detects_sandbox_errors(self) -> None:
-        self.assertEqual(classify_runtime_failure(RuntimeError("sandbox launch failed")), "sandbox")
-        self.assertEqual(classify_runtime_failure(RuntimeError("timed out while waiting for element")), "timeout")
-        self.assertIsNone(classify_runtime_failure(RuntimeError("page crashed")))
+        self.assertEqual(classify_runtime_failure(RuntimeError("sandbox launch failed")), "sandbox_failure")
+        self.assertEqual(classify_runtime_failure(RuntimeError("timed out while waiting for element")), "step_timeout")
+        self.assertEqual(classify_runtime_failure(RuntimeError("overlay blocked by modal")), "page_blocked")
+        self.assertEqual(classify_runtime_failure(RuntimeError("page crashed")), "app_failure")
 
     def test_runtime_failures_are_emitted_in_reports(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

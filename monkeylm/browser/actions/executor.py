@@ -114,14 +114,12 @@ async def execute_action(
             if locator is not None:
                 interception = await detect_click_interception(page, locator, target)
                 if interception.get("is_blocked"):
-                    print(f"   -> 🔒 Click intercepted for {target}; falling back to scroll instead of retrying blocked target")
-                    await _action_scroll(page)
-                    log_entry["action"] = "scroll"
-                    log_entry["target"] = ""
-                    log_entry["status"] = "RECOVERED_INTERCEPTION"
-                    log_entry["error"] = None
-                else:
-                    await _action_click(page, target)
+                    error_msg = f"overlay_blocked:{interception.get('reason', 'overlay_blocked')}"
+                    log_entry["status"] = "FAILED"
+                    log_entry["error"] = error_msg
+                    print(f"   -> 🔒 Click intercepted for {target}; stopping run instead of continuing against a blocked page")
+                    raise RuntimeError(error_msg)
+                await _action_click(page, target)
             else:
                 await _action_scroll(page)
                 log_entry["action"] = "scroll"
@@ -185,7 +183,24 @@ async def execute_action(
         print(f"💥 Error: {error_msg}")
 
         try:
-            failure_context = await collect_failure_context(page, step=step_num, action=action, target=target, error=error_msg)
+            recent_console_errors = []
+            for finding in list(getattr(defects, "console_findings", []) or [])[-6:]:
+                message = finding.get("message") or finding.get("failure_reason") or finding.get("details")
+                if message:
+                    recent_console_errors.append({
+                        "type": sanitize_for_storage(str(finding.get("type") or "console"), max_len=128),
+                        "message": sanitize_for_storage(str(message), max_len=512),
+                    })
+            if not recent_console_errors:
+                recent_console_errors = [{"type": "runtime_error", "message": error_msg}]
+            failure_context = await collect_failure_context(
+                page,
+                step=step_num,
+                action=action,
+                target=target,
+                error=error_msg,
+                runtime_errors=recent_console_errors,
+            )
             log_entry["failure_context"] = failure_context
             defects.add("console_findings", {
                 "step": step_num,

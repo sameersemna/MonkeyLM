@@ -107,7 +107,16 @@ async def detect_click_interception(page: Any, locator: Any, target: Any) -> Dic
     return base_result
 
 
-async def collect_failure_context(page: Any, *, step: int, action: str, target: str, error: str, dom_limit: int = 2000) -> Dict[str, Any]:
+async def collect_failure_context(
+    page: Any,
+    *,
+    step: int,
+    action: str,
+    target: str,
+    error: str,
+    dom_limit: int = 2000,
+    runtime_errors: Optional[list[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
     """Collect an actionable context bundle for diagnosis when a step fails."""
 
     dom_context = ""
@@ -117,13 +126,38 @@ async def collect_failure_context(page: Any, *, step: int, action: str, target: 
     except Exception:
         dom_context = ""
 
+    error_text = str(error or "unknown").lower()
+    if "sandbox" in error_text or "no-sandbox" in error_text or "launch failed" in error_text:
+        failure_category = "sandbox_failure"
+    elif "timeout" in error_text or "timed out" in error_text or "step_timeout" in error_text:
+        failure_category = "step_timeout"
+    elif "overlay" in error_text or "blocked" in error_text or "intercept" in error_text or "modal" in error_text or "frozen" in error_text or "unresponsive" in error_text:
+        failure_category = "page_blocked"
+    elif "crash" in error_text or "crashed" in error_text:
+        failure_category = "app_failure"
+    else:
+        failure_category = "app_failure"
+
+    runtime_error_entries: list[Dict[str, Any]] = []
+    if runtime_errors:
+        for item in runtime_errors:
+            if isinstance(item, dict):
+                runtime_error_entries.append({
+                    "type": sanitize_for_storage(str(item.get("type") or "runtime_error"), max_len=128),
+                    "message": sanitize_for_storage(str(item.get("message") or item.get("error") or ""), max_len=512),
+                })
+
     return {
         "step": step,
         "last_action": sanitize_for_storage(str(action or "unknown"), max_len=128),
         "last_target": sanitize_for_storage(str(target or ""), max_len=256),
         "error": sanitize_for_storage(str(error or "unknown"), max_len=512),
         "url": sanitize_for_storage(getattr(page, "url", "") or "", max_len=2048),
+        "failure_category": failure_category,
+        "failure_source": "harness" if failure_category in {"sandbox_failure", "step_timeout", "page_blocked"} else "app",
+        "compact_dom_snapshot": dom_context,
         "dom_context": dom_context,
+        "runtime_errors": runtime_error_entries,
     }
 
 

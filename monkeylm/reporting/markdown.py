@@ -156,13 +156,25 @@ Actions included: Clicking, Typing, Form Submission, Modal Handling, and State E
     if browser_launch_info.get("worker_failures"):
         md_content += "## Runtime Failures\n"
         for item in browser_launch_info["worker_failures"]:
-            md_content += f"- Worker {item.get('worker_id')}: {item.get('failure_reason')}"
+            md_content += f"- Worker {item.get('worker_id')}: **{item.get('failure_reason')}**"
             if item.get("failure_artifact"):
                 md_content += f" (artifact: `{item['failure_artifact']}`)"
             md_content += "\n"
             ctx = item.get("failure_context") or {}
             if ctx:
-                md_content += f"  - Context: `{json.dumps(ctx, sort_keys=True)}`\n"
+                md_content += f"  - Step: {ctx.get('step', 'n/a')}\n"
+                md_content += f"  - Category: {ctx.get('failure_category', 'n/a')}\n"
+                md_content += f"  - Source: {ctx.get('failure_source', 'n/a')}\n"
+                md_content += f"  - Action: {ctx.get('last_action', 'n/a')}\n"
+                md_content += f"  - Target: {ctx.get('last_target', 'n/a')}\n"
+                md_content += f"  - URL: {ctx.get('url', 'n/a')}\n"
+                if ctx.get("compact_dom_snapshot"):
+                    dom_summary = str(ctx.get("compact_dom_snapshot", ""))[:220]
+                    md_content += f"  - DOM snapshot: {dom_summary}...\n"
+                if ctx.get("runtime_errors"):
+                    runtime_errors = ", ".join(str(entry.get("message", "")) for entry in ctx.get("runtime_errors", []) if entry.get("message"))
+                    md_content += f"  - Runtime errors: {runtime_errors[:400]}\n"
+            md_content += "\n"
         md_content += "\n"
 
     md_content += "## Security Risks\n"

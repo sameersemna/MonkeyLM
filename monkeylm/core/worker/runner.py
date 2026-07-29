@@ -30,7 +30,7 @@ from monkeylm.core.monitor import (
 from monkeylm.types import WorkerRunResult
 
 from .helpers import build_worker_user_data_dir, with_retry_backoff
-from monkeylm.browser.actions.interaction import recover_nonresponsive_state
+from monkeylm.browser.actions.interaction import collect_failure_context, recover_nonresponsive_state
 
 
 async def _execute_step_with_timeout(coro: Any, *, timeout_seconds: float) -> Any:
@@ -42,10 +42,12 @@ def classify_runtime_failure(exc: Exception | None) -> str | None:
         return None
     error_text = str(exc).lower()
     if "sandbox" in error_text or "no-sandbox" in error_text or "launch failed" in error_text:
-        return "sandbox"
-    if "timeout" in error_text or "timed out" in error_text:
-        return "timeout"
-    return None
+        return "sandbox_failure"
+    if "timeout" in error_text or "timed out" in error_text or "step_timeout" in error_text:
+        return "step_timeout"
+    if "overlay" in error_text or "blocked" in error_text or "intercept" in error_text or "modal" in error_text or "frozen" in error_text or "unresponsive" in error_text:
+        return "page_blocked"
+    return "app_failure"
 
 
 def write_failure_debug_artifact(
@@ -261,13 +263,19 @@ async def run_worker(
                 )
             except asyncio.TimeoutError as timeout_exc:
                 failure_reason = "step_timeout"
-                failure_context = {
-                    "step": step,
-                    "action": plan.get("action", ""),
-                    "target": plan.get("target", ""),
+                failure_context = await collect_failure_context(
+                    page,
+                    step=step,
+                    action=plan.get("action", ""),
+                    target=plan.get("target", ""),
+                    error="step_timeout",
+                    runtime_errors=[{"type": "timeout", "message": f"step timeout after {settings.step_timeout_seconds}s"}],
+                )
+                failure_context.update({
                     "timeout_seconds": settings.step_timeout_seconds,
-                    "url": sanitize_for_storage(page.url, max_len=2048),
-                }
+                    "failure_source": "harness",
+                    "failure_category": "step_timeout",
+                })
                 print(f"⏰ {worker_label} step {step} timed out after {settings.step_timeout_seconds}s; stopping run.")
                 await page.screenshot(path=os.path.join(settings.output_dir, f"timeout_step_{step}.png"))
                 failure_artifact = os.path.basename(write_failure_debug_artifact(
@@ -295,18 +303,44 @@ async def run_worker(
                 break
             except Exception as exc:
                 runtime_failure = classify_runtime_failure(exc)
-                if runtime_failure == "sandbox":
-                    failure_reason = "sandbox"
-                    failure_context = {"step": step, "error": str(exc), "url": sanitize_for_storage(page.url, max_len=2048)}
+                if runtime_failure:
+                    failure_reason = runtime_failure
+                    failure_context = await collect_failure_context(
+                        page,
+                        step=step,
+                        action=plan.get("action", ""),
+                        target=plan.get("target", ""),
+                        error=str(exc),
+                        runtime_errors=[{"type": "runtime_error", "message": str(exc)}],
+                    )
+                    failure_context.update({
+                        "failure_source": "harness" if runtime_failure in {"sandbox_failure", "step_timeout", "page_blocked"} else "app",
+                        "failure_category": runtime_failure,
+                    })
                     failure_artifact = os.path.basename(write_failure_debug_artifact(
                         settings,
                         step=step,
-                        failure_reason="sandbox",
+                        failure_reason=runtime_failure,
                         failure_context=failure_context,
                         recent_history=recent_state_history,
                         launch_info=launch_info,
                     ))
-                    print(f"🧱 {worker_label} sandbox failure at step {step}: {exc}")
+                    print(f"🧱 {worker_label} runtime failure [{runtime_failure}] at step {step}: {exc}")
+                    try:
+                        if runtime_failure in {"step_timeout", "page_blocked"}:
+                            recovery = await recover_nonresponsive_state(page, settings, step=step, action=plan.get("action", ""), target=plan.get("target", ""), error=str(exc), reason=runtime_failure)
+                            failure_context["recovery"] = recovery
+                    except Exception:
+                        pass
+                    worker_defects.add("console_findings", {
+                        "step": step,
+                        "type": f"runtime-failure:{runtime_failure}",
+                        "failure_reason": runtime_failure,
+                        "url": sanitize_for_storage(page.url, max_len=2048),
+                        "selector": sanitize_for_storage(plan.get("target", "") or "(none)", max_len=256),
+                        "remediation_advice": "Inspect the failure artifact and the compact DOM snapshot to determine whether the app is blocked or the harness timed out.",
+                        "recovery": sanitize_for_storage(json.dumps(failure_context.get("recovery", {}), sort_keys=True)[:2000], max_len=2000),
+                    })
                     break
                 raise
 
@@ -369,24 +403,27 @@ async def run_worker(
                     stall_finding = worker_stall_detector.check_for_stall(step, plan.get("action", "scroll"))
                     if stall_finding:
                         failure_reason = stall_finding.get("reason", "stuck_state_detected")
-                        failure_context = {
-                            "step": step,
-                            "action": plan.get("action", ""),
-                            "target": plan.get("target", ""),
+                        failure_context = await collect_failure_context(
+                            page,
+                            step=step,
+                            action=plan.get("action", ""),
+                            target=plan.get("target", ""),
+                            error=f"stuck_state_detected:{post_snapshot.dom_hash}",
+                            runtime_errors=[{"type": "stall", "message": "page state stopped changing"}],
+                        )
+                        failure_context.update({
                             "url": sanitize_for_storage(post_snapshot.url, max_len=2048),
                             "dom_hash": post_snapshot.dom_hash,
                             "threshold": settings.stuck_state_threshold,
-                        }
+                            "failure_source": "app",
+                            "failure_category": failure_reason,
+                            "stall_window_steps": [entry.get("step") for entry in stall_finding.get("stall_window_steps", [])],
+                        })
                         failure_artifact = os.path.basename(write_failure_debug_artifact(
                             settings,
                             step=step,
                             failure_reason=failure_reason,
-                            failure_context={
-                                **failure_context,
-                                "stall_window_steps": [entry.get("step") for entry in stall_finding.get("stall_window_steps", [])],
-                                "url": sanitize_for_storage(post_snapshot.url, max_len=2048),
-                                "dom_hash": post_snapshot.dom_hash,
-                            },
+                            failure_context=failure_context,
                             recent_history=recent_state_history,
                             launch_info=launch_info,
                         ))
