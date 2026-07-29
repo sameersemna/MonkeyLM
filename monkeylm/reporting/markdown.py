@@ -30,6 +30,8 @@ def generate_markdown_report(
     browser_launch_info: Dict[str, Any],
     start_time: datetime,
     end_time: datetime,
+    *,
+    discovery_strategy: Any = None,
 ) -> None:
     """Generate test_report.md in the output directory."""
     duration_seconds = (end_time - start_time).total_seconds()
@@ -93,6 +95,25 @@ def generate_markdown_report(
 The agent performed {total_steps} actions using **{settings.ollama_model}**.
 Actions included: Clicking, Typing, Form Submission, Modal Handling, and State Escapes.
 """
+
+    if discovery_strategy is not None:
+        md_content += "\n## Application Discovery\n"
+        md_content += f"- **Domain:** {discovery_strategy.app_domain}\n"
+        md_content += f"- **Strategy Summary:** {discovery_strategy.strategy_summary}\n"
+        md_content += "- **Primary Personas:**\n"
+        for persona in discovery_strategy.primary_personas:
+            md_content += f"  - {persona.name}: {persona.description}"
+            if persona.behaviors:
+                md_content += f" ({', '.join(persona.behaviors)})"
+            md_content += "\n"
+        md_content += "- **Critical Flows:**\n"
+        for flow in discovery_strategy.critical_flows:
+            md_content += f"  - {flow.name}: {flow.description}\n"
+            if flow.steps:
+                md_content += "    - Steps: " + "; ".join(flow.steps) + "\n"
+        md_content += "- **Edge Cases:** " + "; ".join(discovery_strategy.edge_cases_to_test[:5]) + "\n"
+        md_content += "- **Security Focus:** " + "; ".join(discovery_strategy.security_focus[:5]) + "\n"
+        md_content += "\n"
 
     if failed_steps_list:
         md_content += "\n## Errors Detected\n"

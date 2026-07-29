@@ -203,6 +203,7 @@ class WorkerRunResult:
     failure_reason: Optional[str] = None
     failure_artifact: Optional[str] = None
     failure_context: Optional[Dict[str, Any]] = None
+    discovery_strategy: Optional[Any] = None
 
 
 # ── Defect ticket ─────────────────────────────────────────────────────────────

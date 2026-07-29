@@ -102,6 +102,7 @@ async def main(settings: Settings) -> None:
     merged_network_events: List[Dict[str, Any]] = []
     worker_launches: List[Dict[str, Any]] = []
     worker_completion: List[Dict[str, Any]] = []
+    discovery_strategy: Any | None = None
 
     for result in worker_results:
         if isinstance(result, BaseException):
@@ -111,6 +112,8 @@ async def main(settings: Settings) -> None:
         merged_logs.extend(result.logs)
         merged_network_events.extend(result.network_injections)
         worker_launches.append(result.launch_info)
+        if discovery_strategy is None and getattr(result, "discovery_strategy", None) is not None:
+            discovery_strategy = result.discovery_strategy
         worker_completion.append(
             {
                 "worker_id": result.worker_id,
@@ -143,7 +146,7 @@ async def main(settings: Settings) -> None:
 
     end_time = datetime.now()
 
-    generate_markdown_report(settings, merged_defects, merged_logs, browser_launch_info, start_time, end_time)
+    generate_markdown_report(settings, merged_defects, merged_logs, browser_launch_info, start_time, end_time, discovery_strategy=discovery_strategy)
     generate_json_summary(settings, merged_defects, merged_logs, browser_launch_info, [], GRACEFUL_SHUTDOWN_REQUESTED, start_time, end_time)
     try:
         if getattr(merged_defects, "accessibility_violations", None):
@@ -152,4 +155,4 @@ async def main(settings: Settings) -> None:
     except Exception as exc:
         print(f"⚠️ HTML accessibility report generation failed: {exc}")
     if settings.pdf_generate:
-        generate_pdf_report(settings, merged_defects, merged_logs, start_time, end_time)
+        generate_pdf_report(settings, merged_defects, merged_logs, start_time, end_time, discovery_strategy=discovery_strategy)

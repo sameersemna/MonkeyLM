@@ -67,9 +67,11 @@ from monkeylm.memory import PersistenceEngine, QdrantMemoryStore
 from monkeylm.reporting import (
     generate_json_summary,
     generate_markdown_report,
+    generate_pdf_report,
     summarize_vibe_coding_accountability,
 )
 from monkeylm.reporting.json_report import generate_json_summary as generate_json_summary_direct
+from monkeylm.types import CriticalFlow, PersonaGoal, TestingStrategy
 
 
 class MonkeyLMTests(unittest.TestCase):
@@ -341,6 +343,59 @@ class MonkeyLMTests(unittest.TestCase):
             self.assertEqual(payload["failure_reason"], "step_timeout")
             self.assertEqual(payload["recent_history"][0]["action"], "scroll")
             self.assertEqual(payload["recent_history"][1]["dom_hash"], "hash-b")
+
+    def test_markdown_report_includes_application_discovery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            settings = load_settings()
+            settings._output_dir_override = tmp_dir
+            strategy = TestingStrategy(
+                app_domain="Onboarding process",
+                primary_personas=[PersonaGoal(name="New user", description="Starts registration", behaviors=["completes form"] )],
+                critical_flows=[CriticalFlow(name="Registration", description="Complete onboarding", steps=["open form", "submit"] )],
+                edge_cases_to_test=["empty form"],
+                security_focus=["input validation"],
+                strategy_summary="Start with onboarding flow validation.",
+            )
+            generate_markdown_report(
+                settings,
+                DefectTracker(),
+                [{"step": 1, "status": "SUCCESS", "action": "scroll", "target": "", "error": "", "screenshot": ""}],
+                {},
+                datetime.now(),
+                datetime.now(),
+                discovery_strategy=strategy,
+            )
+            report_path = os.path.join(tmp_dir, "test_report.md")
+            self.assertTrue(os.path.exists(report_path))
+            with open(report_path, "r", encoding="utf-8") as handle:
+                report_text = handle.read()
+            self.assertIn("Application Discovery", report_text)
+            self.assertIn("Onboarding process", report_text)
+            self.assertIn("Start with onboarding flow validation.", report_text)
+
+    def test_pdf_report_includes_application_discovery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            settings = load_settings()
+            settings._output_dir_override = tmp_dir
+            settings.pdf_generate = True
+            strategy = TestingStrategy(
+                app_domain="Onboarding process",
+                primary_personas=[PersonaGoal(name="New user", description="Starts registration", behaviors=["completes form"] )],
+                critical_flows=[CriticalFlow(name="Registration", description="Complete onboarding", steps=["open form", "submit"] )],
+                edge_cases_to_test=["empty form"],
+                security_focus=["input validation"],
+                strategy_summary="Start with onboarding flow validation.",
+            )
+            generate_pdf_report(
+                settings,
+                DefectTracker(),
+                [{"step": 1, "status": "SUCCESS", "action": "scroll", "target": "", "error": "", "screenshot": ""}],
+                datetime.now(),
+                datetime.now(),
+                discovery_strategy=strategy,
+            )
+            report_path = os.path.join(tmp_dir, "test_execution_audit.pdf")
+            self.assertTrue(os.path.exists(report_path))
 
     def test_detect_click_interception_detects_overlay_blocking(self) -> None:
         class DummyLocator:

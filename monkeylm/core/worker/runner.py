@@ -142,6 +142,7 @@ async def run_worker(
     failure_reason: str | None = None
     failure_artifact: str | None = None
     failure_context: Dict[str, Any] | None = None
+    discovery_strategy: Any | None = None
 
     loop_detection_state: Dict[str, Any] = {"blacklist": {}, "loop_count": 0, "recent_actions": []}
     worker_data_dir = build_worker_user_data_dir(settings, worker_id)
@@ -463,4 +464,5 @@ async def run_worker(
         failure_reason=failure_reason,
         failure_artifact=failure_artifact,
         failure_context=failure_context,
+        discovery_strategy=testing_strategy,
     )

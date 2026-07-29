@@ -37,6 +37,8 @@ def generate_pdf_report(
     test_logs: List[Dict[str, Any]],
     start_time: datetime,
     end_time: datetime,
+    *,
+    discovery_strategy: Any = None,
 ) -> None:
     """Build a sleek executive PDF audit report using ReportLab."""
     if not settings.pdf_generate:
@@ -149,6 +151,27 @@ def generate_pdf_report(
         )
         story.append(llm_table)
         story.append(Spacer(1, 0.3 * inch))
+
+        if discovery_strategy is not None:
+            story.append(Paragraph("Application Discovery", styles["Heading2"]))
+            story.append(Spacer(1, 0.05 * inch))
+            story.append(Paragraph(f"<b>Domain:</b> {_xml_escape(discovery_strategy.app_domain)}", styles["BodyText"]))
+            story.append(Paragraph(f"<b>Strategy Summary:</b> {_xml_escape(discovery_strategy.strategy_summary)}", styles["BodyText"]))
+            for persona in discovery_strategy.primary_personas:
+                persona_text = f"{persona.name}: {persona.description}"
+                if persona.behaviors:
+                    persona_text += f" ({', '.join(persona.behaviors)})"
+                story.append(Paragraph(f"• {_xml_escape(persona_text)}", styles["BodyText"]))
+            for flow in discovery_strategy.critical_flows:
+                flow_text = f"{flow.name}: {flow.description}"
+                if flow.steps:
+                    flow_text += f" — Steps: {'; '.join(flow.steps)}"
+                story.append(Paragraph(f"• {_xml_escape(flow_text)}", styles["BodyText"]))
+            if discovery_strategy.edge_cases_to_test:
+                story.append(Paragraph(f"<b>Edge Cases:</b> {_xml_escape('; '.join(discovery_strategy.edge_cases_to_test[:5]))}", styles["BodyText"]))
+            if discovery_strategy.security_focus:
+                story.append(Paragraph(f"<b>Security Focus:</b> {_xml_escape('; '.join(discovery_strategy.security_focus[:5]))}", styles["BodyText"]))
+            story.append(Spacer(1, 0.15 * inch))
 
         card_width = 7.8 * inch
 
