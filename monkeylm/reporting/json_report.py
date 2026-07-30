@@ -30,6 +30,8 @@ def generate_json_summary(
     graceful_shutdown_requested: bool,
     start_time: datetime,
     end_time: datetime,
+    *,
+    discovery_strategy: Any = None,
 ) -> None:
     """Write results.json with full run data."""
     semantic_memory_telemetry = summarize_semantic_memory_telemetry(test_logs)
@@ -89,6 +91,28 @@ def generate_json_summary(
             "capture_diagnostics": getattr(defects, "capture_diagnostics", []),
         },
         "compiled_defect_tickets": [t.to_dict() for t in _compile_defect_tickets(defects, test_logs)],
+        "application_discovery": {
+            "app_domain": getattr(discovery_strategy, "app_domain", None),
+            "strategy_summary": getattr(discovery_strategy, "strategy_summary", None),
+            "primary_personas": [
+                {
+                    "name": getattr(persona, "name", None),
+                    "description": getattr(persona, "description", None),
+                    "behaviors": list(getattr(persona, "behaviors", []) or []),
+                }
+                for persona in getattr(discovery_strategy, "primary_personas", []) or []
+            ],
+            "critical_flows": [
+                {
+                    "name": getattr(flow, "name", None),
+                    "description": getattr(flow, "description", None),
+                    "steps": list(getattr(flow, "steps", []) or []),
+                }
+                for flow in getattr(discovery_strategy, "critical_flows", []) or []
+            ],
+            "edge_cases_to_test": list(getattr(discovery_strategy, "edge_cases_to_test", []) or []),
+            "security_focus": list(getattr(discovery_strategy, "security_focus", []) or []),
+        } if discovery_strategy is not None else None,
         "network_injections": network_injections,
         "semantic_memory_telemetry": semantic_memory_telemetry,
         "vibe_coding_accountability": accountability,

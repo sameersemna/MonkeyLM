@@ -147,7 +147,7 @@ async def main(settings: Settings) -> None:
     end_time = datetime.now()
 
     generate_markdown_report(settings, merged_defects, merged_logs, browser_launch_info, start_time, end_time, discovery_strategy=discovery_strategy)
-    generate_json_summary(settings, merged_defects, merged_logs, browser_launch_info, [], GRACEFUL_SHUTDOWN_REQUESTED, start_time, end_time)
+    generate_json_summary(settings, merged_defects, merged_logs, browser_launch_info, [], GRACEFUL_SHUTDOWN_REQUESTED, start_time, end_time, discovery_strategy=discovery_strategy)
     try:
         if getattr(merged_defects, "accessibility_violations", None):
             from monkeylm.reporting import generate_interactive_html_report
