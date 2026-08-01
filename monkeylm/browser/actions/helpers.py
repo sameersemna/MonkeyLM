@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import Any, List, Optional, Tuple
 
@@ -71,6 +72,113 @@ async def _resolve_interaction_mode(locator: Any) -> str:
             return "unsupported"
         return "text_input"
     return "unsupported"
+
+
+async def _fill_input_resilient(
+    page: Page,
+    locator: Any,
+    value: str,
+    *,
+    target: str = "",
+    timeout_ms: int = 3000,
+    attempts: int = 2,
+) -> bool:
+    """Fill a form control without letting transient visibility issues consume the whole step."""
+    if locator is None:
+        return False
+
+    wait_timeout_ms = max(250, min(1000, timeout_ms // 2))
+    max_attempts = max(1, attempts)
+    last_error: Exception | None = None
+
+    for attempt in range(max_attempts):
+        try:
+            await locator.scroll_into_view_if_needed(timeout=wait_timeout_ms)
+        except Exception:
+            pass
+        try:
+            await locator.wait_for(state="visible", timeout=wait_timeout_ms)
+        except Exception:
+            pass
+        try:
+            await locator.fill(str(value), timeout=timeout_ms)
+            return True
+        except Exception as exc:  # pragma: no cover - defensive fallback
+            last_error = exc
+            if attempt < max_attempts - 1:
+                await asyncio.sleep(0.1)
+                continue
+            break
+
+    try:
+        await locator.evaluate(
+            """
+            (el, payload) => {
+                if (!el) return false;
+                if (el.disabled) return false;
+                if (el.readOnly) return false;
+                el.focus();
+                el.value = payload;
+                el.setAttribute('value', payload);
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+                return true;
+            }
+            """,
+            str(value),
+        )
+        return True
+    except Exception:
+        return False
+
+
+async def _click_element_resilient(
+    page: Page,
+    locator: Any,
+    *,
+    target: str = "",
+    timeout_ms: int = 2000,
+    attempts: int = 2,
+) -> bool:
+    """Click a target without letting transient visibility issues consume the whole step."""
+    if locator is None:
+        return False
+
+    wait_timeout_ms = max(250, min(1000, timeout_ms // 2))
+    max_attempts = max(1, attempts)
+
+    for attempt in range(max_attempts):
+        try:
+            await locator.scroll_into_view_if_needed(timeout=wait_timeout_ms)
+        except Exception:
+            pass
+        try:
+            await locator.wait_for(state="visible", timeout=wait_timeout_ms)
+        except Exception:
+            pass
+        try:
+            await locator.click(timeout=timeout_ms)
+            return True
+        except Exception:
+            if attempt < max_attempts - 1:
+                await asyncio.sleep(0.1)
+                continue
+            break
+
+    try:
+        await locator.evaluate(
+            """
+            (el) => {
+                if (!el) return false;
+                if (el.disabled) return false;
+                el.click();
+                return true;
+            }
+            """
+        )
+        return True
+    except Exception:
+        return False
 
 
 async def _fill_select_option(

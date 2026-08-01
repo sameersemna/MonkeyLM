@@ -12,7 +12,15 @@ from monkeylm.config import _local_service_log
 from monkeylm.browser.lifecycle import resilient_page_goto, wait_for_page_ready
 from monkeylm.types import PageSnapshot
 
-from .helpers import _extract_target_id, _locator_for_target_id, _resolve_interaction_mode, _fill_select_option, _resolve_form_boundary
+from .helpers import (
+    _click_element_resilient,
+    _extract_target_id,
+    _fill_input_resilient,
+    _fill_select_option,
+    _locator_for_target_id,
+    _resolve_form_boundary,
+    _resolve_interaction_mode,
+)
 
 
 async def _action_scroll(page: Page) -> None:
@@ -94,28 +102,32 @@ async def _action_submit_form(page: Page, settings: Any, target: str, input_payl
                         control_options = control.options
                 try:
                     if mode == "text_input":
-                        await locator.fill(payload_value)
-                        filled_payloads.append({"target": payload_target, "value": payload_value[:120], "reason": payload_reason})
-                        if validation_prober and validation_prober.should_probe():
-                            try:
-                                control_type = await locator.evaluate("el => el.type || 'text'")
-                                probe_findings = await validation_prober.probe_field(page, locator, control_type, step_num, f"submit_form:{payload_target}", payload_target)
-                                if probe_findings:
-                                    print(f"   ⚠️ Validation probe found {len(probe_findings)} issue(s) on form field '{payload_target}'")
-                            except Exception:
-                                pass
+                        filled = await _fill_input_resilient(page, locator, payload_value, target=payload_target, timeout_ms=2200)
+                        if filled:
+                            filled_payloads.append({"target": payload_target, "value": payload_value[:120], "reason": payload_reason})
+                            if validation_prober and validation_prober.should_probe():
+                                try:
+                                    control_type = await locator.evaluate("el => el.type || 'text'")
+                                    probe_findings = await validation_prober.probe_field(page, locator, control_type, step_num, f"submit_form:{payload_target}", payload_target)
+                                    if probe_findings:
+                                        print(f"   ⚠️ Validation probe found {len(probe_findings)} issue(s) on form field '{payload_target}'")
+                                except Exception:
+                                    pass
+                        else:
+                            _local_service_log(f"Step {step_num}: unable to mutate {payload_target} with guarded fill")
                     elif mode == "select":
                         chosen, reason = await _fill_select_option(page, locator, payload_value, control_options, action_strategy)
                         filled_payloads.append({"target": payload_target, "value": chosen[:120], "reason": reason})
                     elif mode == "checkbox_radio":
-                        await locator.check()
+                        await locator.check(timeout=2200)
                         filled_payloads.append({"target": payload_target, "value": "checked", "reason": payload_reason or "happy_checkbox_radio_check"})
                 except Exception as fill_exc:
                     _local_service_log(f"Step {step_num}: failed to mutate {payload_target}: {fill_exc}")
         log_entry["input_payloads"] = filled_payloads
         submit_btn = form_locator.locator("button[type='submit'], input[type='submit']").first
         if await submit_btn.count() > 0:
-            await submit_btn.click(timeout=3000)
+            if not await _click_element_resilient(page, submit_btn, target=target, timeout_ms=2200):
+                _local_service_log(f"Step {step_num}: submit button for '{target}' could not be clicked reliably")
         else:
             inputs = form_locator.locator("input:visible, textarea:visible")
             if await inputs.count() > 0:
@@ -178,22 +190,27 @@ async def _action_type(page: Page, settings: Any, target: str, value: str, actio
             log_entry["value"] = chosen[:120]
             log_entry["input_payloads"] = [{"target": target, "value": chosen[:120], "reason": reason}]
         elif mode == "checkbox_radio":
-            await locator.check()
+            await locator.check(timeout=2200)
             log_entry["value"] = "checked"
             log_entry["input_payloads"] = [{"target": target, "value": "checked", "reason": payload_reason or "happy_checkbox_radio_check"}]
         else:
-            await locator.fill(payload)
-            log_entry["value"] = payload[:120]
-            log_entry["input_payloads"] = [{"target": target, "value": payload[:120], "reason": payload_reason or "fallback_fuzzer"}]
-            if any(marker in payload.lower() for marker in ["<script", "onerror", " or 1=1", "drop table"]):
-                defects.add("security_risks", {"step": step_num, "type": "fuzz-payload-injected", "target": sanitize_for_storage(str(target), max_len=256), "payload_preview": sanitize_for_storage(payload[:200], max_len=256), "url": sanitize_for_storage(page.url, max_len=1024)})
-            if validation_prober and validation_prober.should_probe():
-                try:
-                    control_type = await locator.evaluate("el => el.type || (el.tagName === 'TEXTAREA' ? 'textarea' : '')")
-                    probe_findings = await validation_prober.probe_field(page, locator, control_type or "text", step_num, f"{action}:{target}", target)
-                    if probe_findings:
-                        print(f"   ⚠️ Validation probe found {len(probe_findings)} issue(s) on '{target}'")
-                except Exception as probe_exc:
-                    _local_service_log(f"Step {step_num}: validation probe failed for '{target}': {probe_exc}")
+            filled = await _fill_input_resilient(page, locator, payload, target=target, timeout_ms=2200)
+            if filled:
+                log_entry["value"] = payload[:120]
+                log_entry["input_payloads"] = [{"target": target, "value": payload[:120], "reason": payload_reason or "fallback_fuzzer"}]
+                if any(marker in payload.lower() for marker in ["<script", "onerror", " or 1=1", "drop table"]):
+                    defects.add("security_risks", {"step": step_num, "type": "fuzz-payload-injected", "target": sanitize_for_storage(str(target), max_len=256), "payload_preview": sanitize_for_storage(payload[:200], max_len=256), "url": sanitize_for_storage(page.url, max_len=1024)})
+                if validation_prober and validation_prober.should_probe():
+                    try:
+                        control_type = await locator.evaluate("el => el.type || (el.tagName === 'TEXTAREA' ? 'textarea' : '')")
+                        probe_findings = await validation_prober.probe_field(page, locator, control_type or "text", step_num, f"{action}:{target}", target)
+                        if probe_findings:
+                            print(f"   ⚠️ Validation probe found {len(probe_findings)} issue(s) on '{target}'")
+                    except Exception as probe_exc:
+                        _local_service_log(f"Step {step_num}: validation probe failed for '{target}': {probe_exc}")
+            else:
+                log_entry["status"] = "PARTIAL_SUCCESS"
+                log_entry["error"] = f"input_fill_failed:{target}"
+                _local_service_log(f"Step {step_num}: unable to fill target '{target}' reliably")
     else:
         raise Exception(f"Input or selectable target '{target}' not found")

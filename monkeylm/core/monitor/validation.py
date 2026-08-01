@@ -8,6 +8,8 @@ from typing import Any, Dict, List
 
 from playwright.async_api import Page
 
+from monkeylm.browser.actions.helpers import _click_element_resilient, _fill_input_resilient
+
 from .defects import DefectTracker
 
 
@@ -82,9 +84,9 @@ class ValidationProber:
 
         try:
             if control_type in ("checkbox",):
-                await locator.click(timeout=2000)
+                await _click_element_resilient(page, locator, target=target_id, timeout_ms=2000)
             else:
-                await locator.fill(probe["value"][:1000], timeout=3000)
+                await _fill_input_resilient(page, locator, probe["value"][:1000], target=target_id, timeout_ms=2000)
         except Exception:
             return findings
 
