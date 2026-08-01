@@ -112,6 +112,7 @@ async def run_worker(
         handle_dialog,
         resilient_page_goto,
         execute_action,
+        attempt_login_with_target_credentials,
     )
     from monkeylm.models import decide_next_action, apply_state_aware_policy, _break_action_loop, run_application_discovery
     from monkeylm.models.prompts.discovery import refresh_testing_strategy
@@ -173,6 +174,17 @@ async def run_worker(
             max_retries=max(1, settings.worker_navigation_retries),
         )
         await wait_for_page_ready(page, f"{worker_label}-initial-navigation")
+
+        if settings.target_username or settings.target_password:
+            login_snapshot = await get_page_state(page, -1, phase="auth", output_dir=settings.output_dir)
+            login_attempted = await attempt_login_with_target_credentials(
+                page,
+                settings,
+                snapshot=login_snapshot,
+                worker_label=worker_label,
+            )
+            if login_attempted:
+                await wait_for_page_ready(page, f"{worker_label}-post-auth")
 
         await worker_network_monitor.install(page)
         await worker_perf_monitor.install(page)

@@ -103,6 +103,8 @@ except Exception:
 # ── Default constants ──────────────────────────────────────────────────────────
 
 DEFAULT_TARGET_URL = "https://noblequran-85hu2yge.manus.space/"
+DEFAULT_TARGET_USERNAME = ""
+DEFAULT_TARGET_PASSWORD = ""
 DEFAULT_OLLAMA_MODEL = "minimax-m3:cloud"
 DEFAULT_OLLAMA_TIMEOUT_SECONDS = 15.0
 DEFAULT_MAX_STEPS = 10
@@ -255,6 +257,8 @@ def _normalize_window_size(raw: str, fallback: str = DEFAULT_WINDOW_SIZE) -> str
 def parse_cli_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Advanced monkey testing agent")
     parser.add_argument("--target-url", help="Target URL to test")
+    parser.add_argument("--target-username", help="Username to use when the target site requires sign-in")
+    parser.add_argument("--target-password", help="Password to use when the target site requires sign-in")
     parser.add_argument("--ollama-model", help="Ollama model name to use")
     parser.add_argument(
         "--vision-model",
@@ -421,6 +425,8 @@ def load_settings(cli_args: Optional[argparse.Namespace] = None) -> Settings:
 
     raw_target: str = env_vars.get("TARGET_URL") or os.getenv("TARGET_URL") or s.target_url
     s.target_url = raw_target
+    s.target_username = _env_str("TARGET_USERNAME", env_vars.get("TARGET_USERNAME") or s.target_username)
+    s.target_password = _env_str("TARGET_PASSWORD", env_vars.get("TARGET_PASSWORD") or s.target_password)
     raw_ollama: str = env_vars.get("OLLAMA_MODEL") or os.getenv("OLLAMA_MODEL") or s.ollama_model
     s.ollama_model = raw_ollama
     ollama_timeout = _env_float("OLLAMA_TIMEOUT_SECONDS", s.ollama_timeout_seconds)
@@ -494,6 +500,10 @@ def load_settings(cli_args: Optional[argparse.Namespace] = None) -> Settings:
     if cli_args is not None:
         if getattr(cli_args, "target_url", None):
             s.target_url = cli_args.target_url
+        if getattr(cli_args, "target_username", None):
+            s.target_username = cli_args.target_username.strip()
+        if getattr(cli_args, "target_password", None):
+            s.target_password = cli_args.target_password.strip()
         if getattr(cli_args, "ollama_model", None):
             s.ollama_model = cli_args.ollama_model
         if getattr(cli_args, "vision_model", None):
@@ -891,6 +901,8 @@ _logger = _logging.getLogger("monkeylm.config")
 
 ACTIVE_SEED: Optional[str] = None
 TARGET_URL: str = DEFAULT_TARGET_URL
+TARGET_USERNAME: str = DEFAULT_TARGET_USERNAME
+TARGET_PASSWORD: str = DEFAULT_TARGET_PASSWORD
 OLLAMA_MODEL: str = DEFAULT_OLLAMA_MODEL
 OLLAMA_TIMEOUT_SECONDS: float = DEFAULT_OLLAMA_TIMEOUT_SECONDS
 VISION_MODEL: str = DEFAULT_VISION_MODEL
@@ -927,6 +939,8 @@ RUN_USER_DATA_DIR: str = f"playwright_user_data/session_{datetime.now().strftime
 
 _RUNTIME_GLOBAL_SCHEMA: Dict[str, Any] = {
     "TARGET_URL": str,
+    "TARGET_USERNAME": str,
+    "TARGET_PASSWORD": str,
     "OLLAMA_MODEL": str,
     "OLLAMA_TIMEOUT_SECONDS": (int, float),
     "VISION_MODEL": str,
@@ -1015,6 +1029,8 @@ def apply_runtime_overrides(args: argparse.Namespace) -> None:
 
     _SIMPLE_OVERRIDES: List[tuple] = [
         ("target_url", "TARGET_URL"),
+        ("target_username", "TARGET_USERNAME"),
+        ("target_password", "TARGET_PASSWORD"),
         ("ollama_model", "OLLAMA_MODEL"),
         ("ollama_timeout_seconds", "OLLAMA_TIMEOUT_SECONDS"),
         ("vision_model", "VISION_MODEL"),
@@ -1083,6 +1099,8 @@ __all__ = [
     "httpx",
     "_REPORTLAB_AVAILABLE",
     "DEFAULT_TARGET_URL",
+    "DEFAULT_TARGET_USERNAME",
+    "DEFAULT_TARGET_PASSWORD",
     "DEFAULT_OLLAMA_MODEL",
     "DEFAULT_OLLAMA_TIMEOUT_SECONDS",
     "DEFAULT_MAX_STEPS",
@@ -1151,6 +1169,8 @@ __all__ = [
     "DefectTicket",
     "ACTIVE_SEED",
     "TARGET_URL",
+    "TARGET_USERNAME",
+    "TARGET_PASSWORD",
     "OLLAMA_MODEL",
     "OLLAMA_TIMEOUT_SECONDS",
     "VISION_MODEL",

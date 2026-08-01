@@ -6,7 +6,10 @@ import asyncio
 import re
 from typing import Any, List, Optional, Tuple
 
-from playwright.async_api import Page
+try:
+    from playwright.async_api import Page
+except Exception:  # pragma: no cover - optional dependency path
+    Page = Any  # type: ignore[misc]
 
 from monkeylm.browser.snapshot.selectors import INTERACTIVE_ELEMENTS_SELECTOR
 

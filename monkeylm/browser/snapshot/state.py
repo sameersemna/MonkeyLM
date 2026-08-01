@@ -6,7 +6,10 @@ import re
 import time
 from typing import Any, Dict
 
-from playwright.async_api import Page
+try:
+    from playwright.async_api import Page
+except Exception:  # pragma: no cover - optional dependency path
+    Page = Any  # type: ignore[misc]
 
 from .dom import capture_dom_and_layout
 from monkeylm.types import PageSnapshot, FormControlRecord, FormRecord

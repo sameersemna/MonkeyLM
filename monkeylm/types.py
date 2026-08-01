@@ -55,6 +55,8 @@ class Settings:
     """Single source of truth for all MonkeyLM runtime configuration."""
 
     target_url: str = "https://noblequran-85hu2yge.manus.space/"
+    target_username: str = ""
+    target_password: str = ""
     ollama_model: str = "minimax-m3:cloud"
     ollama_timeout_seconds: float = 15.0
     vision_model: str = "gemini-3-flash-preview"
