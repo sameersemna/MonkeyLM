@@ -13,7 +13,7 @@ Package structure:
     monkeylm/resources/    – Bundled third-party assets (axe-core)
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     from monkeylm.interfaces import IBrowserProvider, IMemoryStore, IModelClient, IReportGenerator
@@ -151,11 +151,21 @@ except Exception:
     MAX_ALLOWED_RETRY_BASE_DELAY_SECONDS = 10.0
     SHUTDOWN_EVENT = None
     GRACEFUL_SHUTDOWN_REQUESTED = False
-    is_in_scope = lambda *args, **kwargs: False
-    normalize_action_plan = lambda *args, **kwargs: {}
-    split_domain_and_route = lambda *args, **kwargs: ("", "/")
-    build_redis_key = lambda *args, **kwargs: ""
-    inspect_optional_runtime_dependencies = lambda *args, **kwargs: {}
+
+    def is_in_scope(*args: Any, **kwargs: Any) -> bool:
+        return False
+
+    def normalize_action_plan(*args: Any, **kwargs: Any) -> Dict[str, Any]:
+        return {}
+
+    def split_domain_and_route(*args: Any, **kwargs: Any) -> Tuple[str, str]:
+        return ("", "/")
+
+    def build_redis_key(*args: Any, **kwargs: Any) -> str:
+        return ""
+
+    def inspect_optional_runtime_dependencies(*args: Any, **kwargs: Any) -> Dict[str, Any]:
+        return {}
 
 try:
     from monkeylm.core import (

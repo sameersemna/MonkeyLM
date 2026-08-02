@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import json
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -24,7 +25,7 @@ from monkeylm.browser.snapshot import (
 from monkeylm.types import PageSnapshot
 
 from .helpers import _locator_for_target_id
-from .interaction import collect_failure_context, detect_click_interception, recover_nonresponsive_state
+from .interaction import collect_failure_context, detect_click_interception
 from .actions import (
     _action_scroll,
     _action_back,
