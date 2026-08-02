@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any, Dict, Optional
 
 from monkeylm.core.monitor.defects import sanitize_for_storage
+
+# Locator action timeout (ms) for ``detect_click_interception``. Must stay
+# well below the harness ``step_timeout_seconds`` (default 30s) so that a
+# degraded page cannot cause this detector's call to race with the outer
+# step timeout — that race is what produced the
+# ``Future exception was never retrieved`` warning at shutdown.
+_DETECT_INTERCEPTION_TIMEOUT_MS = 2000
 
 
 async def detect_click_interception(page: Any, locator: Any, target: Any) -> Dict[str, Any]:
@@ -31,7 +37,7 @@ async def detect_click_interception(page: Any, locator: Any, target: Any) -> Dic
         return base_result
 
     try:
-        bbox = await locator.bounding_box()
+        bbox = await locator.bounding_box(timeout=_DETECT_INTERCEPTION_TIMEOUT_MS)
     except Exception as exc:  # pragma: no cover - defensive fallback
         base_result["reason"] = f"bounding_box_unavailable:{type(exc).__name__}"
         return base_result
@@ -64,7 +70,8 @@ async def detect_click_interception(page: Any, locator: Any, target: Any) -> Dic
                     top_text: topEl ? `${(topEl.innerText || '').trim()}`.slice(0, 140) : '',
                 };
             }
-            """
+            """,
+            timeout=_DETECT_INTERCEPTION_TIMEOUT_MS,
         )
     except Exception:
         payload = None

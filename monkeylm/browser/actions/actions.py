@@ -47,8 +47,12 @@ async def _action_restart_target(page: Page, settings: Any) -> None:
 
 async def _action_random_jump(page: Page) -> None:
     links = page.locator("a[href]:visible")
-    if await links.count() > 0:
-        idx = random.randint(0, min(await links.count() - 1, 10))
+    try:
+        link_count = await links.count(timeout=2000)
+    except Exception:
+        link_count = 0
+    if link_count > 0:
+        idx = random.randint(0, min(link_count - 1, 10))
         await links.nth(idx).click(timeout=3000)
     else:
         await page.evaluate("window.scrollTo(0, 0)")
@@ -56,15 +60,21 @@ async def _action_random_jump(page: Page) -> None:
 
 async def _action_handle_modal(page: Page) -> None:
     close_btn = page.locator("button[aria-label='Close'], .close, [title='Close']").first
-    if await close_btn.count() > 0:
-        await close_btn.click(timeout=2000)
-    else:
-        cancel_btn = page.get_by_role("button", name=re.compile("cancel|close|no|dismiss", re.I)).first
-        if await cancel_btn.count() > 0:
+    try:
+        if await close_btn.count(timeout=2000) > 0:
+            await close_btn.click(timeout=2000)
+            return
+    except Exception:
+        pass
+    cancel_btn = page.get_by_role("button", name=re.compile("cancel|close|no|dismiss", re.I)).first
+    try:
+        if await cancel_btn.count(timeout=2000) > 0:
             await cancel_btn.click(timeout=2000)
-        else:
-            await page.keyboard.press("Escape")
-            print("   -> Sent Escape key to close modal")
+            return
+    except Exception:
+        pass
+    await page.keyboard.press("Escape")
+    print("   -> Sent Escape key to close modal")
 
 
 async def _action_submit_form(page: Page, settings: Any, target: str, input_payloads: List[Dict[str, Any]], action_strategy: str, step_num: int, before_snapshot: PageSnapshot, validation_prober: Any, log_entry: Dict[str, Any]) -> None:
@@ -109,7 +119,7 @@ async def _action_submit_form(page: Page, settings: Any, target: str, input_payl
                                 filled_payloads.append({"target": payload_target, "value": payload_value[:120], "reason": payload_reason})
                                 if validation_prober and validation_prober.should_probe():
                                     try:
-                                        control_type = await locator.evaluate("el => el.type || 'text'")
+                                        control_type = await locator.evaluate("el => el.type || 'text'", timeout=2000)
                                         probe_findings = await validation_prober.probe_field(page, locator, control_type, step_num, f"submit_form:{payload_target}", payload_target)
                                         if probe_findings:
                                             print(f"   ⚠️ Validation probe found {len(probe_findings)} issue(s) on form field '{payload_target}'")
@@ -127,7 +137,11 @@ async def _action_submit_form(page: Page, settings: Any, target: str, input_payl
                         _local_service_log(f"Step {step_num}: failed to mutate {payload_target}: {fill_exc}")
             log_entry["input_payloads"] = filled_payloads
             submit_btn = form_locator.locator("button[type='submit'], input[type='submit']").first
-            if await submit_btn.count() > 0:
+            try:
+                submit_btn_count = await submit_btn.count(timeout=2000)
+            except Exception:
+                submit_btn_count = 0
+            if submit_btn_count > 0:
                 clicked = await _click_element_resilient(page, submit_btn, target=target, timeout_ms=2200)
                 if not clicked:
                     _local_service_log(f"Step {step_num}: submit button for '{target}' could not be clicked reliably")
@@ -143,7 +157,8 @@ async def _action_submit_form(page: Page, settings: Any, target: str, input_payl
                                     }
                                     return true;
                                 }
-                                """
+                                """,
+                                timeout=2000,
                             ),
                             timeout=2.0,
                         )
@@ -155,7 +170,11 @@ async def _action_submit_form(page: Page, settings: Any, target: str, input_payl
                         log_entry["error"] = f"submit_fallback_failed:{fallback_exc}"
             else:
                 inputs = form_locator.locator("input:visible, textarea:visible")
-                if await inputs.count() > 0:
+                try:
+                    inputs_count = await inputs.count(timeout=2000)
+                except Exception:
+                    inputs_count = 0
+                if inputs_count > 0:
                     try:
                         await asyncio.wait_for(inputs.last.press("Enter"), timeout=2.0)
                         log_entry["status"] = "PARTIAL_SUCCESS"
@@ -222,13 +241,20 @@ async def _action_type(page: Page, settings: Any, target: str, value: str, actio
         if await fallback_locator.count() > 0:
             mode = await _resolve_interaction_mode(fallback_locator)
             try:
-                fallback_options = await fallback_locator.evaluate("el => Array.from(el.options).map(o => o.value || o.textContent.trim()).filter(v => v)")
+                fallback_options = await fallback_locator.evaluate("el => Array.from(el.options).map(o => o.value || o.textContent.trim()).filter(v => v)", timeout=2000)
                 if isinstance(fallback_options, list):
                     type_control_options = [str(o) for o in fallback_options]
             except Exception:
                 pass
 
-    if locator is not None and await locator.count() > 0 and mode != "unsupported":
+    if locator is not None:
+        try:
+            locator_count = await locator.count(timeout=2000)
+        except Exception:
+            locator_count = 0
+    else:
+        locator_count = 0
+    if locator is not None and locator_count > 0 and mode != "unsupported":
         payload = payload_value or fuzzer.next_payload()
         if mode == "select":
             chosen, reason = await _fill_select_option(page, locator, payload, type_control_options, action_strategy)
@@ -247,7 +273,7 @@ async def _action_type(page: Page, settings: Any, target: str, value: str, actio
                     defects.add("security_risks", {"step": step_num, "type": "fuzz-payload-injected", "target": sanitize_for_storage(str(target), max_len=256), "payload_preview": sanitize_for_storage(payload[:200], max_len=256), "url": sanitize_for_storage(page.url, max_len=1024)})
                 if validation_prober and validation_prober.should_probe():
                     try:
-                        control_type = await locator.evaluate("el => el.type || (el.tagName === 'TEXTAREA' ? 'textarea' : '')")
+                        control_type = await locator.evaluate("el => el.type || (el.tagName === 'TEXTAREA' ? 'textarea' : '')", timeout=2000)
                         probe_findings = await validation_prober.probe_field(page, locator, control_type or "text", step_num, f"{action}:{target}", target)
                         if probe_findings:
                             print(f"   ⚠️ Validation probe found {len(probe_findings)} issue(s) on '{target}'")

@@ -25,7 +25,6 @@ from monkeylm.core.monitor import (
     BrowserAnomalySensor,
     StallDetector,
     ValidationProber,
-    sanitize_for_storage,
 )
 from monkeylm.types import WorkerRunResult
 
@@ -34,7 +33,39 @@ from monkeylm.browser.actions.interaction import collect_failure_context, recove
 
 
 async def _execute_step_with_timeout(coro: Any, *, timeout_seconds: float) -> Any:
-    return await asyncio.wait_for(coro, timeout=timeout_seconds)
+    """Run ``coro`` with a wall-clock cap, and clean up on timeout.
+
+    The naive ``asyncio.wait_for(coro, timeout=...)`` cancels the inner
+    coroutine and re-raises ``TimeoutError`` to the caller, but it does
+    **not** synchronously cancel any Playwright internal ``Future`` that
+    was already in flight. When the harness's outer timeout and Playwright's
+    default 30s action timeout expire simultaneously, the Playwright Future
+    completes with ``TimeoutError('Timeout 30000ms exceeded')`` after the
+    outer caller has moved on. That Future has no consumer, so asyncio logs
+    ``Future exception was never retrieved`` at shutdown.
+
+    This implementation shields the inner task from cancellation long enough
+    to either finish cleanly or fail fast. The inner task still gets a
+    cancellation signal — we just give it a brief grace window to unwind
+    any in-flight Playwright Futures before we close the page.
+    """
+    inner_task = asyncio.create_task(coro)
+    try:
+        return await asyncio.wait_for(asyncio.shield(inner_task), timeout=timeout_seconds)
+    except asyncio.TimeoutError:
+        # Give the inner task a short grace window to finish unwinding on
+        # its own. If it does, no orphan Future is left behind. If it
+        # doesn't, we cancel it explicitly and await the cancellation so
+        # the task is fully torn down before the caller proceeds.
+        try:
+            return await asyncio.wait_for(asyncio.shield(inner_task), timeout=0.5)
+        except asyncio.TimeoutError:
+            inner_task.cancel()
+            try:
+                await inner_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        raise
 
 
 def classify_runtime_failure(exc: Exception | None) -> str | None:
@@ -461,9 +492,34 @@ async def run_worker(
             completed_steps += 1
             await asyncio.sleep(ACTION_COOLDOWN_SECONDS)
     finally:
-        await worker_memory.close()
+        try:
+            await worker_memory.close()
+        except Exception as memory_close_exc:  # pragma: no cover - defensive
+            _local_service_log(
+                f"{worker_label} memory close failed during shutdown: {memory_close_exc}",
+                getattr(settings, "output_dir", ""),
+            )
         if context is not None:
-            await context.close()
+            try:
+                # Yield once so any in-flight Playwright callbacks scheduled
+                # on the same loop get a chance to attach an exception handler
+                # before we tear the page down. This dramatically reduces the
+                # `Future exception was never retrieved` warnings that surface
+                # when a step was cancelled mid-locator and a child Future was
+                # still pending when `context.close()` shut the channel.
+                await asyncio.sleep(0)
+            except Exception:
+                pass
+            try:
+                await context.close()
+            except Exception as context_close_exc:  # pragma: no cover - defensive
+                # A failure to close the context (e.g. already closed by a
+                # cancellation handler) should not mask the original failure
+                # reason. Log and continue.
+                _local_service_log(
+                    f"{worker_label} context close failed during shutdown: {context_close_exc}",
+                    getattr(settings, "output_dir", ""),
+                )
 
     return WorkerRunResult(
         worker_id=worker_id,

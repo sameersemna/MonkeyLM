@@ -87,7 +87,7 @@ class ValidationProber:
                 await _click_element_resilient(page, locator, target=target_id, timeout_ms=2000)
             else:
                 await _fill_input_resilient(page, locator, probe["value"][:1000], target=target_id, timeout_ms=2000)
-        except Exception:
+        except (Exception, asyncio.CancelledError):
             return findings
 
         await asyncio.sleep(0.3)

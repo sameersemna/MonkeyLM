@@ -21,7 +21,7 @@ class SubmitFormResilienceTests(unittest.IsolatedAsyncioTestCase):
             def first(self) -> "FakeElement":
                 return self
 
-            async def count(self) -> int:
+            async def count(self, *args: object, **kwargs: object) -> int:
                 return 1
 
             async def evaluate(self, *args: object, **kwargs: object) -> bool:
@@ -69,7 +69,7 @@ class SubmitFormResilienceTests(unittest.IsolatedAsyncioTestCase):
             def __init__(self) -> None:
                 self.last = SlowPressInput()
 
-            async def count(self) -> int:
+            async def count(self, *args: object, **kwargs: object) -> int:
                 return 1
 
         class FakeSubmitButtonLocator:
@@ -77,7 +77,7 @@ class SubmitFormResilienceTests(unittest.IsolatedAsyncioTestCase):
             def first(self) -> "FakeSubmitButtonLocator":
                 return self
 
-            async def count(self) -> int:
+            async def count(self, *args: object, **kwargs: object) -> int:
                 return 0
 
         class FakeFormLocator:

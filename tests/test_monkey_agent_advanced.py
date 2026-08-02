@@ -310,12 +310,26 @@ class MonkeyLMTests(unittest.TestCase):
         self.assertEqual(result["value"], "")
 
     def test_execute_step_with_timeout_raises_timeout_error(self) -> None:
+        # The new implementation adds a 0.5s grace window after the step
+        # timeout, so the inner coroutine must exceed *both* the step
+        # timeout AND the grace window for TimeoutError to be raised.
         async def slow_coro() -> str:
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(1.0)
             return "done"
 
         with self.assertRaises(TimeoutError):
-            asyncio.run(_execute_step_with_timeout(slow_coro(), timeout_seconds=0.001))
+            asyncio.run(_execute_step_with_timeout(slow_coro(), timeout_seconds=0.05))
+
+    def test_execute_step_with_timeout_lets_finish_in_grace_window(self) -> None:
+        # Pin the grace-window contract: an inner coroutine that finishes
+        # just after the step timeout (but within the 0.5s grace window)
+        # must be allowed to complete — no TimeoutError, result returned.
+        async def slow_but_finishing() -> str:
+            await asyncio.sleep(0.15)
+            return "completed"
+
+        result = asyncio.run(_execute_step_with_timeout(slow_but_finishing(), timeout_seconds=0.05))
+        self.assertEqual(result, "completed")
 
     def test_normalize_action_plan_accepts_press_key(self) -> None:
         plan = normalize_action_plan({"action": "press_key", "value": "Escape"})
@@ -399,8 +413,17 @@ class MonkeyLMTests(unittest.TestCase):
 
     def test_detect_click_interception_detects_overlay_blocking(self) -> None:
         class DummyLocator:
-            async def bounding_box(self) -> Dict[str, float]:
+            async def bounding_box(self, *args: object, **kwargs: object) -> Dict[str, float]:
                 return {"x": 10.0, "y": 10.0, "width": 20.0, "height": 20.0}
+
+            async def evaluate(self, *args: object, **kwargs: object) -> Dict[str, Any]:
+                return {
+                    "is_blocked": True,
+                    "reason": "overlay_blocked",
+                    "top_element": "div",
+                    "target_element": "button",
+                    "top_text": "dialog",
+                }
 
         class DummyPage:
             def __init__(self) -> None:
