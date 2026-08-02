@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import unittest
 from types import SimpleNamespace
 
@@ -29,6 +30,24 @@ class InputRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(succeeded)
         self.assertEqual(locator.calls, 2)
+
+    async def test_fill_input_resilient_handles_cancellation(self) -> None:
+        class CancelledLocator:
+            async def scroll_into_view_if_needed(self, **kwargs: object) -> None:
+                return None
+
+            async def wait_for(self, **kwargs: object) -> None:
+                return None
+
+            async def fill(self, value: str, timeout: int | None = None) -> None:
+                raise asyncio.CancelledError()
+
+        locator = CancelledLocator()
+        page = SimpleNamespace()
+
+        succeeded = await _fill_input_resilient(page, locator, "hello", target="[id=7]", timeout_ms=100)
+
+        self.assertFalse(succeeded)
 
 
 if __name__ == "__main__":

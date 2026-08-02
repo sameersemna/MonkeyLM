@@ -97,16 +97,16 @@ async def _fill_input_resilient(
     for attempt in range(max_attempts):
         try:
             await locator.scroll_into_view_if_needed(timeout=wait_timeout_ms)
-        except Exception:
+        except (Exception, asyncio.CancelledError):
             pass
         try:
             await locator.wait_for(state="visible", timeout=wait_timeout_ms)
-        except Exception:
+        except (Exception, asyncio.CancelledError):
             pass
         try:
             await locator.fill(str(value), timeout=timeout_ms)
             return True
-        except Exception as exc:  # pragma: no cover - defensive fallback
+        except (Exception, asyncio.CancelledError) as exc:  # pragma: no cover - defensive fallback
             last_error = exc
             if attempt < max_attempts - 1:
                 await asyncio.sleep(0.1)
@@ -131,7 +131,7 @@ async def _fill_input_resilient(
             str(value),
         )
         return True
-    except Exception:
+    except (Exception, asyncio.CancelledError):
         return False
 
 
@@ -153,16 +153,16 @@ async def _click_element_resilient(
     for attempt in range(max_attempts):
         try:
             await locator.scroll_into_view_if_needed(timeout=wait_timeout_ms)
-        except Exception:
+        except (Exception, asyncio.CancelledError):
             pass
         try:
             await locator.wait_for(state="visible", timeout=wait_timeout_ms)
-        except Exception:
+        except (Exception, asyncio.CancelledError):
             pass
         try:
             await locator.click(timeout=timeout_ms)
             return True
-        except Exception:
+        except (Exception, asyncio.CancelledError):
             if attempt < max_attempts - 1:
                 await asyncio.sleep(0.1)
                 continue
@@ -180,27 +180,60 @@ async def _click_element_resilient(
             """
         )
         return True
-    except Exception:
+    except (Exception, asyncio.CancelledError):
         return False
 
 
 async def _fill_select_option(
     page: Page, locator: Any, payload_value: str, control_options: List[str], strategy: str
 ) -> Tuple[str, str]:
+    if not locator:
+        return "", "select_locator_missing"
+
+    async def _try_select(value: str) -> bool:
+        try:
+            await locator.select_option(value=value, timeout=1000)
+            return True
+        except Exception:
+            return False
+
     if payload_value and payload_value in control_options:
-        await locator.select_option(value=payload_value)
-        return payload_value, "select_model_provided_option"
+        if await _try_select(payload_value):
+            return payload_value, "select_model_provided_option"
+        return payload_value, "select_model_provided_option_failed"
+
     if control_options:
         if strategy == "EDGE_CASE_FUZZ":
             invalid_value = "__monkeylm_invalid_option__"
-            try:
-                await locator.select_option(value=invalid_value)
-            except Exception as exc:
-                return invalid_value, f"fuzz_select_invalid_option_rejected:{type(exc).__name__}"
-            return invalid_value, "fuzz_select_invalid_option_accepted"
+            if await _try_select(invalid_value):
+                return invalid_value, "fuzz_select_invalid_option_accepted"
+            return invalid_value, f"fuzz_select_invalid_option_rejected"
         chosen = control_options[0]
-        await locator.select_option(value=chosen)
-        return chosen, "happy_select_first_option"
+        if await _try_select(chosen):
+            return chosen, "happy_select_first_option"
+        return chosen, "happy_select_first_option_failed"
+
+    try:
+        await locator.evaluate(
+            """
+            (el) => {
+                if (!el) return false;
+                if (el.disabled) return false;
+                const options = Array.from(el.options || []);
+                if (options.length === 0) return false;
+                const firstEnabled = options.find((option) => !option.disabled && option.value);
+                if (firstEnabled) {
+                    el.value = firstEnabled.value;
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                    return true;
+                }
+                return false;
+            }
+            """
+        )
+    except Exception:
+        pass
     return "", "select_no_options_available"
 
 
