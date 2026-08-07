@@ -60,7 +60,7 @@ class StallDetector:
         hashes = set(e["state_hash"] for e in window)
         actions = [e["action"] for e in window]
         all_actions = actions + [current_action]
-        passive_actions = {"scroll", "back"}
+        passive_actions = {"scroll", "back", "random_jump", "restart_target"}
         meaningful_count = sum(1 for a in all_actions if a not in passive_actions)
         if len(urls) <= 1 and len(hashes) <= 1 and meaningful_count >= self.threshold:
             sentinel = (window or [{}])[0] if window else {}

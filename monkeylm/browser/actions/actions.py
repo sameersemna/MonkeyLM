@@ -46,6 +46,15 @@ async def _action_restart_target(page: Page, settings: Any) -> None:
 
 
 async def _action_random_jump(page: Page) -> None:
+    """Navigate to a random link, button, or scroll position to escape a stuck state.
+
+    Tries in order:
+    1. Click a random visible link (a[href]:visible)
+    2. Click a random visible button
+    3. Click any random clickable element
+    4. Scroll to a random position on the page
+    """
+    # Strategy 1: visible links
     links = page.locator("a[href]:visible")
     try:
         link_count = await links.count(timeout=2000)
@@ -54,8 +63,33 @@ async def _action_random_jump(page: Page) -> None:
     if link_count > 0:
         idx = random.randint(0, min(link_count - 1, 10))
         await links.nth(idx).click(timeout=3000)
-    else:
-        await page.evaluate("window.scrollTo(0, 0)")
+        return
+
+    # Strategy 2: visible buttons
+    buttons = page.locator("button:visible, [role='button']:visible, input[type='button']:visible, input[type='submit']:visible")
+    try:
+        button_count = await buttons.count(timeout=2000)
+    except Exception:
+        button_count = 0
+    if button_count > 0:
+        idx = random.randint(0, min(button_count - 1, 5))
+        await buttons.nth(idx).click(timeout=3000)
+        return
+
+    # Strategy 3: any clickable element (spans, divs with onclick, etc.)
+    clickables = page.locator("[onclick]:visible, [data-action]:visible, [data-click]:visible, .clickable:visible")
+    try:
+        clickable_count = await clickables.count(timeout=1500)
+    except Exception:
+        clickable_count = 0
+    if clickable_count > 0:
+        idx = random.randint(0, min(clickable_count - 1, 3))
+        await clickables.nth(idx).click(timeout=3000)
+        return
+
+    # Strategy 4: random scroll as last resort
+    scroll_amount = random.choice([-800, -400, 400, 800])
+    await page.evaluate("delta => window.scrollBy(0, delta)", scroll_amount)
 
 
 async def _action_handle_modal(page: Page) -> None:

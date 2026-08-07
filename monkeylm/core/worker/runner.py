@@ -272,6 +272,13 @@ async def run_worker(
             recent_model_plans = recent_model_plans[-3:]
 
             plan = apply_state_aware_policy(settings, plan, snapshot, visited_states, seen_click_targets, loop_break_applied=loop_break_applied)
+            # When apply_state_aware_policy forces an escape action (random_jump /
+            # restart_target) because a state has been revisited too many times, the
+            # harness itself is causing the action repetition -- not the model.  Mark
+            # loop_break_applied so the stall detector grants a cooldown instead of
+            # declaring a freeze after a few identical escape attempts.
+            if not loop_break_applied and plan.get("action") in {"random_jump", "restart_target"}:
+                loop_break_applied = True
             if plan.get("action") == "click" and plan.get("target"):
                 seen_click_targets.add(plan.get("target"))
 
