@@ -5,3 +5,6 @@ testrun_*/
 __pycache__/
 .env
 PROMPT.md
+screenshots/*
+reports/*.*d*
+prs/
