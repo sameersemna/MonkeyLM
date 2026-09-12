@@ -30,7 +30,28 @@ from monkeylm.types import WorkerRunResult
 
 from .helpers import build_worker_user_data_dir, with_retry_backoff
 from monkeylm.browser.actions.interaction import collect_failure_context, recover_nonresponsive_state
-from monkeylm.browser.snapshot.cv import capture_chrome_templates, verify_chrome_templates, visual_phash
+from monkeylm.browser.snapshot.cv import capture_chrome_templates, phash_hamming, verify_chrome_templates, visual_phash
+
+# Hamming distance at or below which two 256-bit perceptual hashes are treated
+# as the same visual state (≈3% of bits differ — tolerates animations, clocks,
+# and anti-aliasing noise while still distinguishing real screen changes).
+_VISUAL_STATE_HAMMING_TOLERANCE = 8
+
+
+def _visual_state_key(seen: Dict[str, int], phash: str) -> str:
+    """Return the canonical hash bucket for ``phash`` among ``seen`` keys.
+
+    Matches any known hash within the Hamming tolerance so near-identical
+    frames accumulate onto one visual-state counter instead of fragmenting
+    across dozens of singleton buckets.
+    """
+    if not phash:
+        return ""
+    for known in seen:
+        distance = phash_hamming(phash, known)
+        if 0 <= distance <= _VISUAL_STATE_HAMMING_TOLERANCE:
+            return known
+    return phash
 
 
 async def _execute_step_with_timeout(coro: Any, *, timeout_seconds: float) -> Any:
@@ -168,11 +189,13 @@ async def run_worker(
     worker_memory = QdrantMemoryStore(settings)
     worker_logs: List[Dict[str, Any]] = []
     visited_states: Dict[str, int] = {}
+    visited_visual_states: Dict[str, int] = {}
     seen_click_targets: set = set()
     recent_model_plans: List[Tuple[str, str]] = []
     recent_state_history: List[Dict[str, Any]] = []
     chrome_templates: Dict[str, Any] = {}
     chrome_baseline_domain: str = ""
+    chrome_steps_since_verify: int = 0
     completed_steps = 0
     failure_reason: str | None = None
     failure_artifact: str | None = None
@@ -254,6 +277,17 @@ async def run_worker(
                 local_count = visited_states.get(state_key, 0) + 1
                 redis_count = await persistence_engine.increment_visited_state(state_key)
                 visited_states[state_key] = redis_count if redis_count is not None else local_count
+                # Visual-novelty tracking: bucket the plan-phase screenshot by
+                # perceptual hash so visually-identical screens (canvas apps,
+                # randomized DOM IDs) accumulate revisit counts just like
+                # DOM-hash states do.
+                visual_revisit_count = 0
+                if getattr(settings, "cv_analysis_enabled", False) and getattr(settings, "cv_phash_dedup", False):
+                    plan_phash = visual_phash(snapshot.screenshot_path)
+                    if plan_phash:
+                        visual_key = _visual_state_key(visited_visual_states, plan_phash)
+                        visited_visual_states[visual_key] = visited_visual_states.get(visual_key, 0) + 1
+                        visual_revisit_count = visited_visual_states[visual_key] - 1
                 state = state_to_prompt(snapshot)
             except Exception as exc:
                 print(f"   -> ⚠️ {worker_label} state capture failed; skipping step.")
@@ -274,7 +308,7 @@ async def run_worker(
             recent_model_plans.append(plan_signature)
             recent_model_plans = recent_model_plans[-3:]
 
-            plan = apply_state_aware_policy(settings, plan, snapshot, visited_states, seen_click_targets, loop_break_applied=loop_break_applied)
+            plan = apply_state_aware_policy(settings, plan, snapshot, visited_states, seen_click_targets, loop_break_applied=loop_break_applied, visual_revisit_count=visual_revisit_count)
             # When apply_state_aware_policy forces an escape action (random_jump /
             # restart_target) because a state has been revisited too many times, the
             # harness itself is causing the action repetition -- not the model.  Mark
@@ -469,30 +503,39 @@ async def run_worker(
                     # becomes the baseline (auto-capture); later frames must
                     # still contain the logo/nav templates or the page has lost
                     # its chrome (broken nav, unexpected full-page state).
+                    # Verification runs every N steps (cadence) on downscaled
+                    # frames (scale) to keep per-step overhead near zero.
                     if getattr(settings, "cv_analysis_enabled", False) and getattr(settings, "cv_template_verify", False):
                         from monkeylm.config import split_domain_and_route
+                        template_scale = float(getattr(settings, "cv_template_scale", 0.5))
+                        template_cadence = max(1, int(getattr(settings, "cv_template_every_n_steps", 2)))
                         current_domain, _ = split_domain_and_route(post_snapshot.url)
                         if current_domain and current_domain != chrome_baseline_domain:
-                            captured = capture_chrome_templates(post_snapshot.screenshot_path)
+                            captured = capture_chrome_templates(post_snapshot.screenshot_path, scale=template_scale)
                             if captured:
                                 chrome_templates = captured
                                 chrome_baseline_domain = current_domain
+                                chrome_steps_since_verify = 0
                         elif chrome_templates and current_domain == chrome_baseline_domain:
-                            verification = verify_chrome_templates(
-                                post_snapshot.screenshot_path,
-                                chrome_templates,
-                                min_score=float(getattr(settings, "cv_template_min_score", 0.75)),
-                            )
-                            missing = verification.get("missing") or []
-                            if missing:
-                                worker_defects.add("rendering_defects", {
-                                    "step": step,
-                                    "type": "chrome-missing",
-                                    "missing_regions": missing,
-                                    "match_scores": verification.get("scores", {}),
-                                    "url": sanitize_for_storage(post_snapshot.url, max_len=1024),
-                                    "screenshot": os.path.basename(post_snapshot.screenshot_path),
-                                })
+                            chrome_steps_since_verify += 1
+                            if chrome_steps_since_verify >= template_cadence:
+                                chrome_steps_since_verify = 0
+                                verification = verify_chrome_templates(
+                                    post_snapshot.screenshot_path,
+                                    chrome_templates,
+                                    min_score=float(getattr(settings, "cv_template_min_score", 0.75)),
+                                    scale=template_scale,
+                                )
+                                missing = verification.get("missing") or []
+                                if missing:
+                                    worker_defects.add("rendering_defects", {
+                                        "step": step,
+                                        "type": "chrome-missing",
+                                        "missing_regions": missing,
+                                        "match_scores": verification.get("scores", {}),
+                                        "url": sanitize_for_storage(post_snapshot.url, max_len=1024),
+                                        "screenshot": os.path.basename(post_snapshot.screenshot_path),
+                                    })
                     stall_finding = worker_stall_detector.check_for_stall(step, plan.get("action", "scroll"))
                     if stall_finding:
                         failure_reason = stall_finding.get("reason", "stuck_state_detected")

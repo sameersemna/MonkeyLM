@@ -155,6 +155,8 @@ DEFAULT_CV_BLANK_SCREEN_STDDEV = 8.0
 DEFAULT_CV_PHASH_DEDUP = True
 DEFAULT_CV_TEMPLATE_VERIFY = True
 DEFAULT_CV_TEMPLATE_MIN_SCORE = 0.75
+DEFAULT_CV_TEMPLATE_SCALE = 0.5
+DEFAULT_CV_TEMPLATE_EVERY_N_STEPS = 2
 DEFAULT_OCR_ENABLED = False
 
 AXE_CDN_URL = "https://cdnjs.cloudflare.com/ajax/libs/axe-core/4.9.1/axe.min.js"
@@ -430,6 +432,8 @@ def parse_cli_args() -> argparse.Namespace:
     template_group.add_argument("--no-cv-template-verify", dest="cv_template_verify", action="store_false", help="Disable chrome template verification")
     parser.set_defaults(cv_template_verify=None)
     parser.add_argument("--cv-template-min-score", type=float, help="Minimum multi-scale template match score (0.3-1.0) before chrome is reported missing")
+    parser.add_argument("--cv-template-scale", type=float, help="Downscale factor (0.25-1.0) for template matching; 0.5 roughly quarters matching cost")
+    parser.add_argument("--cv-template-every-n-steps", type=int, help="Verify chrome every N steps instead of every step")
     ocr_group = parser.add_mutually_exclusive_group()
     ocr_group.add_argument("--ocr", dest="ocr_enabled", action="store_true", help="Enable OCR error-text extraction on failed steps (requires rapidocr-onnxruntime)")
     ocr_group.add_argument("--no-ocr", dest="ocr_enabled", action="store_false", help="Disable OCR error-text extraction")
@@ -549,6 +553,10 @@ def load_settings(cli_args: Optional[argparse.Namespace] = None) -> Settings:
     s.cv_template_verify = _env_bool("CV_TEMPLATE_VERIFY", default=_env_to_bool(ev_tmpl, s.cv_template_verify))
     ev_tscore = env_vars.get("CV_TEMPLATE_MIN_SCORE")
     s.cv_template_min_score = min(1.0, max(0.3, float(ev_tscore) if ev_tscore is not None else s.cv_template_min_score))
+    ev_tscale = env_vars.get("CV_TEMPLATE_SCALE")
+    s.cv_template_scale = min(1.0, max(0.25, float(ev_tscale) if ev_tscale is not None else s.cv_template_scale))
+    ev_tn = env_vars.get("CV_TEMPLATE_EVERY_N_STEPS")
+    s.cv_template_every_n_steps = max(1, int(ev_tn) if ev_tn is not None else s.cv_template_every_n_steps)
     ev_ocr = env_vars.get("OCR_ENABLED")
     s.ocr_enabled = _env_bool("OCR_ENABLED", default=_env_to_bool(ev_ocr, s.ocr_enabled))
 
@@ -606,6 +614,10 @@ def load_settings(cli_args: Optional[argparse.Namespace] = None) -> Settings:
             s.cv_template_verify = bool(cli_args.cv_template_verify)
         if getattr(cli_args, "cv_template_min_score", None) is not None:
             s.cv_template_min_score = min(1.0, max(0.3, float(cli_args.cv_template_min_score)))
+        if getattr(cli_args, "cv_template_scale", None) is not None:
+            s.cv_template_scale = min(1.0, max(0.25, float(cli_args.cv_template_scale)))
+        if getattr(cli_args, "cv_template_every_n_steps", None) is not None:
+            s.cv_template_every_n_steps = max(1, int(cli_args.cv_template_every_n_steps))
         if getattr(cli_args, "ocr_enabled", None) is not None:
             s.ocr_enabled = bool(cli_args.ocr_enabled)
         if getattr(cli_args, "seed", None) is not None:
@@ -1214,6 +1226,8 @@ __all__ = [
     "DEFAULT_CV_PHASH_DEDUP",
     "DEFAULT_CV_TEMPLATE_VERIFY",
     "DEFAULT_CV_TEMPLATE_MIN_SCORE",
+    "DEFAULT_CV_TEMPLATE_SCALE",
+    "DEFAULT_CV_TEMPLATE_EVERY_N_STEPS",
     "DEFAULT_OCR_ENABLED",
     "DEFAULT_VISION_MODEL",
     "DEFAULT_PDF_VISION_TIMEOUT_SECONDS",

@@ -17,6 +17,7 @@ def apply_state_aware_policy(
     seen_click_targets: set,
     *,
     loop_break_applied: bool = False,
+    visual_revisit_count: int = 0,
 ) -> Dict[str, Any]:
     # dom_hash (includes element text) rather than structure_hash (text
     # stripped for layout-only comparisons elsewhere) -- see runner.py's
@@ -32,7 +33,14 @@ def apply_state_aware_policy(
     # handful of popular routes get permanently locked out of real click/type
     # interaction for the rest of the run. Trust the loop-breaker's choice
     # instead of immediately overriding it.
-    if revisit_count > STATE_LOOP_THRESHOLD and not loop_break_applied:
+    #
+    # `visual_revisit_count` is the perceptual-hash revisit tally for the
+    # current *visual* state: screens that look identical but hash differently
+    # in the DOM (canvas apps, randomized IDs) otherwise escape loop detection
+    # entirely and the monkey burns its budget on visually-stale pages.
+    over_dom_threshold = revisit_count > STATE_LOOP_THRESHOLD
+    over_visual_threshold = visual_revisit_count > STATE_LOOP_THRESHOLD
+    if (over_dom_threshold or over_visual_threshold) and not loop_break_applied:
         forced = random.choice(["random_jump", "restart_target"])
         return {"action": forced, "target": "", "value": ""}
 

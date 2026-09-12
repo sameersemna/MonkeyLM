@@ -265,19 +265,35 @@ def phash_hamming(hash_a: str, hash_b: str) -> int:
         return -1
 
 
-def capture_chrome_templates(screenshot_path: str) -> Dict[str, Any]:
+def _downscale(gray: "np.ndarray", scale: float) -> "np.ndarray":
+    """Downscale a grayscale frame for cheaper template matching.
+
+    INTER_AREA is the correct interpolation for shrinking: it averages pixel
+    blocks, preserving region structure better than nearest-neighbor at the
+    cost of a slightly softer image — irrelevant for correlation matching.
+    """
+    if scale >= 1.0:
+        return gray
+    width = max(1, int(gray.shape[1] * scale))
+    height = max(1, int(gray.shape[0] * scale))
+    return cv2.resize(gray, (width, height), interpolation=cv2.INTER_AREA)
+
+
+def capture_chrome_templates(screenshot_path: str, scale: float = 1.0) -> Dict[str, Any]:
     """Capture baseline chrome templates (logo quadrant, nav strip) from a frame.
 
     Called once per worker on its first same-domain screenshot; the returned
     dict is kept in memory by the caller and passed to
-    ``verify_chrome_templates`` on subsequent steps. Returns ``{}`` when the
-    frame cannot be read.
+    ``verify_chrome_templates`` on subsequent steps. ``scale`` downscales the
+    frame before cropping and MUST match the scale used at verification time.
+    Returns ``{}`` when the frame cannot be read.
     """
     if not _cv_available():
         return {}
     gray = _read_gray(screenshot_path)
     if gray is None:
         return {}
+    gray = _downscale(gray, scale)
     height, width = gray.shape[:2]
     templates: Dict[str, Any] = {}
     for name, x0r, y0r, x1r, y1r in _CHROME_REGIONS:
@@ -304,12 +320,15 @@ def verify_chrome_templates(
     screenshot_path: str,
     templates: Dict[str, Any],
     min_score: float = 0.75,
+    scale: float = 1.0,
 ) -> Dict[str, Any]:
     """Verify that baseline chrome elements are still present in a frame.
 
     Returns per-region scores and a ``missing`` list of regions whose best
     multi-scale match score fell below ``min_score`` — a deterministic signal
     for broken navigation, vanished branding, or an unexpected full-page state.
+    ``scale`` MUST match the scale used at capture time so probe frames and
+    templates live at the same resolution.
     """
     result: Dict[str, Any] = {"scores": {}, "missing": [], "engine": "none", "error": None}
     if not _cv_available() or not templates:
@@ -319,8 +338,13 @@ def verify_chrome_templates(
     if gray is None:
         result["error"] = "missing_screenshot"
         return result
+    gray = _downscale(gray, scale)
     try:
         for name, template in templates.items():
+            if template.shape[0] > gray.shape[0] or template.shape[1] > gray.shape[1]:
+                # Downscaling shrank the frame below the template size — the
+                # region cannot be verified at this scale, skip it.
+                continue
             score = _match_score_multiscale(gray, template)
             result["scores"][name] = round(score, 4)
             if score < min_score:

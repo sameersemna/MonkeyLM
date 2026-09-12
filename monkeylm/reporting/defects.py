@@ -239,6 +239,7 @@ def _group_defects(
         "validation_failures", "race_findings", "boundary_drift",
         "console_findings", "performance_bottlenecks", "accessibility_violations",
         "visual_regressions", "layout_instability", "regression_findings",
+        "rendering_defects",
     ]
     for category in categories:
         collection = getattr(defects, category, [])
@@ -248,6 +249,31 @@ def _group_defects(
 
     if not all_defects:
         return []
+
+    # Cross-detector signal fusion: index which detector families fired per
+    # step so tickets can be promoted to "confirmed" when two independent
+    # signals (DOM-based and CV-based) corroborate the same failure.
+    step_signals: Dict[int, set] = {}
+    for category, defect in all_defects:
+        step = defect.get("step", 0) or 0
+        step_signals.setdefault(step, set()).add(category)
+
+    def _fused_confidence(category: str, defect: Dict[str, Any]) -> str:
+        step = defect.get("step", 0) or 0
+        signals = step_signals.get(step, set())
+        # DOM collapse corroborated by a CV blank/crash screen = confirmed crash.
+        if category == "layout_instability" and defect.get("type") == "dom-collapse":
+            if any(s == "rendering_defects" for s in signals):
+                return "confirmed"
+        # CV visual diff corroborated by DOM layout drift = confirmed regression.
+        if category == "visual_regressions" and defect.get("type") == "visual-diff-region":
+            if "layout_instability" in signals:
+                return "confirmed"
+        # CV blank screen corroborated by any DOM-side failure signal.
+        if category == "rendering_defects" and defect.get("type") == "blank-screen":
+            if signals - {"rendering_defects"}:
+                return "confirmed"
+        return "probable"
 
     step_to_log: Dict[int, Dict[str, Any]] = {}
     for log in test_logs:
@@ -348,6 +374,7 @@ def _group_defects(
             defect_uid=uid,
             category=category,
             severity=severity,
+            confidence=_fused_confidence(category, primary),
             title=title,
             description=description,
             target_url=url,

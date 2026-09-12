@@ -109,6 +109,8 @@ class Settings:
     cv_phash_dedup: bool = True
     cv_template_verify: bool = True
     cv_template_min_score: float = 0.75
+    cv_template_scale: float = 0.5
+    cv_template_every_n_steps: int = 2
     ocr_enabled: bool = False
 
     active_seed: Optional[str] = None
@@ -246,12 +248,16 @@ class DefectTicket:
     raw_defects: List[Dict[str, Any]] = field(default_factory=list)
     impact: str = ""
     discovered_context_url: str = ""
+    # "confirmed" when two independent detector families (DOM + CV) fired on
+    # the same step/URL; "probable" for single-signal findings.
+    confidence: str = "probable"
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "defect_uid": self.defect_uid,
             "category": self.category,
             "severity": self.severity,
+            "confidence": self.confidence,
             "title": self.title,
             "description": self.description,
             "impact": self.impact,

@@ -177,13 +177,15 @@ class TestChromeTemplates:
     def _chrome_frame(self, logo: bool = True) -> "np.ndarray":
         """Frame with a textured logo quadrant and a nav strip.
 
-        The logo uses a checkerboard pattern (real logos have edges/variance);
-        a uniform template would be degenerate for normalized correlation.
+        The logo uses a 4px-block checkerboard: real logos have multi-pixel
+        features, and 4px blocks survive the 0.5 INTER_AREA downscale with
+        texture intact (a 1px checkerboard averages into uniform gray, which
+        would make the template degenerate for normalized correlation).
         """
         frame = np.full((240, 320), 128, dtype=np.uint8)
         if logo:
-            checker = np.indices((19, 48)).sum(axis=0) % 2 * 255
-            frame[0:19, 0:48] = checker.astype(np.uint8)
+            blocks = (np.indices((19, 48)) // 4).sum(axis=0) % 2 * 255
+            frame[0:19, 0:48] = blocks.astype(np.uint8)
         frame[0:14, 60:300] = 90  # nav strip content
         return frame
 
@@ -213,6 +215,33 @@ class TestChromeTemplates:
 
     def test_unreadable_baseline_returns_empty(self):
         assert capture_chrome_templates("") == {}
+
+    def test_downscaled_capture_and_verify_roundtrip(self, tmp_path):
+        baseline = _write_png(str(tmp_path / "base.png"), self._chrome_frame())
+        templates = capture_chrome_templates(baseline, scale=0.5)
+        assert set(templates.keys()) == {"logo", "nav"}
+        # Templates must be half the size of the full-res crops.
+        assert templates["logo"].shape == (9, 24)
+        current = _write_png(str(tmp_path / "current.png"), self._chrome_frame())
+        result = verify_chrome_templates(current, templates, scale=0.5)
+        assert result["engine"] == "opencv-template"
+        assert result["missing"] == []
+
+    def test_downscaled_missing_logo_detected(self, tmp_path):
+        baseline = _write_png(str(tmp_path / "base.png"), self._chrome_frame())
+        templates = capture_chrome_templates(baseline, scale=0.5)
+        broken = _write_png(str(tmp_path / "broken.png"), self._chrome_frame(logo=False))
+        result = verify_chrome_templates(broken, templates, scale=0.5)
+        assert "logo" in result["missing"]
+
+    def test_scale_mismatch_still_functions(self, tmp_path):
+        # Capture full-res, verify downscaled: templates larger than the
+        # downscaled frame regions are skipped rather than crashing.
+        baseline = _write_png(str(tmp_path / "base.png"), self._chrome_frame())
+        templates = capture_chrome_templates(baseline, scale=1.0)
+        current = _write_png(str(tmp_path / "current.png"), self._chrome_frame())
+        result = verify_chrome_templates(current, templates, scale=0.5)
+        assert result["error"] is None
 
 
 @pytest.mark.skipif(RapidOCR is None, reason="rapidocr not installed")
