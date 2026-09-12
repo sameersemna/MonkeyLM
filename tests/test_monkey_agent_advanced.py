@@ -269,15 +269,30 @@ class MonkeyLMTests(unittest.TestCase):
         defects = DefectTracker()
         detector = StallDetector(defects, threshold=3)
 
-        for step, action in enumerate(["restart_target", "restart_target", "restart_target"], start=1):
+        # Meaningful actions (click/type) are required: passive escape actions
+        # (scroll/back/random_jump/restart_target) deliberately do not count
+        # toward a stall, since the harness itself may be forcing them.
+        for step, action in enumerate(["click", "click", "click"], start=1):
             detector.record_state(step, "https://example.com/", "same-hash", action)
 
-        finding = detector.check_for_stall(4, "restart_target")
+        finding = detector.check_for_stall(4, "click")
 
         self.assertIsNotNone(finding)
         self.assertEqual(finding.get("type"), "stuck_state_detected")
         self.assertEqual(finding.get("reason"), "stuck_state_detected")
         self.assertEqual(len(defects.ux_flow_freezes), 1)
+
+    def test_stall_detector_passive_actions_do_not_declare_freeze(self) -> None:
+        defects = DefectTracker()
+        detector = StallDetector(defects, threshold=3)
+
+        for step, action in enumerate(["restart_target", "restart_target", "restart_target"], start=1):
+            detector.record_state(step, "https://example.com/", "same-hash", action)
+
+        finding = detector.check_for_stall(4, "restart_target")
+
+        self.assertIsNone(finding)
+        self.assertEqual(len(defects.ux_flow_freezes), 0)
 
     def test_stall_detector_ignores_recent_loop_break_window(self) -> None:
         defects = DefectTracker()

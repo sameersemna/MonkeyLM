@@ -201,6 +201,13 @@ async def execute_action(
                     # the full frame blind.
                     top = regions[0]
                     log_entry["cv_top_region"] = f"x={top['x']},y={top['y']},w={top['w']},h={top['h']}"
+                    # High-confidence localization: a single dominant region
+                    # (covers >=70% of total diff area) lets the annotation
+                    # step skip the vision-LLM call entirely and draw the
+                    # CV box directly — saving 2-30s of inference per step.
+                    total_region_area = sum(r["area_ratio"] for r in regions)
+                    if top.get("box_2d") and total_region_area > 0 and top["area_ratio"] / total_region_area >= 0.7:
+                        log_entry["cv_confident_box"] = top["box_2d"]
 
         perf_findings = await perf_monitor.detect_bottlenecks(perf_before, perf_after, step_num, action, sanitize_for_storage(after_snapshot.url, max_len=1024))
         log_entry["performance_findings"] = len(perf_findings)
@@ -312,28 +319,49 @@ async def execute_action(
             if log_entry.get("cv_top_region"):
                 context_issue += f"; cv_candidate_region_px=({log_entry['cv_top_region']})"
             try:
-                active_vision_model = settings.vision_model or settings.pdf_vision_model
-                print(f"   └─ 📸 Annotating screenshot with {active_vision_model}...")
                 original_path = os.path.join(settings.output_dir, log_entry["screenshot"])
-                timeout_seconds = min(2.0, max(0.5, float(getattr(settings, "pdf_vision_timeout_seconds", 60.0)) * 0.02))
-                annotation_task = asyncio.create_task(
-                    annotate_relevant_screenshot(settings, original_path, context_issue, step_num=step_num)
-                )
-                try:
-                    annotated_path = await asyncio.wait_for(annotation_task, timeout=timeout_seconds)
-                    if annotated_path != original_path:
-                        log_entry["screenshot"] = os.path.basename(annotated_path)
+                if log_entry.get("cv_confident_box"):
+                    # High-confidence CV localization: skip the vision-LLM call
+                    # entirely and draw the CV-derived box directly. Saves 2-30s
+                    # of inference per annotated step on unambiguous defects.
+                    from monkeylm.models.vision import _draw_red_box_arrow
+                    annotated_name = f"step_{step_num:03d}_annotated.png"
+                    annotated_path = os.path.join(settings.output_dir, annotated_name)
+                    print("   └─ 📸 Annotating screenshot with CV-localized box (vision call skipped)...")
+                    if _draw_red_box_arrow(
+                        original_path,
+                        log_entry["cv_confident_box"],
+                        context_issue,
+                        annotated_path,
+                        description="CV-localized visual regression",
+                        step_num=step_num,
+                    ):
+                        log_entry["screenshot"] = annotated_name
                         log_entry["screenshot_annotated"] = True
-                except asyncio.TimeoutError:
-                    annotation_task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await annotation_task
-                    _local_service_log(f"Annotation hook timed out at step {step_num}; continuing without annotation.", settings.output_dir)
-                except Exception as exc:
-                    annotation_task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await annotation_task
-                    _local_service_log(f"Annotation hook failed at step {step_num}: {exc}", settings.output_dir)
+                        log_entry["annotation_source"] = "cv"
+                else:
+                    active_vision_model = settings.vision_model or settings.pdf_vision_model
+                    print(f"   └─ 📸 Annotating screenshot with {active_vision_model}...")
+                    timeout_seconds = min(2.0, max(0.5, float(getattr(settings, "pdf_vision_timeout_seconds", 60.0)) * 0.02))
+                    annotation_task = asyncio.create_task(
+                        annotate_relevant_screenshot(settings, original_path, context_issue, step_num=step_num)
+                    )
+                    try:
+                        annotated_path = await asyncio.wait_for(annotation_task, timeout=timeout_seconds)
+                        if annotated_path != original_path:
+                            log_entry["screenshot"] = os.path.basename(annotated_path)
+                            log_entry["screenshot_annotated"] = True
+                            log_entry["annotation_source"] = "vision"
+                    except asyncio.TimeoutError:
+                        annotation_task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await annotation_task
+                        _local_service_log(f"Annotation hook timed out at step {step_num}; continuing without annotation.", settings.output_dir)
+                    except Exception as exc:
+                        annotation_task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await annotation_task
+                        _local_service_log(f"Annotation hook failed at step {step_num}: {exc}", settings.output_dir)
             except Exception as exc:
                 _local_service_log(f"Annotation hook failed at step {step_num}: {exc}", settings.output_dir)
 

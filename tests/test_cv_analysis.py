@@ -85,7 +85,23 @@ class TestCompareScreenshotsCv:
         assert region["x"] <= 120 and region["y"] <= 40
         assert region["x"] + region["w"] >= 180
         assert region["y"] + region["h"] >= 100
+        # Normalized box_2d [ymin, xmin, ymax, xmax] matches pixel coords.
+        ymin, xmin, ymax, xmax = region["box_2d"]
+        assert ymin == pytest.approx(region["y"] / 240, abs=0.01)
+        assert xmin == pytest.approx(region["x"] / 320, abs=0.01)
+        assert ymax == pytest.approx((region["y"] + region["h"]) / 240, abs=0.01)
+        assert xmax == pytest.approx((region["x"] + region["w"]) / 320, abs=0.01)
         assert os.path.exists(result["diff_image"])
+
+    def test_cv_confident_box_draws_annotation(self, tmp_path):
+        """The vision-skip path: _draw_red_box_arrow accepts CV-derived boxes."""
+        from monkeylm.models.vision import _draw_red_box_arrow
+        frame = _textured_frame()
+        path = _write_png(str(tmp_path / "frame.png"), cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR))
+        out = str(tmp_path / "annotated.png")
+        ok = _draw_red_box_arrow(path, [0.15, 0.35, 0.45, 0.60], "status=FAILED", out, description="CV-localized", step_num=7)
+        assert ok is True
+        assert os.path.exists(out)
 
     def test_size_mismatch_handled(self, tmp_path):
         before = _write_png(str(tmp_path / "a.png"), _textured_frame(320, 240))

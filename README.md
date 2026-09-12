@@ -4,9 +4,7 @@
 
 An LLM-guided, Playwright-powered monkey testing framework for aggressively exploring web apps and surfacing defects across UX, reliability, accessibility, security, and performance.
 
-This project has two runnable scripts:
-- `monkey_agent_advanced.py`: full-featured smart monkey engine with defect tracking and report artifacts.
-- `test.py`: lighter baseline version for quick runs and experimentation.
+Run it as a module: `python -m monkeylm` (the full-featured smart monkey engine with defect tracking and report artifacts).
 
 ## 🚀 Quick Start
 
@@ -23,7 +21,7 @@ ollama pull llama3.2-vision
 # Optional: copy the example environment file and edit values for your setup.
 cp .env.example .env
 
-python3 monkey_agent_advanced.py
+python -m monkeylm
 ```
 
 Environment variables are resolved in this precedence order:
@@ -92,6 +90,15 @@ The advanced runner now supports both environment-variable configuration and CLI
 | `PDF_GENERATE` | `false` | Set to `true` to generate an executive PDF audit report (`test_execution_audit.pdf`). |
 | `PDF_VISION_MODEL` | `llama3.2-vision` | Local Ollama vision model used to locate anomalies on annotated screenshots. |
 | `PDF_VISION_TIMEOUT_SECONDS` | `30` | Hard timeout for each vision-model annotation call. |
+| `CV_ANALYSIS_ENABLED` | `true` | Master switch for OpenCV screenshot analysis (SSIM region localization, blank-screen detection). |
+| `CV_SSIM_THRESHOLD` | `0.95` | Per-pixel SSIM cutoff (0.5–1.0) below which pixels count as changed. |
+| `CV_BLANK_SCREEN_STDDEV` | `8.0` | Grayscale stddev below which a frame is flagged as a blank/crashed screen. |
+| `CV_PHASH_DEDUP` | `true` | Perceptual-hash visual freeze detection and visual-novelty exploration guidance. |
+| `CV_TEMPLATE_VERIFY` | `true` | Template-matching verification that expected page chrome (logo/nav) persists. |
+| `CV_TEMPLATE_MIN_SCORE` | `0.75` | Minimum multi-scale match score (0.3–1.0) before chrome is reported missing. |
+| `CV_TEMPLATE_SCALE` | `0.5` | Downscale factor (0.25–1.0) for template matching; 0.5 roughly quarters matching cost. |
+| `CV_TEMPLATE_EVERY_N_STEPS` | `2` | Verify chrome every N steps instead of every step. |
+| `OCR_ENABLED` | `false` | Extract error text from failure screenshots via RapidOCR (canvas/iframe/PDF content the DOM cannot reach). |
 
 ### Selective Vision Audit & Executive PDF
 
@@ -116,7 +123,7 @@ Equivalent models such as `qwen2.5-vl` can be used by setting `PDF_VISION_MODEL`
 
 ```bash
 export PDF_GENERATE=true
-python3 monkey_agent_advanced.py
+python -m monkeylm
 ```
 
 You can combine it with the standard configuration variables:
@@ -127,7 +134,7 @@ export PDF_VISION_MODEL=llama3.2-vision
 export PDF_VISION_TIMEOUT_SECONDS=30
 export TARGET_URL="https://example.com/dashboard"
 export MAX_STEPS=50
-python3 monkey_agent_advanced.py
+python -m monkeylm
 ```
 
 ### CLI Overrides
@@ -151,6 +158,15 @@ python3 monkey_agent_advanced.py
 | `--window-size` | Override browser window size. |
 | `--headless` / `--headed` | Force headless or headed mode. |
 | `--no-viewport` / `--use-viewport` | Force viewport behavior. |
+| `--cv-analysis` / `--no-cv-analysis` | Enable/disable OpenCV screenshot analysis. |
+| `--cv-ssim-threshold` | Override the SSIM change cutoff. |
+| `--cv-blank-screen-stddev` | Override the blank-screen stddev threshold. |
+| `--cv-phash-dedup` / `--no-cv-phash-dedup` | Toggle perceptual-hash freeze detection and visual-novelty guidance. |
+| `--cv-template-verify` / `--no-cv-template-verify` | Toggle chrome template verification. |
+| `--cv-template-min-score` | Override the chrome match-score threshold. |
+| `--cv-template-scale` | Override the template-matching downscale factor. |
+| `--cv-template-every-n-steps` | Override the chrome verification cadence. |
+| `--ocr` / `--no-ocr` | Toggle OCR error-text extraction on failed steps. |
 
 Precedence rule:
 - CLI flag value wins over environment variable value.
@@ -172,13 +188,13 @@ RETRY_BASE_DELAY_SECONDS=1.0 \
 HEADLESS=true \
 BROWSER_WINDOW_SIZE="1600x900" \
 NO_VIEWPORT=true \
-python3 monkey_agent_advanced.py
+python -m monkeylm
 ```
 
 CLI-driven:
 
 ```bash
-python3 monkey_agent_advanced.py \
+python -m monkeylm \
 	--target-url "https://example.com/dashboard" \
 	--ollama-model "llama3.2" \
 	--max-steps 75 \
@@ -233,8 +249,12 @@ Operational guidance:
 - Accessibility checks with axe-core (`critical`/`serious` filtering).
 - Performance telemetry (CDP metrics, long tasks, JS heap, FPS sampling).
 - Visual regression and layout instability detection via screenshot diffing.
+- OpenCV screenshot analysis: SSIM-based diff-region localization (bounding boxes), blank/crash-screen detection, perceptual-hash visual freeze detection, and template-matching verification of expected page chrome.
+- Visual-novelty exploration guidance: perceptual state hashing steers the monkey away from visually-identical screens even when DOM hashes differ (canvas apps, randomized IDs).
+- Optional OCR error-text extraction on failed steps (RapidOCR, ONNX-based) for content the DOM cannot reach.
+- Cross-detector confidence tiers: defects corroborated by both DOM and CV signals are marked `confirmed` in compiled tickets.
 - Markdown and JSON reporting (`test_report.md`, `results.json`) plus per-step screenshots.
-- Selective smart screenshot annotation: FAILED/CRASH/security/visual/layout steps are sent to a local vision model, which locates the anomaly and draws a red bounding box + arrow.
+- Selective smart screenshot annotation: FAILED/CRASH/security/visual/layout steps are annotated with a red bounding box + arrow — drawn directly from high-confidence CV localization when available, otherwise via a vision model.
 - Executive PDF audit report (`test_execution_audit.pdf`) with run stats, defect logs, and inline annotated visual proof plates.
 - Worker startup and boundary-recovery retries with exponential backoff for transient navigation/service failures.
 
@@ -329,7 +349,7 @@ WORKER_NAVIGATION_RETRIES=2 \
 WORKER_QDRANT_INIT_RETRIES=1 \
 WORKER_BOUNDARY_RECOVERY_RETRIES=1 \
 RETRY_BASE_DELAY_SECONDS=0.75 \
-python3 monkey_agent_advanced.py
+python -m monkeylm
 ```
 
 ### PostgreSQL database does not exist
@@ -367,7 +387,7 @@ Fix:
 - Increase the per-call timeout:
 
 ```bash
-OLLAMA_TIMEOUT_SECONDS=30 python3 monkey_agent_advanced.py
+OLLAMA_TIMEOUT_SECONDS=30 python -m monkeylm
 ```
 
 - Tune the Ollama server for parallel batch inference. Match parallelism to `WORKERS`:
@@ -392,7 +412,7 @@ Fix:
   slow to react:
 
 ```bash
-REDIS_PATH_LOCK_TTL_SECONDS=90 python3 monkey_agent_advanced.py
+REDIS_PATH_LOCK_TTL_SECONDS=90 python -m monkeylm
 ```
 
 - Ensure `REDIS_URL` is reachable from all workers and that `REDIS_PREFIX` is
@@ -413,8 +433,9 @@ Each run creates:
 - `results.json`: structured machine-readable summary.
 - `test_execution_audit.pdf`: executive PDF with run stats, defect logs, and annotated visual proof plates (when `PDF_GENERATE=true`).
 - `step_*.png`: screenshots for before/after/final phases.
-- `step_*_annotated.png`: vision-annotated screenshots for critical regression/failure steps.
-- `visual_diff_step_*.png`: visual diff images when enabled.
+- `step_*_annotated.png`: annotated screenshots for critical regression/failure steps (CV-localized or vision-model).
+- `visual_diff_step_*.png`: pixelmatch visual diff images when enabled.
+- `cv_diff_step_*.png`: SSIM diff images with bounding boxes around changed regions.
 
 ## 🤖 CI Example (GitHub Actions)
 
@@ -471,7 +492,7 @@ jobs:
 					NO_VIEWPORT: "true"
 					ALLOW_NO_SANDBOX_FALLBACK: "true"
 				run: |
-					python3 monkey_agent_advanced.py --headless --no-viewport
+					python -m monkeylm --headless --no-viewport
 
 			- name: Upload artifacts
 				if: always()

@@ -187,6 +187,7 @@ def compare_screenshots_cv(
         contours, _ = cv2.findContours(merged, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         min_area = _MIN_REGION_AREA_RATIO * float(total)
+        frame_h, frame_w = mask.shape[:2]
         regions: List[Dict[str, Any]] = []
         for contour in contours:
             x, y, w, h = cv2.boundingRect(contour)
@@ -198,6 +199,15 @@ def compare_screenshots_cv(
                 "y": int(y),
                 "w": int(w),
                 "h": int(h),
+                # Normalized [ymin, xmin, ymax, xmax] matching the vision
+                # annotation contract, so downstream consumers (annotation
+                # skip path, reports) can use regions without image dims.
+                "box_2d": [
+                    round(y / frame_h, 4),
+                    round(x / frame_w, 4),
+                    round((y + h) / frame_h, 4),
+                    round((x + w) / frame_w, 4),
+                ],
                 "area_ratio": area / float(total),
             })
         regions.sort(key=lambda r: r["area_ratio"], reverse=True)
