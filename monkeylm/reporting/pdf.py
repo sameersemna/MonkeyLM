@@ -70,7 +70,7 @@ def generate_pdf_report(
         defect_step_numbers_pdf: Set[int] = set()
         for cat in ["security_risks", "context_anomalies", "ux_flow_freezes",
                      "validation_failures", "race_findings", "boundary_drift",
-                     "console_findings", "accessibility_violations"]:
+                     "console_findings", "accessibility_violations", "rendering_defects"]:
             collection = getattr(defects, cat, None)
             if not collection:
                 continue

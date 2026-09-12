@@ -43,7 +43,7 @@ def generate_markdown_report(
     defect_categories_for_steps = [
         "security_risks", "context_anomalies", "ux_flow_freezes",
         "validation_failures", "race_findings", "boundary_drift",
-        "console_findings", "accessibility_violations",
+        "console_findings", "accessibility_violations", "rendering_defects",
     ]
     for cat in defect_categories_for_steps:
         collection = getattr(defects, cat, None)

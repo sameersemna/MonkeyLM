@@ -30,6 +30,7 @@ from monkeylm.types import WorkerRunResult
 
 from .helpers import build_worker_user_data_dir, with_retry_backoff
 from monkeylm.browser.actions.interaction import collect_failure_context, recover_nonresponsive_state
+from monkeylm.browser.snapshot.cv import capture_chrome_templates, verify_chrome_templates, visual_phash
 
 
 async def _execute_step_with_timeout(coro: Any, *, timeout_seconds: float) -> Any:
@@ -170,6 +171,8 @@ async def run_worker(
     seen_click_targets: set = set()
     recent_model_plans: List[Tuple[str, str]] = []
     recent_state_history: List[Dict[str, Any]] = []
+    chrome_templates: Dict[str, Any] = {}
+    chrome_baseline_domain: str = ""
     completed_steps = 0
     failure_reason: str | None = None
     failure_artifact: str | None = None
@@ -450,13 +453,46 @@ async def run_worker(
                     # doesn't declare (and keep re-declaring) a bogus freeze.
                     pass
                 else:
+                    step_visual_hash = ""
+                    if getattr(settings, "cv_analysis_enabled", False) and getattr(settings, "cv_phash_dedup", False):
+                        step_visual_hash = visual_phash(post_snapshot.screenshot_path)
                     worker_stall_detector.record_state(
                         step,
                         post_snapshot.url,
                         post_snapshot.dom_hash,
                         str(plan.get("action", "")),
                         loop_break_applied=loop_break_applied,
+                        visual_hash=step_visual_hash,
                     )
+
+                    # Expected-chrome verification: the first same-domain frame
+                    # becomes the baseline (auto-capture); later frames must
+                    # still contain the logo/nav templates or the page has lost
+                    # its chrome (broken nav, unexpected full-page state).
+                    if getattr(settings, "cv_analysis_enabled", False) and getattr(settings, "cv_template_verify", False):
+                        from monkeylm.config import split_domain_and_route
+                        current_domain, _ = split_domain_and_route(post_snapshot.url)
+                        if current_domain and current_domain != chrome_baseline_domain:
+                            captured = capture_chrome_templates(post_snapshot.screenshot_path)
+                            if captured:
+                                chrome_templates = captured
+                                chrome_baseline_domain = current_domain
+                        elif chrome_templates and current_domain == chrome_baseline_domain:
+                            verification = verify_chrome_templates(
+                                post_snapshot.screenshot_path,
+                                chrome_templates,
+                                min_score=float(getattr(settings, "cv_template_min_score", 0.75)),
+                            )
+                            missing = verification.get("missing") or []
+                            if missing:
+                                worker_defects.add("rendering_defects", {
+                                    "step": step,
+                                    "type": "chrome-missing",
+                                    "missing_regions": missing,
+                                    "match_scores": verification.get("scores", {}),
+                                    "url": sanitize_for_storage(post_snapshot.url, max_len=1024),
+                                    "screenshot": os.path.basename(post_snapshot.screenshot_path),
+                                })
                     stall_finding = worker_stall_detector.check_for_stall(step, plan.get("action", "scroll"))
                     if stall_finding:
                         failure_reason = stall_finding.get("reason", "stuck_state_detected")

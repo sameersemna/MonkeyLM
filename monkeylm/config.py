@@ -94,6 +94,9 @@ pil_pixelmatch = _optional_import("pixelmatch.contrib.PIL", "pixelmatch")
 asyncpg = _optional_import("asyncpg")
 redis_asyncio = _optional_import("redis.asyncio")
 httpx = _optional_import("httpx")
+cv2 = _optional_import("cv2")
+np = _optional_import("numpy")
+RapidOCR = _optional_import("rapidocr_onnxruntime", "RapidOCR")
 
 try:
     _REPORTLAB_AVAILABLE = True
@@ -145,6 +148,14 @@ DEFAULT_PDF_GENERATE = False
 DEFAULT_PDF_VISION_MODEL = "llama3.2-vision"
 DEFAULT_VISION_MODEL = "gemini-3-flash-preview"
 DEFAULT_PDF_VISION_TIMEOUT_SECONDS = 30.0
+
+DEFAULT_CV_ANALYSIS_ENABLED = True
+DEFAULT_CV_SSIM_THRESHOLD = 0.95
+DEFAULT_CV_BLANK_SCREEN_STDDEV = 8.0
+DEFAULT_CV_PHASH_DEDUP = True
+DEFAULT_CV_TEMPLATE_VERIFY = True
+DEFAULT_CV_TEMPLATE_MIN_SCORE = 0.75
+DEFAULT_OCR_ENABLED = False
 
 AXE_CDN_URL = "https://cdnjs.cloudflare.com/ajax/libs/axe-core/4.9.1/axe.min.js"
 VISUAL_DIFF_THRESHOLD_RATIO = 0.01
@@ -394,6 +405,36 @@ def parse_cli_args() -> argparse.Namespace:
     )
     parser.set_defaults(no_viewport=None)
 
+    cv_group = parser.add_mutually_exclusive_group()
+    cv_group.add_argument(
+        "--cv-analysis",
+        dest="cv_analysis",
+        action="store_true",
+        help="Enable OpenCV screenshot analysis (SSIM region localization, blank-screen detection)",
+    )
+    cv_group.add_argument(
+        "--no-cv-analysis",
+        dest="cv_analysis",
+        action="store_false",
+        help="Disable OpenCV screenshot analysis",
+    )
+    parser.set_defaults(cv_analysis=None)
+    parser.add_argument("--cv-ssim-threshold", type=float, help="Per-pixel SSIM cutoff (0.5-1.0) below which pixels count as changed")
+    parser.add_argument("--cv-blank-screen-stddev", type=float, help="Grayscale stddev below which a frame is treated as blank")
+    phash_group = parser.add_mutually_exclusive_group()
+    phash_group.add_argument("--cv-phash-dedup", dest="cv_phash_dedup", action="store_true", help="Enable perceptual-hash visual freeze detection in the stall detector")
+    phash_group.add_argument("--no-cv-phash-dedup", dest="cv_phash_dedup", action="store_false", help="Disable perceptual-hash visual freeze detection")
+    parser.set_defaults(cv_phash_dedup=None)
+    template_group = parser.add_mutually_exclusive_group()
+    template_group.add_argument("--cv-template-verify", dest="cv_template_verify", action="store_true", help="Enable template-matching verification of expected page chrome (logo/nav)")
+    template_group.add_argument("--no-cv-template-verify", dest="cv_template_verify", action="store_false", help="Disable chrome template verification")
+    parser.set_defaults(cv_template_verify=None)
+    parser.add_argument("--cv-template-min-score", type=float, help="Minimum multi-scale template match score (0.3-1.0) before chrome is reported missing")
+    ocr_group = parser.add_mutually_exclusive_group()
+    ocr_group.add_argument("--ocr", dest="ocr_enabled", action="store_true", help="Enable OCR error-text extraction on failed steps (requires rapidocr-onnxruntime)")
+    ocr_group.add_argument("--no-ocr", dest="ocr_enabled", action="store_false", help="Disable OCR error-text extraction")
+    parser.set_defaults(ocr_enabled=None)
+
     persistence_group = parser.add_mutually_exclusive_group()
     persistence_group.add_argument(
         "--strict-persistence",
@@ -496,6 +537,20 @@ def load_settings(cli_args: Optional[argparse.Namespace] = None) -> Settings:
     s.pdf_vision_timeout_seconds = max(1.0, float(ev_pvt) if ev_pvt is not None else s.pdf_vision_timeout_seconds)
     s.strict_sandbox = _env_bool("STRICT_SANDBOX", default=_env_to_bool(env_vars.get("STRICT_SANDBOX"), s.strict_sandbox))
     s.allow_no_sandbox_fallback = _env_bool("ALLOW_NO_SANDBOX_FALLBACK", default=_env_to_bool(env_vars.get("ALLOW_NO_SANDBOX_FALLBACK"), s.allow_no_sandbox_fallback))
+    ev_cv = env_vars.get("CV_ANALYSIS_ENABLED")
+    s.cv_analysis_enabled = _env_bool("CV_ANALYSIS_ENABLED", default=_env_to_bool(ev_cv, s.cv_analysis_enabled))
+    ev_ssim = env_vars.get("CV_SSIM_THRESHOLD")
+    s.cv_ssim_threshold = min(1.0, max(0.5, float(ev_ssim) if ev_ssim is not None else s.cv_ssim_threshold))
+    ev_blank = env_vars.get("CV_BLANK_SCREEN_STDDEV")
+    s.cv_blank_screen_stddev = max(0.5, float(ev_blank) if ev_blank is not None else s.cv_blank_screen_stddev)
+    ev_phash = env_vars.get("CV_PHASH_DEDUP")
+    s.cv_phash_dedup = _env_bool("CV_PHASH_DEDUP", default=_env_to_bool(ev_phash, s.cv_phash_dedup))
+    ev_tmpl = env_vars.get("CV_TEMPLATE_VERIFY")
+    s.cv_template_verify = _env_bool("CV_TEMPLATE_VERIFY", default=_env_to_bool(ev_tmpl, s.cv_template_verify))
+    ev_tscore = env_vars.get("CV_TEMPLATE_MIN_SCORE")
+    s.cv_template_min_score = min(1.0, max(0.3, float(ev_tscore) if ev_tscore is not None else s.cv_template_min_score))
+    ev_ocr = env_vars.get("OCR_ENABLED")
+    s.ocr_enabled = _env_bool("OCR_ENABLED", default=_env_to_bool(ev_ocr, s.ocr_enabled))
 
     if cli_args is not None:
         if getattr(cli_args, "target_url", None):
@@ -539,6 +594,20 @@ def load_settings(cli_args: Optional[argparse.Namespace] = None) -> Settings:
             )
         if getattr(cli_args, "no_viewport", None) is not None:
             s.no_viewport = bool(cli_args.no_viewport)
+        if getattr(cli_args, "cv_analysis", None) is not None:
+            s.cv_analysis_enabled = bool(cli_args.cv_analysis)
+        if getattr(cli_args, "cv_ssim_threshold", None) is not None:
+            s.cv_ssim_threshold = min(1.0, max(0.5, float(cli_args.cv_ssim_threshold)))
+        if getattr(cli_args, "cv_blank_screen_stddev", None) is not None:
+            s.cv_blank_screen_stddev = max(0.5, float(cli_args.cv_blank_screen_stddev))
+        if getattr(cli_args, "cv_phash_dedup", None) is not None:
+            s.cv_phash_dedup = bool(cli_args.cv_phash_dedup)
+        if getattr(cli_args, "cv_template_verify", None) is not None:
+            s.cv_template_verify = bool(cli_args.cv_template_verify)
+        if getattr(cli_args, "cv_template_min_score", None) is not None:
+            s.cv_template_min_score = min(1.0, max(0.3, float(cli_args.cv_template_min_score)))
+        if getattr(cli_args, "ocr_enabled", None) is not None:
+            s.ocr_enabled = bool(cli_args.ocr_enabled)
         if getattr(cli_args, "seed", None) is not None:
             random.seed(cli_args.seed)
             s.active_seed = str(cli_args.seed)
@@ -1097,6 +1166,9 @@ __all__ = [
     "asyncpg",
     "redis_asyncio",
     "httpx",
+    "cv2",
+    "np",
+    "RapidOCR",
     "_REPORTLAB_AVAILABLE",
     "DEFAULT_TARGET_URL",
     "DEFAULT_TARGET_USERNAME",
@@ -1136,6 +1208,13 @@ __all__ = [
     "DEFAULT_QDRANT_CANDIDATE_LIMIT",
     "DEFAULT_PDF_GENERATE",
     "DEFAULT_PDF_VISION_MODEL",
+    "DEFAULT_CV_ANALYSIS_ENABLED",
+    "DEFAULT_CV_SSIM_THRESHOLD",
+    "DEFAULT_CV_BLANK_SCREEN_STDDEV",
+    "DEFAULT_CV_PHASH_DEDUP",
+    "DEFAULT_CV_TEMPLATE_VERIFY",
+    "DEFAULT_CV_TEMPLATE_MIN_SCORE",
+    "DEFAULT_OCR_ENABLED",
     "DEFAULT_VISION_MODEL",
     "DEFAULT_PDF_VISION_TIMEOUT_SECONDS",
     "AXE_CDN_URL",

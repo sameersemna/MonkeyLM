@@ -65,6 +65,7 @@ def summarize_vibe_coding_accountability(defects: Any) -> Dict[str, Any]:
         "security_risks", "context_anomalies", "ux_flow_freezes",
         "validation_failures", "race_findings", "boundary_drift",
         "console_findings", "performance_bottlenecks", "accessibility_violations",
+        "rendering_defects",
     ]
     app_defect_count = 0
     for cat in defect_categories:
@@ -113,6 +114,7 @@ def _derive_severity(category: str, defect: Dict[str, Any]) -> str:
         "visual_regressions": "LOW",
         "layout_instability": "LOW",
         "regression_findings": "MEDIUM",
+        "rendering_defects": "HIGH",
     }
 
     base = _SEVERITY_MAP.get(category, "MEDIUM")

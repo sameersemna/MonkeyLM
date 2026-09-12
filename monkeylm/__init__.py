@@ -201,6 +201,8 @@ try:
     from monkeylm.browser import (
         capture_dom_and_layout,
         compare_screenshots_pixelmatch,
+        analyze_screenshot_health,
+        compare_screenshots_cv,
         diff_component_manifests,
         execute_action,
         extract_component_manifest,
@@ -211,7 +213,7 @@ try:
         wait_for_page_ready,
     )
 except Exception:
-    capture_dom_and_layout = compare_screenshots_pixelmatch = diff_component_manifests = execute_action = extract_component_manifest = get_page_state = handle_dialog = launch_context_with_fallback = state_to_prompt = wait_for_page_ready = None
+    capture_dom_and_layout = compare_screenshots_pixelmatch = analyze_screenshot_health = compare_screenshots_cv = diff_component_manifests = execute_action = extract_component_manifest = get_page_state = handle_dialog = launch_context_with_fallback = state_to_prompt = wait_for_page_ready = None
 
 try:
     from monkeylm.models import (
@@ -336,6 +338,8 @@ __all__ = [
     "inspect_optional_runtime_dependencies",
     "capture_dom_and_layout",
     "compare_screenshots_pixelmatch",
+    "analyze_screenshot_health",
+    "compare_screenshots_cv",
     "diff_component_manifests",
     "execute_action",
     "extract_component_manifest",

@@ -12,6 +12,15 @@ from .state import (
     state_to_prompt,
 )
 from .visual import compute_max_layout_shift, compare_screenshots_pixelmatch
+from .cv import (
+    analyze_screenshot_health,
+    capture_chrome_templates,
+    compare_screenshots_cv,
+    ocr_error_text,
+    phash_hamming,
+    verify_chrome_templates,
+    visual_phash,
+)
 
 __all__ = [
     "capture_dom_and_layout",
@@ -25,4 +34,11 @@ __all__ = [
     "state_to_prompt",
     "compute_max_layout_shift",
     "compare_screenshots_pixelmatch",
+    "analyze_screenshot_health",
+    "compare_screenshots_cv",
+    "capture_chrome_templates",
+    "verify_chrome_templates",
+    "visual_phash",
+    "phash_hamming",
+    "ocr_error_text",
 ]

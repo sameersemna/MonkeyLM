@@ -103,6 +103,14 @@ class Settings:
 
     pdf_generate: bool = False
 
+    cv_analysis_enabled: bool = True
+    cv_ssim_threshold: float = 0.95
+    cv_blank_screen_stddev: float = 8.0
+    cv_phash_dedup: bool = True
+    cv_template_verify: bool = True
+    cv_template_min_score: float = 0.75
+    ocr_enabled: bool = False
+
     active_seed: Optional[str] = None
     timestamp: str = field(default_factory=lambda: datetime.now().strftime("%Y%m%d_%H%M%S"))
 

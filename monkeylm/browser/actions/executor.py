@@ -22,6 +22,11 @@ from monkeylm.browser.snapshot import (
     compute_max_layout_shift,
     compare_screenshots_pixelmatch,
 )
+from monkeylm.browser.snapshot.cv import (
+    analyze_screenshot_health,
+    compare_screenshots_cv,
+    ocr_error_text,
+)
 from monkeylm.types import PageSnapshot
 
 from .helpers import _locator_for_target_id
@@ -165,6 +170,38 @@ async def execute_action(
         if visual_diff.get("diff_ratio", 0.0) > VISUAL_DIFF_THRESHOLD_RATIO and before_snapshot.url == after_snapshot.url:
             defects.add("visual_regressions", {"step": step_num, "type": "visual-diff", "diff_ratio": visual_diff.get("diff_ratio"), "diff_pixels": visual_diff.get("diff_pixels"), "engine": visual_diff.get("engine"), "diff_image": os.path.basename(visual_diff.get("diff_image", "")), "url": sanitize_for_storage(after_snapshot.url, max_len=1024)})
 
+        if getattr(settings, "cv_analysis_enabled", False):
+            # Blank/crash-screen detection runs on every step: it is cheap and
+            # catches failures that leave the DOM intact (renderer crash, WSOD).
+            health = analyze_screenshot_health(
+                after_snapshot.screenshot_path,
+                blank_stddev_threshold=float(getattr(settings, "cv_blank_screen_stddev", 8.0)),
+            )
+            if health.get("blank_screen"):
+                defects.add("rendering_defects", {"step": step_num, "type": "blank-screen", "stddev": health.get("stddev"), "mean": health.get("mean"), "unique_colors": health.get("unique_colors"), "url": sanitize_for_storage(after_snapshot.url, max_len=1024), "screenshot": os.path.basename(after_snapshot.screenshot_path)})
+                log_entry["blank_screen"] = True
+
+            # SSIM region localization only runs when pixelmatch already flagged
+            # a same-URL diff: it localizes a known change instead of scanning
+            # every frame, keeping per-step overhead near zero on benign steps.
+            if visual_diff.get("diff_ratio", 0.0) > VISUAL_DIFF_THRESHOLD_RATIO and before_snapshot.url == after_snapshot.url:
+                cv_diff = compare_screenshots_cv(
+                    before_snapshot.screenshot_path,
+                    after_snapshot.screenshot_path,
+                    step_num,
+                    output_dir=settings.output_dir,
+                    ssim_threshold=float(getattr(settings, "cv_ssim_threshold", 0.95)),
+                )
+                regions = cv_diff.get("diff_regions") or []
+                if regions:
+                    defects.add("visual_regressions", {"step": step_num, "type": "visual-diff-region", "ssim_score": cv_diff.get("ssim_score"), "diff_ratio": cv_diff.get("diff_ratio"), "regions": regions, "engine": cv_diff.get("engine"), "diff_image": os.path.basename(cv_diff.get("diff_image", "")), "url": sanitize_for_storage(after_snapshot.url, max_len=1024)})
+                    log_entry["cv_diff_regions"] = len(regions)
+                    # Keep the top region for the vision-annotation prompt so
+                    # the LLM gets a candidate localization instead of scanning
+                    # the full frame blind.
+                    top = regions[0]
+                    log_entry["cv_top_region"] = f"x={top['x']},y={top['y']},w={top['w']},h={top['h']}"
+
         perf_findings = await perf_monitor.detect_bottlenecks(perf_before, perf_after, step_num, action, sanitize_for_storage(after_snapshot.url, max_len=1024))
         log_entry["performance_findings"] = len(perf_findings)
 
@@ -222,6 +259,24 @@ async def execute_action(
         except Exception:
             pass
 
+        # OCR error-text extraction on failure screenshots: captures visible
+        # error messages the DOM cannot reach (canvas apps, native error pages,
+        # PDF viewers). Opt-in via OCR_ENABLED since it pulls ONNX runtime.
+        if getattr(settings, "ocr_enabled", False) and log_entry.get("screenshot"):
+            try:
+                ocr = ocr_error_text(os.path.join(settings.output_dir, log_entry["screenshot"]))
+                if ocr.get("text"):
+                    log_entry["ocr_error_text"] = ocr["text"]
+                    defects.add("rendering_defects", {
+                        "step": step_num,
+                        "type": "ocr-error-text",
+                        "ocr_text": sanitize_for_storage(ocr["text"], max_len=512),
+                        "url": sanitize_for_storage(page.url, max_len=1024),
+                        "screenshot": log_entry["screenshot"],
+                    })
+            except Exception:
+                pass
+
         action_remediation: Dict[str, str] = {
             "click": "Ensure the target element is visible, not obscured by overlays, and has a stable selector.",
             "type": "Verify the input field is enabled and accepts keyboard events.",
@@ -254,6 +309,8 @@ async def execute_action(
                 context_issue += "; " + "; ".join(defect_reasons)
             if log_entry.get("error"):
                 context_issue += f"; error={log_entry['error'][:120]}"
+            if log_entry.get("cv_top_region"):
+                context_issue += f"; cv_candidate_region_px=({log_entry['cv_top_region']})"
             try:
                 active_vision_model = settings.vision_model or settings.pdf_vision_model
                 print(f"   └─ 📸 Annotating screenshot with {active_vision_model}...")

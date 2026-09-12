@@ -36,6 +36,7 @@ class DefectTracker:
         self.ux_flow_freezes: List[Dict[str, Any]] = []
         self.validation_failures: List[Dict[str, Any]] = []
         self.capture_diagnostics: List[Dict[str, Any]] = []
+        self.rendering_defects: List[Dict[str, Any]] = []
 
     def add(self, category: str, payload: Dict[str, Any]) -> None:
         collection = getattr(self, category, None)
@@ -57,6 +58,7 @@ class DefectTracker:
             "ux_flow_freezes",
             "validation_failures",
             "capture_diagnostics",
+            "rendering_defects",
         ]
         for category in categories:
             own_collection = getattr(self, category)

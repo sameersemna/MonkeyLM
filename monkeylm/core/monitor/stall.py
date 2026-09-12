@@ -24,6 +24,7 @@ class StallDetector:
         action: str = "",
         *,
         loop_break_applied: bool = False,
+        visual_hash: str = "",
     ) -> None:
         # Caller must pass a *content-aware* hash (PageSnapshot.dom_hash, which
         # includes element text), not PageSnapshot.structure_hash. structure_hash
@@ -32,10 +33,14 @@ class StallDetector:
         # different screens with the same shape (e.g. an onboarding carousel
         # that's always "two buttons," with different labels each slide) hash
         # identically and register as a false freeze.
+        # ``visual_hash`` (perceptual screenshot hash) is the complementary
+        # signal: two screens whose DOM hashes differ (randomized IDs, canvas
+        # apps) but which *look* identical are still a freeze.
         self._history.append({
             "step": step,
             "url": url,
             "state_hash": state_hash,
+            "visual_hash": visual_hash,
             "action": action,
             "loop_break_applied": loop_break_applied,
         })
@@ -58,20 +63,29 @@ class StallDetector:
             return None
         urls = set(e["url"] for e in window)
         hashes = set(e["state_hash"] for e in window)
+        visual_hashes = {e.get("visual_hash", "") for e in window}
+        visual_hashes.discard("")
+        # A window is visually frozen when every entry carries a visual hash and
+        # they are all identical. This catches freezes the DOM hash misses on
+        # canvas-rendered apps or pages with randomized element IDs.
+        visually_frozen = len(window) == self.threshold and len(visual_hashes) == 1
         actions = [e["action"] for e in window]
         all_actions = actions + [current_action]
         passive_actions = {"scroll", "back", "random_jump", "restart_target"}
         meaningful_count = sum(1 for a in all_actions if a not in passive_actions)
-        if len(urls) <= 1 and len(hashes) <= 1 and meaningful_count >= self.threshold:
+        if len(urls) <= 1 and (len(hashes) <= 1 or visually_frozen) and meaningful_count >= self.threshold:
             sentinel = (window or [{}])[0] if window else {}
+            detection_signal = "dom_hash" if len(hashes) <= 1 else "visual_phash"
             finding = {
                 "step": step,
                 "type": "stuck_state_detected",
                 "reason": "stuck_state_detected",
+                "detection_signal": detection_signal,
                 "description": (
                     f"Page state unchanged across {self.threshold} consecutive steps "
                     f"(URL={sentinel.get('url', 'unknown')!r}, "
-                    f"hash={sentinel.get('state_hash', 'unknown')!r}). "
+                    f"hash={sentinel.get('state_hash', 'unknown')!r}, "
+                    f"signal={detection_signal}). "
                     f"Actions attempted: {actions}"
                 ),
                 "stall_window_steps": window,

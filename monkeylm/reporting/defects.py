@@ -19,6 +19,7 @@ _SEVERITY_MAP: Dict[str, str] = {
     "visual_regressions": "LOW",
     "layout_instability": "LOW",
     "regression_findings": "MEDIUM",
+    "rendering_defects": "HIGH",
 }
 
 _ROOT_CAUSE_TEMPLATES: Dict[str, str] = {
@@ -80,6 +81,11 @@ _ROOT_CAUSE_TEMPLATES: Dict[str, str] = {
         "Components present in historical golden baselines are now missing or structurally broken. "
         "This indicates code changes have inadvertently removed or altered core interactive elements, "
         "potentially breaking established user flows or functionality."
+    ),
+    "rendering_defects": (
+        "Screenshot analysis detected a blank or near-uniform rendered frame, indicating a renderer "
+        "crash, a failed page load (white screen of death), or a full-screen error state that left "
+        "no meaningful visible content despite an intact DOM."
     ),
 }
 

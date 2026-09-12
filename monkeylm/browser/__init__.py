@@ -9,9 +9,11 @@ try:
         compare_screenshots_pixelmatch,
         extract_component_manifest,
         diff_component_manifests,
+        analyze_screenshot_health,
+        compare_screenshots_cv,
     )
 except Exception:  # pragma: no cover - optional dependency path
-    capture_dom_and_layout = get_page_state = state_to_prompt = compute_max_layout_shift = compare_screenshots_pixelmatch = extract_component_manifest = diff_component_manifests = None
+    capture_dom_and_layout = get_page_state = state_to_prompt = compute_max_layout_shift = compare_screenshots_pixelmatch = extract_component_manifest = diff_component_manifests = analyze_screenshot_health = compare_screenshots_cv = None
 
 try:
     from monkeylm.browser.lifecycle import (
@@ -48,6 +50,8 @@ __all__ = [
     "state_to_prompt",
     "compute_max_layout_shift",
     "compare_screenshots_pixelmatch",
+    "analyze_screenshot_health",
+    "compare_screenshots_cv",
     "extract_component_manifest",
     "diff_component_manifests",
     "wait_for_page_ready",
