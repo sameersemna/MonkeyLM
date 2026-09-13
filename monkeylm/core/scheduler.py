@@ -125,6 +125,12 @@ async def main(settings: Settings) -> None:
             }
         )
 
+    # The persistence engine's own tracker holds baseline-analysis findings
+    # (component regression + visual drift) recorded outside any worker's
+    # tracker — without this merge they land in the drift log but never in
+    # the reports.
+    merged_defects.merge_from(defects)
+
     merged_logs.sort(key=lambda entry: int(entry.get("step", 0)))
     global test_logs
     test_logs = merged_logs
