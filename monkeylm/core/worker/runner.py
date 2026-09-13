@@ -451,6 +451,7 @@ async def run_worker(
             try:
                 baseline_snapshot = await get_page_state(page, step, phase="baseline", output_dir=settings.output_dir)
                 await persistence_engine.analyze_route_regression(page, baseline_snapshot, step)
+                await persistence_engine.analyze_route_visual_drift(baseline_snapshot, step)
             except Exception as exc:
                 _local_service_log(f"{worker_label} post-step baseline analysis failed at step {step}: {exc}", settings.output_dir)
 

@@ -103,6 +103,36 @@ class TestCompareScreenshotsCv:
         assert ok is True
         assert os.path.exists(out)
 
+
+class TestScreenshotDedup:
+    def test_identical_frames_share_one_file(self, tmp_path):
+        from monkeylm.browser.snapshot.state import _dedup_screenshot, _screenshot_registry
+        _screenshot_registry.clear()
+        frame = _textured_frame()
+        first = _write_png(str(tmp_path / "a.png"), frame)
+        second = _write_png(str(tmp_path / "b.png"), frame.copy())
+        out_dir = str(tmp_path)
+        kept = _dedup_screenshot(first, out_dir)
+        assert kept == first
+        deduped = _dedup_screenshot(second, out_dir)
+        assert deduped == first
+        assert not os.path.exists(second)  # duplicate file removed
+
+    def test_different_frames_keep_separate_files(self, tmp_path):
+        from monkeylm.browser.snapshot.state import _dedup_screenshot, _screenshot_registry
+        _screenshot_registry.clear()
+        first = _write_png(str(tmp_path / "a.png"), _textured_frame())
+        other = np.full((240, 320), 255, dtype=np.uint8)
+        second = _write_png(str(tmp_path / "b.png"), other)
+        out_dir = str(tmp_path)
+        assert _dedup_screenshot(first, out_dir) == first
+        assert _dedup_screenshot(second, out_dir) == second
+        assert os.path.exists(second)
+
+    def test_empty_path_passthrough(self):
+        from monkeylm.browser.snapshot.state import _dedup_screenshot
+        assert _dedup_screenshot("", "/tmp") == ""
+
     def test_size_mismatch_handled(self, tmp_path):
         before = _write_png(str(tmp_path / "a.png"), _textured_frame(320, 240))
         after = _write_png(str(tmp_path / "b.png"), _textured_frame(160, 120))

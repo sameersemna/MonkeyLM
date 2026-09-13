@@ -193,6 +193,23 @@ class PersistenceEngine:
                     CREATE INDEX IF NOT EXISTS idx_regression_drift_log_route_time
                     ON regression_drift_log(domain, page_route, created_at DESC)
                 """)
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS visual_baselines (
+                        id BIGSERIAL PRIMARY KEY,
+                        domain TEXT NOT NULL,
+                        page_route TEXT NOT NULL,
+                        visual_phash TEXT NOT NULL,
+                        screenshot_path TEXT NOT NULL DEFAULT '',
+                        is_golden_standard BOOLEAN NOT NULL DEFAULT FALSE,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                """)
+                await conn.execute("""
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_visual_baselines_one_golden_per_route
+                    ON visual_baselines(domain, page_route)
+                    WHERE is_golden_standard = TRUE
+                """)
             print("✅ PostgreSQL baseline tables are ready.")
         except Exception as exc:
             _local_service_log(f"PostgreSQL initialization failed: {exc}", self.settings.output_dir)
@@ -326,6 +343,103 @@ class PersistenceEngine:
                     await conn.execute("""INSERT INTO regression_drift_log (domain, page_route, defect_tag, severity, missing_components, broken_selectors, drift_alert, step_number) VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8)""", domain, page_route, defect_tag, severity, json.dumps(missing_components), json.dumps(broken_selectors), json.dumps(drift_alert), step_number)
         except Exception as exc:
             _local_service_log(f"Failed to insert regression drift log row: {exc}", self.settings.output_dir)
+
+    # ── Visual golden baselines ────────────────────────────────────────────────
+
+    # Hamming distance (of 256 phash bits) beyond which a route's current frame
+    # is considered visually drifted from its golden baseline. ~9% of bits.
+    _VISUAL_DRIFT_HAMMING_THRESHOLD = 24
+
+    async def _fetch_visual_baseline(self, domain: str, page_route: str) -> Optional[Dict[str, Any]]:
+        if self.pg_pool is None:
+            return None
+        try:
+            async with self.pg_pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """SELECT visual_phash, screenshot_path FROM visual_baselines
+                       WHERE domain = $1 AND page_route = $2 AND is_golden_standard = TRUE
+                       ORDER BY updated_at DESC LIMIT 1""",
+                    domain, page_route,
+                )
+            if row is None:
+                return None
+            return {"visual_phash": row["visual_phash"], "screenshot_path": row["screenshot_path"]}
+        except Exception as exc:
+            _local_service_log(f"Failed to fetch visual baseline: {exc}", self.settings.output_dir)
+            return None
+
+    async def _upsert_visual_baseline(self, domain: str, page_route: str, visual_phash: str, screenshot_path: str, is_golden_standard: bool) -> None:
+        if self.pg_pool is None:
+            return
+        try:
+            async with self.pg_write_semaphore:
+                async with self.pg_pool.acquire() as conn:
+                    if is_golden_standard:
+                        async with conn.transaction():
+                            await conn.execute("""DELETE FROM visual_baselines WHERE domain = $1 AND page_route = $2 AND is_golden_standard = TRUE""", domain, page_route)
+                            await conn.execute("""INSERT INTO visual_baselines (domain, page_route, visual_phash, screenshot_path, is_golden_standard, updated_at) VALUES ($1, $2, $3, $4, TRUE, NOW())""", domain, page_route, visual_phash, screenshot_path)
+                    else:
+                        await conn.execute("""INSERT INTO visual_baselines (domain, page_route, visual_phash, screenshot_path, is_golden_standard, updated_at) VALUES ($1, $2, $3, $4, FALSE, NOW())""", domain, page_route, visual_phash, screenshot_path)
+        except Exception as exc:
+            _local_service_log(f"Failed to upsert visual baseline: {exc}", self.settings.output_dir)
+
+    async def analyze_route_visual_drift(self, snapshot: Any, step_num: int) -> None:
+        """Compare the current frame's perceptual hash against the route's golden visual baseline.
+
+        Detects *cross-run* visual drift (the route looks different from its
+        golden baseline captured in a previous run) — complementary to the
+        within-run step-to-step pixelmatch/SSIM diffing. Honors
+        ``golden_baseline_mode``: in ``auto_upsert`` a missing golden baseline
+        is seeded from the current frame; in ``preexisting`` the comparison is
+        skipped when no baseline exists.
+        """
+        if self.pg_pool is None:
+            return
+        if not getattr(self.settings, "cv_analysis_enabled", False):
+            return
+        screenshot_path = getattr(snapshot, "screenshot_path", "") or ""
+        if not screenshot_path:
+            return
+        from monkeylm.browser.snapshot.cv import phash_hamming, visual_phash
+        current_phash = visual_phash(screenshot_path)
+        if not current_phash:
+            return
+        domain, page_route = split_domain_and_route(snapshot.url)
+        if not domain:
+            return
+        normalized_route = _normalize_url_for_baseline_lookup(page_route, preserve_routes=["lang", "locale", "language", "currency"])
+        await self._upsert_visual_baseline(domain, normalized_route, current_phash, screenshot_path, is_golden_standard=False)
+        golden = await self._fetch_visual_baseline(domain, normalized_route)
+        if golden is None:
+            if self.settings.golden_baseline_mode == "auto_upsert":
+                await self._upsert_visual_baseline(domain, normalized_route, current_phash, screenshot_path, is_golden_standard=True)
+                _local_service_log(f"Auto-seeded visual golden baseline for {domain}{normalized_route}.", self.settings.output_dir)
+            return
+        distance = phash_hamming(current_phash, golden.get("visual_phash", ""))
+        if distance < 0 or distance <= self._VISUAL_DRIFT_HAMMING_THRESHOLD:
+            return
+        defect_tag = "Visual-Baseline-Drift"
+        self.defects.add("regression_findings", {
+            "step": step_num,
+            "type": defect_tag,
+            "severity": "medium",
+            "domain": domain,
+            "page_route": page_route,
+            "phash_hamming_distance": distance,
+            "threshold": self._VISUAL_DRIFT_HAMMING_THRESHOLD,
+            "golden_screenshot": golden.get("screenshot_path", ""),
+            "url": snapshot.url,
+        })
+        await self._insert_regression_drift_log(
+            domain=domain,
+            page_route=page_route,
+            step_number=step_num,
+            defect_tag=defect_tag,
+            severity="medium",
+            missing_components=[],
+            broken_selectors=[],
+            drift_alert={"phash_hamming_distance": distance, "threshold": self._VISUAL_DRIFT_HAMMING_THRESHOLD},
+        )
 
     async def analyze_route_regression(self, page: Page, snapshot: Any, step_num: int) -> None:
         from monkeylm.browser import diff_component_manifests, extract_component_manifest

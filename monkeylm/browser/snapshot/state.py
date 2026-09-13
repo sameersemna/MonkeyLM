@@ -16,6 +16,40 @@ from monkeylm.types import PageSnapshot, FormControlRecord, FormRecord
 
 EMPTY_CONTENT_HASH = hashlib.sha256(b"").hexdigest()
 
+# Content-addressed screenshot dedup registry: maps output_dir -> {phash: path}.
+# Identical frames (Hamming distance 0) reuse the first stored file instead of
+# writing another copy — a run captures 3+ screenshots per step, and stable
+# pages produce byte-identical frames most of the time.
+_screenshot_registry: Dict[str, Dict[str, str]] = {}
+
+
+def _dedup_screenshot(screenshot_path: str, output_dir: str) -> str:
+    """Return an existing identical capture's path, or keep the new one.
+
+    Uses the perceptual hash so visually identical frames (not just
+    byte-identical PNG encodings) share one file on disk. Fails open: any
+    error keeps the original path.
+    """
+    if not screenshot_path:
+        return screenshot_path
+    try:
+        from .cv import visual_phash
+        phash = visual_phash(screenshot_path)
+        if not phash:
+            return screenshot_path
+        registry = _screenshot_registry.setdefault(output_dir, {})
+        existing = registry.get(phash)
+        if existing and os.path.exists(existing):
+            try:
+                os.remove(screenshot_path)
+            except OSError:
+                pass
+            return existing
+        registry[phash] = screenshot_path
+        return screenshot_path
+    except Exception:
+        return screenshot_path
+
 
 def _normalize_form_control_raw(raw_control: Dict[str, Any]) -> Dict[str, Any]:
     normalized = dict(raw_control)
@@ -111,6 +145,7 @@ async def get_page_state(page: Page, step_num: int, phase: str = "before", outpu
     screenshot_path = os.path.join(output_dir, screenshot_name)
     try:
         await page.screenshot(path=screenshot_path, full_page=True)
+        screenshot_path = _dedup_screenshot(screenshot_path, output_dir)
     except Exception:
         screenshot_path = ""
 
