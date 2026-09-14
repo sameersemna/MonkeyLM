@@ -174,6 +174,21 @@ async def run_worker(
     worker_label = f"worker-{worker_id:02d}"
     os.makedirs(settings.output_dir, exist_ok=True)
     worker_defects = DefectTracker()
+
+    # Replay mode: load decisions recorded by a previous run (--replay-from
+    # path to its results.json). Matching state keys reuse the cached plan
+    # instead of calling the LLM, giving deterministic defect reproduction.
+    replay_cache: Dict[str, Dict[str, Any]] = {}
+    replay_source = getattr(settings, "replay_from", "") or ""
+    if replay_source and os.path.isfile(replay_source):
+        try:
+            with open(replay_source) as fh:
+                replay_cache = json.load(fh).get("decision_cache", {}) or {}
+            if replay_cache:
+                print(f"   └─ 🔁 {worker_label} loaded {len(replay_cache)} cached decisions from {os.path.basename(replay_source)}")
+        except Exception as exc:
+            _local_service_log(f"{worker_label} replay cache load failed: {exc}", settings.output_dir)
+    decision_cache: Dict[str, Dict[str, Any]] = {}
     worker_fuzzer = Fuzzer()
     worker_network_monitor = NetworkMonitor(worker_defects)
     worker_a11y_checker = A11yChecker(worker_defects)
@@ -294,7 +309,14 @@ async def run_worker(
                 continue
 
             testing_strategy = refresh_testing_strategy(testing_strategy, state)
-            plan = await decide_next_action(settings, state, memory_store=worker_memory, snapshot=snapshot, testing_strategy=testing_strategy)
+            cached_plan = replay_cache.get(state_key)
+            if cached_plan is not None:
+                plan = dict(cached_plan)
+                plan["replayed"] = True
+                print("   └─ 🔁 Replaying cached decision for this state")
+            else:
+                plan = await decide_next_action(settings, state, memory_store=worker_memory, snapshot=snapshot, testing_strategy=testing_strategy)
+                decision_cache[state_key] = {"action": plan.get("action", ""), "target": plan.get("target", ""), "value": plan.get("value", "")}
             retrieval_telemetry = worker_memory.consume_last_search_telemetry()
 
             plan_signature = (plan.get("action", "scroll"), plan.get("target", ""))
@@ -620,4 +642,5 @@ async def run_worker(
         failure_artifact=failure_artifact,
         failure_context=failure_context,
         discovery_strategy=testing_strategy,
+        decision_cache=decision_cache,
     )

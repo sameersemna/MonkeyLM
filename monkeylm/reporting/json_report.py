@@ -32,6 +32,7 @@ def generate_json_summary(
     end_time: datetime,
     *,
     discovery_strategy: Any = None,
+    decision_cache: Dict[str, Dict[str, Any]] | None = None,
 ) -> None:
     """Write results.json with full run data."""
     semantic_memory_telemetry = summarize_semantic_memory_telemetry(test_logs)
@@ -41,6 +42,7 @@ def generate_json_summary(
         "target_url": settings.target_url,
         "model": settings.ollama_model,
         "active_seed": settings.active_seed,
+        "decision_cache": decision_cache or {},
         "workers": settings.workers,
         "max_steps_per_worker": settings.max_steps_per_worker,
         "configured_max_steps": settings.max_steps,

@@ -16,6 +16,7 @@ from .cv import (
     analyze_screenshot_health,
     capture_chrome_templates,
     compare_screenshots_cv,
+    ocr_contrast_check,
     ocr_error_text,
     phash_hamming,
     verify_chrome_templates,
@@ -41,4 +42,5 @@ __all__ = [
     "visual_phash",
     "phash_hamming",
     "ocr_error_text",
+    "ocr_contrast_check",
 ]

@@ -365,6 +365,107 @@ def verify_chrome_templates(
     return result
 
 
+def _relative_luminance(rgb: "np.ndarray") -> "np.ndarray":
+    """WCAG 2.x relative luminance of sRGB pixels (float array in [0, 255])."""
+    srgb = rgb / 255.0
+    linear = np.where(srgb <= 0.04045, srgb / 12.92, ((srgb + 0.055) / 1.055) ** 2.4)
+    return 0.2126 * linear[..., 0] + 0.7152 * linear[..., 1] + 0.0722 * linear[..., 2]
+
+
+def _contrast_ratio(lum_a: float, lum_b: float) -> float:
+    lighter = max(lum_a, lum_b)
+    darker = min(lum_a, lum_b)
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+def ocr_contrast_check(
+    screenshot_path: str,
+    min_ratio: float = 4.5,
+    max_regions: int = 20,
+) -> Dict[str, Any]:
+    """Sample WCAG contrast ratios for OCR-detected text regions.
+
+    For each text box RapidOCR finds, the foreground luminance is estimated
+    from the box's edge-dense interior pixels (the glyphs) and the background
+    from a dilated ring around the box. Regions below ``min_ratio`` (WCAG AA
+    for normal text) are reported as violations. Complements axe-core, which
+    only sees DOM text — this catches canvas-rendered and image-baked text.
+    """
+    result: Dict[str, Any] = {"violations": [], "checked": 0, "engine": "none", "error": None}
+    if RapidOCR is None or not _cv_available():
+        result["error"] = "rapidocr_unavailable" if RapidOCR is None else "opencv_unavailable"
+        return result
+    if not screenshot_path or not os.path.exists(screenshot_path):
+        result["error"] = "missing_screenshot"
+        return result
+    try:
+        engine = RapidOCR()
+        ocr_result, _ = engine(os.path.abspath(screenshot_path))
+        if not ocr_result:
+            result["engine"] = "rapidocr-contrast"
+            return result
+        bgr = cv2.imread(os.path.abspath(screenshot_path), cv2.IMREAD_COLOR)
+        if bgr is None:
+            result["error"] = "missing_screenshot"
+            return result
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB).astype(np.float64)
+        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        frame_h, frame_w = gray.shape[:2]
+
+        for entry in ocr_result[:max_regions]:
+            if not isinstance(entry, (list, tuple)) or len(entry) < 2:
+                continue
+            box = entry[0]
+            text = str(entry[1])
+            try:
+                xs = [int(p[0]) for p in box]
+                ys = [int(p[1]) for p in box]
+            except Exception:
+                continue
+            x0, x1 = max(0, min(xs)), min(frame_w - 1, max(xs))
+            y0, y1 = max(0, min(ys)), min(frame_h - 1, max(ys))
+            if x1 - x0 < 6 or y1 - y0 < 6:
+                continue
+
+            # Foreground/background via luminance percentiles: glyphs are the
+            # extreme-luminance cluster inside the box, the ring's dominant
+            # cluster is the page background. Percentiles are robust to the
+            # anti-aliased mid-gray edge pixels that break naive means.
+            interior_rgb = rgb[y0:y1, x0:x1].reshape(-1, 3)
+            if interior_rgb.size == 0:
+                continue
+            interior_lum = _relative_luminance(interior_rgb)
+            fg_lum = float(np.percentile(interior_lum, 10))
+
+            # Background: ring around the box (3px outward), excluding the
+            # box interior so glyph pixels never contaminate the estimate.
+            pad = 3
+            rx0, rx1 = max(0, x0 - pad), min(frame_w, x1 + pad)
+            ry0, ry1 = max(0, y0 - pad), min(frame_h, y1 + pad)
+            ring_region = rgb[ry0:ry1, rx0:rx1]
+            ring_mask = np.ones(ring_region.shape[:2], dtype=bool)
+            ix0, iy0 = x0 - rx0, y0 - ry0
+            ring_mask[iy0:iy0 + (y1 - y0), ix0:ix0 + (x1 - x0)] = False
+            ring = ring_region[ring_mask]
+            if ring.size == 0:
+                continue
+            bg_lum = float(np.percentile(_relative_luminance(ring), 90))
+
+            ratio = _contrast_ratio(fg_lum, bg_lum)
+            result["checked"] += 1
+            if ratio < min_ratio:
+                result["violations"].append({
+                    "text": text[:80],
+                    "contrast_ratio": round(ratio, 2),
+                    "min_ratio": min_ratio,
+                    "box": [x0, y0, x1, y1],
+                })
+        result["engine"] = "rapidocr-contrast"
+    except Exception as exc:
+        result["error"] = f"contrast_check_failed: {exc}"
+    return result
+
+
 def ocr_error_text(screenshot_path: str, max_chars: int = 500) -> Dict[str, Any]:
     """Extract error-relevant visible text from a screenshot via OCR.
 

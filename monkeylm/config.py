@@ -158,6 +158,8 @@ DEFAULT_CV_TEMPLATE_MIN_SCORE = 0.75
 DEFAULT_CV_TEMPLATE_SCALE = 0.5
 DEFAULT_CV_TEMPLATE_EVERY_N_STEPS = 2
 DEFAULT_OCR_ENABLED = False
+DEFAULT_OCR_CONTRAST_ENABLED = False
+DEFAULT_REPLAY_FROM = ""
 
 AXE_CDN_URL = "https://cdnjs.cloudflare.com/ajax/libs/axe-core/4.9.1/axe.min.js"
 VISUAL_DIFF_THRESHOLD_RATIO = 0.01
@@ -438,6 +440,8 @@ def parse_cli_args() -> argparse.Namespace:
     ocr_group.add_argument("--ocr", dest="ocr_enabled", action="store_true", help="Enable OCR error-text extraction on failed steps (requires rapidocr-onnxruntime)")
     ocr_group.add_argument("--no-ocr", dest="ocr_enabled", action="store_false", help="Disable OCR error-text extraction")
     parser.set_defaults(ocr_enabled=None)
+    parser.add_argument("--ocr-contrast", dest="ocr_contrast_enabled", action="store_true", default=None, help="Enable WCAG text-contrast sampling on OCR text regions")
+    parser.add_argument("--replay-from", help="Path to a previous results.json; replay cached LLM decisions for matching page states")
 
     persistence_group = parser.add_mutually_exclusive_group()
     persistence_group.add_argument(
@@ -559,6 +563,9 @@ def load_settings(cli_args: Optional[argparse.Namespace] = None) -> Settings:
     s.cv_template_every_n_steps = max(1, int(ev_tn) if ev_tn is not None else s.cv_template_every_n_steps)
     ev_ocr = env_vars.get("OCR_ENABLED")
     s.ocr_enabled = _env_bool("OCR_ENABLED", default=_env_to_bool(ev_ocr, s.ocr_enabled))
+    ev_oc = env_vars.get("OCR_CONTRAST_ENABLED")
+    s.ocr_contrast_enabled = _env_bool("OCR_CONTRAST_ENABLED", default=_env_to_bool(ev_oc, s.ocr_contrast_enabled))
+    s.replay_from = _env_str("REPLAY_FROM", env_vars.get("REPLAY_FROM") or s.replay_from)
 
     if cli_args is not None:
         if getattr(cli_args, "target_url", None):
@@ -620,6 +627,10 @@ def load_settings(cli_args: Optional[argparse.Namespace] = None) -> Settings:
             s.cv_template_every_n_steps = max(1, int(cli_args.cv_template_every_n_steps))
         if getattr(cli_args, "ocr_enabled", None) is not None:
             s.ocr_enabled = bool(cli_args.ocr_enabled)
+        if getattr(cli_args, "ocr_contrast_enabled", None) is not None:
+            s.ocr_contrast_enabled = bool(cli_args.ocr_contrast_enabled)
+        if getattr(cli_args, "replay_from", None):
+            s.replay_from = cli_args.replay_from.strip()
         if getattr(cli_args, "seed", None) is not None:
             random.seed(cli_args.seed)
             s.active_seed = str(cli_args.seed)
@@ -1229,6 +1240,8 @@ __all__ = [
     "DEFAULT_CV_TEMPLATE_SCALE",
     "DEFAULT_CV_TEMPLATE_EVERY_N_STEPS",
     "DEFAULT_OCR_ENABLED",
+    "DEFAULT_OCR_CONTRAST_ENABLED",
+    "DEFAULT_REPLAY_FROM",
     "DEFAULT_VISION_MODEL",
     "DEFAULT_PDF_VISION_TIMEOUT_SECONDS",
     "AXE_CDN_URL",

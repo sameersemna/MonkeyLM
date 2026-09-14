@@ -112,6 +112,8 @@ class Settings:
     cv_template_scale: float = 0.5
     cv_template_every_n_steps: int = 2
     ocr_enabled: bool = False
+    ocr_contrast_enabled: bool = False
+    replay_from: str = ""
 
     active_seed: Optional[str] = None
     timestamp: str = field(default_factory=lambda: datetime.now().strftime("%Y%m%d_%H%M%S"))
@@ -216,6 +218,8 @@ class WorkerRunResult:
     failure_artifact: Optional[str] = None
     failure_context: Optional[Dict[str, Any]] = None
     discovery_strategy: Optional[Any] = None
+    # state_key -> action plan, recorded for --replay-from deterministic reruns
+    decision_cache: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
 
 # ── Defect ticket ─────────────────────────────────────────────────────────────

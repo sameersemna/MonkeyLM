@@ -25,6 +25,7 @@ from monkeylm.browser.snapshot import (
 from monkeylm.browser.snapshot.cv import (
     analyze_screenshot_health,
     compare_screenshots_cv,
+    ocr_contrast_check,
     ocr_error_text,
 )
 from monkeylm.types import PageSnapshot
@@ -180,6 +181,15 @@ async def execute_action(
             if health.get("blank_screen"):
                 defects.add("rendering_defects", {"step": step_num, "type": "blank-screen", "stddev": health.get("stddev"), "mean": health.get("mean"), "unique_colors": health.get("unique_colors"), "url": sanitize_for_storage(after_snapshot.url, max_len=1024), "screenshot": os.path.basename(after_snapshot.screenshot_path)})
                 log_entry["blank_screen"] = True
+
+            # WCAG text-contrast sampling on OCR text regions: catches low-
+            # contrast text baked into canvas/images that axe-core cannot see.
+            if getattr(settings, "ocr_contrast_enabled", False):
+                contrast = ocr_contrast_check(after_snapshot.screenshot_path)
+                for violation in (contrast.get("violations") or [])[:5]:
+                    defects.add("accessibility_violations", {"step": step_num, "type": "ocr-low-contrast", "severity": "serious", "text": sanitize_for_storage(violation.get("text", ""), max_len=128), "contrast_ratio": violation.get("contrast_ratio"), "min_ratio": violation.get("min_ratio"), "url": sanitize_for_storage(after_snapshot.url, max_len=1024)})
+                if contrast.get("checked"):
+                    log_entry["ocr_contrast_checked"] = contrast["checked"]
 
             # SSIM region localization only runs when pixelmatch already flagged
             # a same-URL diff: it localizes a known change instead of scanning

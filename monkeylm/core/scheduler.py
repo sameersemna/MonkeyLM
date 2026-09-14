@@ -100,6 +100,7 @@ async def main(settings: Settings) -> None:
     merged_defects = DefectTracker()
     merged_logs: List[Dict[str, Any]] = []
     merged_network_events: List[Dict[str, Any]] = []
+    merged_decision_cache: Dict[str, Dict[str, Any]] = {}
     worker_launches: List[Dict[str, Any]] = []
     worker_completion: List[Dict[str, Any]] = []
     discovery_strategy: Any | None = None
@@ -111,6 +112,7 @@ async def main(settings: Settings) -> None:
         merged_defects.merge_from(result.defects)
         merged_logs.extend(result.logs)
         merged_network_events.extend(result.network_injections)
+        merged_decision_cache.update(getattr(result, "decision_cache", {}) or {})
         worker_launches.append(result.launch_info)
         if discovery_strategy is None and getattr(result, "discovery_strategy", None) is not None:
             discovery_strategy = result.discovery_strategy
@@ -153,7 +155,7 @@ async def main(settings: Settings) -> None:
     end_time = datetime.now()
 
     generate_markdown_report(settings, merged_defects, merged_logs, browser_launch_info, start_time, end_time, discovery_strategy=discovery_strategy)
-    generate_json_summary(settings, merged_defects, merged_logs, browser_launch_info, [], GRACEFUL_SHUTDOWN_REQUESTED, start_time, end_time, discovery_strategy=discovery_strategy)
+    generate_json_summary(settings, merged_defects, merged_logs, browser_launch_info, [], GRACEFUL_SHUTDOWN_REQUESTED, start_time, end_time, discovery_strategy=discovery_strategy, decision_cache=merged_decision_cache)
     try:
         if getattr(merged_defects, "accessibility_violations", None):
             from monkeylm.reporting import generate_interactive_html_report
