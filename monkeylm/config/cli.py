@@ -12,6 +12,11 @@ def parse_cli_args() -> argparse.Namespace:
     parser.add_argument("--target-password", help="Password to use when the target site requires sign-in")
     parser.add_argument("--ollama-model", help="Ollama model name to use")
     parser.add_argument(
+        "--ollama-fallback-models",
+        help="Comma-separated fallback planning models to try after the primary model fails",
+        default=None,
+    )
+    parser.add_argument(
         "--vision-model",
         help="Vision model name for screenshot annotation (cloud or local)",
         default=None,

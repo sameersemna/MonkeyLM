@@ -19,6 +19,42 @@ def sanitize_for_storage(value: str, max_len: int = 1024) -> str:
     return safe[:max_len]
 
 
+def _observation_count(item: Dict[str, Any]) -> int:
+    try:
+        return max(1, int(item.get("occurrences", item.get("occurrence_count", 1))))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _observation_steps(item: Dict[str, Any]) -> List[int]:
+    steps = item.get("occurrence_steps")
+    if isinstance(steps, list):
+        parsed = []
+        for step in steps:
+            try:
+                parsed.append(int(step))
+            except (TypeError, ValueError):
+                continue
+        if parsed:
+            return parsed
+    step = item.get("step")
+    if step is None:
+        return []
+    try:
+        return [int(step)]
+    except (TypeError, ValueError):
+        return []
+
+
+def _dedup_key(category: str, item: Dict[str, Any]) -> tuple:
+    if category == "accessibility_violations":
+        return (item.get("id"), item.get("selector"), item.get("url"))
+    if category == "context_anomalies":
+        message = str(item.get("message") or item.get("failure_reason") or "")[:200]
+        return (item.get("type"), item.get("action"), item.get("url"), message)
+    return ()
+
+
 class DefectTracker:
     """Centralized defect tracker to keep reporting deterministic and CI-friendly."""
 
@@ -43,25 +79,30 @@ class DefectTracker:
         if collection is None:
             return
         normalized = _normalize_defect(payload)
-        if category == "accessibility_violations":
-            key = (
-                normalized.get("id"),
-                normalized.get("selector"),
-                normalized.get("url"),
-            )
+        dedup_key = _dedup_key(category, normalized)
+        if dedup_key:
             for existing in collection:
-                if (
-                    existing.get("id"),
-                    existing.get("selector"),
-                    existing.get("url"),
-                ) == key:
-                    existing["last_seen_step"] = normalized.get(
-                        "step", existing.get("last_seen_step")
-                    )
-                    existing["occurrences"] = int(existing.get("occurrences", 1)) + 1
-                    return
+                if _dedup_key(category, existing) != dedup_key:
+                    continue
+                incoming_count = _observation_count(normalized)
+                existing_count = _observation_count(existing) + incoming_count
+                existing["occurrences"] = existing_count
+                existing["occurrence_count"] = existing_count
+                steps = sorted(set(_observation_steps(existing) + _observation_steps(normalized)))
+                if steps:
+                    existing["occurrence_steps"] = steps
+                    existing["step_range"] = [steps[0], steps[-1]]
+                if normalized.get("step") is not None:
+                    existing["last_seen_step"] = normalized.get("step")
+                return
+            count = _observation_count(normalized)
+            normalized["occurrences"] = count
+            normalized["occurrence_count"] = count
+            steps = _observation_steps(normalized)
+            if steps:
+                normalized["occurrence_steps"] = steps
+                normalized["step_range"] = [steps[0], steps[-1]]
             normalized["last_seen_step"] = normalized.get("step")
-            normalized["occurrences"] = 1
         collection.append(normalized)
 
     def merge_from(self, other: "DefectTracker") -> None:
@@ -82,8 +123,8 @@ class DefectTracker:
             "rendering_defects",
         ]
         for category in categories:
-            own_collection = getattr(self, category)
-            own_collection.extend(getattr(other, category, []))
+            for item in list(getattr(other, category, [])):
+                self.add(category, item)
 
 
 class Fuzzer:

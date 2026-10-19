@@ -150,6 +150,7 @@ async def main(settings: Settings) -> None:
         "root_user_data_dir": settings.run_user_data_dir,
         "graceful_shutdown_requested": GRACEFUL_SHUTDOWN_REQUESTED,
         "runtime_preflight": inspect_optional_runtime_dependencies(),
+        "baseline_summary": getattr(persistence_engine, "baseline_summary", {}),
     }
 
     end_time = datetime.now()

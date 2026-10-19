@@ -112,6 +112,15 @@ def _decision_sampling_options() -> Dict[str, Any]:
     }
 
 
+def _model_candidates(settings: Settings, model: str) -> List[str]:
+    candidates = [model]
+    for fallback in getattr(settings, "ollama_fallback_models", []) or []:
+        candidate = str(fallback).strip()
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+    return candidates
+
+
 async def _ollama_chat_with_retry(
     *,
     settings: Settings,
@@ -120,63 +129,73 @@ async def _ollama_chat_with_retry(
     timeout_seconds: float,
     max_retries: int = 3,
 ) -> Optional[Dict[str, Any]]:
-    if settings.ollama_model and model != settings.ollama_model:
-        print(f"   └─ 🤖 Calling fallback model {model}")
-    else:
-        print(f"   └─ 🤖 Calling {model}")
-
+    candidates = _model_candidates(settings, model)
     base_delay = 1.0
     last_exc: Optional[Exception] = None
     sampling_options = _decision_sampling_options()
 
-    for attempt in range(1, max_retries + 1):
-        try:
-            response = await asyncio.wait_for(
-                asyncio.to_thread(
-                    chat_completion,
-                    settings,
-                    model=model,
-                    messages=messages,
-                    timeout_seconds=timeout_seconds,
-                    json_mode=True,
-                    **sampling_options,
-                ),
-                timeout=timeout_seconds,
-            )
-            return response
-        except asyncio.TimeoutError as exc:
-            last_exc = exc
+    for candidate_index, candidate in enumerate(candidates):
+        if candidate_index == 0:
+            print(f"   └─ 🤖 Calling {candidate}")
+        else:
+            print(f"   └─ 🔁 Falling back to model {candidate}")
             _local_service_log(
-                f"LLM inference timed out after {timeout_seconds}s (attempt {attempt}/{max_retries})",
+                f"Falling back to model {candidate} after {candidates[candidate_index - 1]} failed",
                 settings.output_dir,
             )
-        except Exception as exc:
-            last_exc = exc
-            if _is_ollama_overload_error(exc):
+
+        for attempt in range(1, max_retries + 1):
+            try:
+                response = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        chat_completion,
+                        settings,
+                        model=candidate,
+                        messages=messages,
+                        timeout_seconds=timeout_seconds,
+                        json_mode=True,
+                        **sampling_options,
+                    ),
+                    timeout=timeout_seconds,
+                )
+                return response
+            except asyncio.TimeoutError as exc:
+                last_exc = exc
                 _local_service_log(
-                    f"LLM inference overloaded (attempt {attempt}/{max_retries}): {_redact_secrets(str(exc))}",
+                    f"LLM inference timed out after {timeout_seconds}s for {candidate} "
+                    f"(attempt {attempt}/{max_retries})",
                     settings.output_dir,
                 )
-            else:
-                _local_service_log(
-                    f"LLM inference failed for {model}: {_redact_secrets(str(exc))}",
-                    settings.output_dir,
-                )
-                return None
+            except Exception as exc:
+                last_exc = exc
+                if _is_ollama_overload_error(exc):
+                    _local_service_log(
+                        f"LLM inference overloaded for {candidate} "
+                        f"(attempt {attempt}/{max_retries}): {_redact_secrets(str(exc))}",
+                        settings.output_dir,
+                    )
+                else:
+                    _local_service_log(
+                        f"LLM inference failed for {candidate}: {_redact_secrets(str(exc))}",
+                        settings.output_dir,
+                    )
+                    break
 
-        if attempt >= max_retries:
-            break
+            if attempt >= max_retries:
+                break
 
-        delay = base_delay * (2 ** (attempt - 1)) + random.uniform(0.0, 2.0)
-        _local_service_log(
-            f"Backing off from the LLM endpoint for {delay:.2f}s before retry {attempt + 1}/{max_retries}",
-            settings.output_dir,
-        )
-        await asyncio.sleep(delay)
+            delay = base_delay * (2 ** (attempt - 1)) + random.uniform(0.0, 2.0)
+            _local_service_log(
+                f"Backing off from the LLM endpoint for {delay:.2f}s before retry "
+                f"{attempt + 1}/{max_retries}",
+                settings.output_dir,
+            )
+            await asyncio.sleep(delay)
 
     if last_exc is not None:
         _local_service_log(
-            f"LLM inference failed after {max_retries} attempts: {_redact_secrets(str(last_exc))}",
+            f"LLM inference failed for all candidate models "
+            f"({', '.join(candidates)}): {_redact_secrets(str(last_exc))}",
             settings.output_dir,
         )
     return None

@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 import random
-from typing import Any, Optional
+from typing import Any, List, Optional
 from urllib.parse import urlparse
 
 from monkeylm.types import Settings
@@ -79,6 +79,18 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _parse_model_list(raw: Any) -> List[str]:
+    if raw is None:
+        return []
+    values = raw if isinstance(raw, (list, tuple)) else str(raw).split(",")
+    models: List[str] = []
+    for value in values:
+        model = str(value).strip()
+        if model and model not in models:
+            models.append(model)
+    return models
+
+
 def _normalize_window_size(raw: str, fallback: str = DEFAULT_WINDOW_SIZE) -> str:
     if not raw:
         return fallback
@@ -126,6 +138,9 @@ def load_settings(cli_args: Optional[argparse.Namespace] = None) -> Settings:
     s.target_password = _env_str("TARGET_PASSWORD", env_vars.get("TARGET_PASSWORD") or s.target_password)
     raw_ollama: str = env_vars.get("OLLAMA_MODEL") or os.getenv("OLLAMA_MODEL") or s.ollama_model
     s.ollama_model = raw_ollama
+    s.ollama_fallback_models = _parse_model_list(
+        env_vars.get("OLLAMA_FALLBACK_MODELS") or os.getenv("OLLAMA_FALLBACK_MODELS")
+    )
     ollama_timeout = _env_float("OLLAMA_TIMEOUT_SECONDS", s.ollama_timeout_seconds)
     s.ollama_timeout_seconds = max(1.0, _env_to_float(env_vars.get("OLLAMA_TIMEOUT_SECONDS"), ollama_timeout))
     raw_base_url = (
@@ -244,6 +259,8 @@ def load_settings(cli_args: Optional[argparse.Namespace] = None) -> Settings:
             s.target_password = cli_args.target_password.strip()
         if getattr(cli_args, "ollama_model", None):
             s.ollama_model = cli_args.ollama_model
+        if getattr(cli_args, "ollama_fallback_models", None) is not None:
+            s.ollama_fallback_models = _parse_model_list(cli_args.ollama_fallback_models)
         if getattr(cli_args, "vision_model", None):
             s.vision_model = cli_args.vision_model.strip()
         if getattr(cli_args, "ollama_timeout_seconds", None) is not None:

@@ -66,6 +66,15 @@ def generate_markdown_report(
     success_rate = ((total_steps - failed_steps_count) / total_steps * 100) if total_steps > 0 else 0
     failed_steps_list = [log for log in test_logs if log["status"] in ["FAILED", "CRASH"]]
 
+    baseline_summary = browser_launch_info.get("baseline_summary") or {}
+    baseline_mode = baseline_summary.get("mode", settings.golden_baseline_mode)
+    baseline_dom = baseline_summary.get("dom_golden_routes", 0)
+    baseline_visual = baseline_summary.get("visual_golden_routes", 0)
+    baseline_available = baseline_summary.get("available", False)
+    baseline_status = "unavailable" if not baseline_available else "ready"
+    fallback_models = getattr(settings, "ollama_fallback_models", []) or []
+    fallback_display = ", ".join(f"`{model}`" for model in fallback_models) or "`none`"
+
     md_content = f"""# Deep Inspection Monkey Test Report
 
 **Target URL:** {settings.target_url}  
@@ -81,6 +90,8 @@ def generate_markdown_report(
 **Run Summary Status:** {accountability.get('run_summary_status')}  
 **Regression Drift Index:** {accountability.get('regression_drift_index')}%  
 **Graceful Shutdown:** {"requested" if browser_launch_info.get('graceful_shutdown_requested') else "not requested"}  
+**Baseline Mode:** `{baseline_mode}` ({baseline_status})<br>
+**Golden Baselines:** DOM routes={baseline_dom}, visual routes={baseline_visual}<br>
 **Output Folder:** `{settings.output_dir}`
 
 ## LLM Configuration
@@ -88,6 +99,7 @@ def generate_markdown_report(
 | Model | Name |
 |-------|------|
 | **Decision Model** | `{settings.ollama_model}` |
+| **Fallback Models** | {fallback_display} |
 | **Vision Model** | `{settings.vision_model}` |
 | **PDF Vision Model** | `{settings.pdf_vision_model}` |
 
@@ -248,7 +260,9 @@ Actions included: Clicking, Typing, Form Submission, Modal Handling, and State E
     else:
         md_content += "### Summary\n\n"
         md_content += f"- **Total raw violations found:** {compiled_a11y['total_raw_violations']}\n"
+        md_content += f"- **Unique violation records:** {compiled_a11y['unique_violations']}\n"
         md_content += f"- **Unique rules after deduplication:** {compiled_a11y['unique_rules_found']}\n"
+        md_content += f"- **Unique selectors:** {compiled_a11y['unique_selectors_found']}\n"
         md_content += f"- **Critical count:** {compiled_a11y['severity_totals']['critical']}\n"
         md_content += f"- **Serious count:** {compiled_a11y['severity_totals']['serious']}\n"
         md_content += f"- **Impact Score (weighted):** {compiled_a11y['impact_score']}\n\n"

@@ -58,6 +58,7 @@ class Settings:
     target_username: str = ""
     target_password: str = ""
     ollama_model: str = "minimax-m3:cloud"
+    ollama_fallback_models: List[str] = field(default_factory=list)
     ollama_timeout_seconds: float = 15.0
     openai_base_url: str = "http://localhost:11434"
     openai_api_key: str = ""

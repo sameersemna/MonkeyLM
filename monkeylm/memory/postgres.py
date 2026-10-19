@@ -130,6 +130,7 @@ class PersistenceEngine:
         self.pg_write_semaphore = asyncio.Semaphore(max(2, self.max_workers * 2))
         self.redis_write_semaphore = asyncio.Semaphore(max(4, self.max_workers * 4))
         self._missing_baseline_routes: set = set()
+        self.baseline_summary: Dict[str, Any] = {}
 
     async def initialize(self) -> None:
         await self._initialize_postgres()
@@ -142,6 +143,7 @@ class PersistenceEngine:
                 missing.append("Redis")
             if missing:
                 raise RuntimeError("Persistence strict mode requires services to be reachable. Missing: " + ", ".join(missing))
+        self.baseline_summary = await self._load_baseline_summary()
 
     async def _initialize_postgres(self) -> None:
         if asyncpg is None:
@@ -241,6 +243,58 @@ class PersistenceEngine:
         except Exception as exc:
             _local_service_log(f"Redis initialization failed: {exc}", self.settings.output_dir)
             self.redis_client = None
+
+    async def _load_baseline_summary(self) -> Dict[str, Any]:
+        summary: Dict[str, Any] = {
+            "mode": self.settings.golden_baseline_mode,
+            "available": self.pg_pool is not None,
+            "dom_golden_routes": 0,
+            "visual_golden_routes": 0,
+            "domains": [],
+            "preexisting_ready": False,
+        }
+        if self.pg_pool is None:
+            print(f"📊 Baseline store: unavailable (PostgreSQL disabled); mode={summary['mode']}")
+            return summary
+
+        try:
+            async with self.pg_pool.acquire() as conn:
+                dom_count = await conn.fetchval(
+                    "SELECT COUNT(*) FROM app_baselines WHERE is_golden_standard = TRUE"
+                )
+                visual_count = await conn.fetchval(
+                    "SELECT COUNT(*) FROM visual_baselines WHERE is_golden_standard = TRUE"
+                )
+                domain_rows = await conn.fetch(
+                    "SELECT domain, COUNT(*) AS count FROM app_baselines "
+                    "WHERE is_golden_standard = TRUE GROUP BY domain ORDER BY domain"
+                )
+            summary["dom_golden_routes"] = int(dom_count or 0)
+            summary["visual_golden_routes"] = int(visual_count or 0)
+            summary["domains"] = [
+                {"domain": str(row["domain"]), "count": int(row["count"])}
+                for row in domain_rows
+            ]
+            summary["preexisting_ready"] = summary["mode"] == "preexisting" and (
+                summary["dom_golden_routes"] + summary["visual_golden_routes"]
+            ) > 0
+            print(
+                "📊 Baseline store: "
+                f"mode={summary['mode']}; "
+                f"golden DOM routes={summary['dom_golden_routes']}; "
+                f"golden visual routes={summary['visual_golden_routes']}; "
+                f"domains={len(summary['domains'])}"
+            )
+            if summary["mode"] == "preexisting" and not summary["preexisting_ready"]:
+                _local_service_log(
+                    "Golden baseline mode is preexisting but no golden baselines are available; "
+                    "comparisons will be skipped.",
+                    self.settings.output_dir,
+                )
+        except Exception as exc:
+            summary["error"] = str(exc)
+            _local_service_log(f"Failed to summarize baseline store: {exc}", self.settings.output_dir)
+        return summary
 
     async def close(self) -> None:
         if self.pg_pool is not None:

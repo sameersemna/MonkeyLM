@@ -30,7 +30,9 @@ def _compile_accessibility_violations(
     if not violations:
         return {
             "total_raw_violations": 0,
+            "unique_violations": 0,
             "unique_rules_found": 0,
+            "unique_selectors_found": 0,
             "severity_totals": {"critical": 0, "serious": 0},
             "impact_score": 0.0,
             "rules": [],
@@ -43,6 +45,7 @@ def _compile_accessibility_violations(
         selector = v.get("selector", "(unknown)")
         selector_key = (selector[:100] if selector else "(empty)")[:100]
         dedup_key = f"{rule_id}|||{selector_key}"
+        occurrences = int(v.get("occurrences", v.get("occurrence_count", 1)) or 1)
 
         if dedup_key not in groups:
             groups[dedup_key] = {
@@ -61,8 +64,13 @@ def _compile_accessibility_violations(
 
         g = groups[dedup_key]
         g["severity_distribution"][v.get("severity", "serious")] = \
-            g["severity_distribution"].get(v.get("severity", "serious"), 0) + 1
-        g["occurrence_steps"].append(v.get("step", -1))
+            g["severity_distribution"].get(v.get("severity", "serious"), 0) + occurrences
+        observed_steps = [
+            step
+            for step in (v.get("occurrence_steps") or [v.get("step", -1)])
+            if step is not None
+        ]
+        g["occurrence_steps"].extend(observed_steps or [-1])
         if selector and selector != "(unknown)":
             g["unique_selectors"].add(selector)
         if v.get("html_snippet"):
@@ -105,9 +113,19 @@ def _compile_accessibility_violations(
 
     compiled_rules.sort(key=lambda r: r["impact_score_contribution"], reverse=True)
 
+    total_observations = sum(
+        int(v.get("occurrences", v.get("occurrence_count", 1)) or 1)
+        for v in violations
+    )
+    unique_selectors = {
+        (v.get("selector", "(unknown)") or "(empty)")[:100]
+        for v in violations
+    }
     return {
-        "total_raw_violations": len(violations),
+        "total_raw_violations": total_observations,
+        "unique_violations": len(violations),
         "unique_rules_found": len(compiled_rules),
+        "unique_selectors_found": len(unique_selectors),
         "severity_totals": severity_totals,
         "impact_score": round(total_impact_score, 1),
         "rules": compiled_rules,

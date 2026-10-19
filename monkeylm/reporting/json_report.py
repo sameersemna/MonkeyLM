@@ -41,6 +41,7 @@ def generate_json_summary(
     summary = {
         "target_url": settings.target_url,
         "model": settings.ollama_model,
+        "fallback_models": list(getattr(settings, "ollama_fallback_models", []) or []),
         "active_seed": settings.active_seed,
         "decision_cache": decision_cache or {},
         "workers": settings.workers,

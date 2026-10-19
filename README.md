@@ -67,7 +67,8 @@ The advanced runner now supports both environment-variable configuration and CLI
 | Variable | Default | Purpose |
 |---|---|---|
 | `TARGET_URL` | `https://noblequran-85hu2yge.manus.space/dashboard` | Start URL for the monkey run. |
-| `OLLAMA_MODEL` | `minimax-m3:cloud` | LLM model used for action planning. Must exist on the configured endpoint. |
+| `OLLAMA_MODEL` | `minimax-m3:cloud` | Primary LLM model used for action planning. Must exist on the configured endpoint. |
+| `OLLAMA_FALLBACK_MODELS` | unset | Comma-separated fallback planning models tried in order when the primary model fails. |
 | `OPENAI_BASE_URL` | `http://localhost:11434` | Base URL of an OpenAI-compatible API. Ollama's port 11434 gets `/v1` appended automatically; include the full path for other providers. |
 | `OPENAI_API_KEY` | unset | Optional bearer token sent to the configured endpoint. |
 | `OLLAMA_TIMEOUT_SECONDS` | `15` | Hard timeout in seconds for each LLM inference call. |
@@ -132,7 +133,9 @@ fallbacks when the corresponding `OPENAI_*` variables are unset.
 For application discovery and action planning, prefer a stable text model.
 Free-model pools can rotate to slow or unavailable upstreams; the harness logs
 model failures and falls back to the heuristic discovery strategy. Use
-`--ollama-model <name>` to override the planning model for a single run.
+`--ollama-model <name>` to override the planning model for a single run, or
+`OLLAMA_FALLBACK_MODELS=model-a,model-b` / `--ollama-fallback-models model-a,model-b`
+to try stable alternatives after the primary model fails.
 
 ### Selective Vision Audit & Executive PDF
 
@@ -279,6 +282,8 @@ Operational guidance:
 - Modal handling with fallback strategy: close button, cancel/dismiss, then `Escape`.
 - Form submission paths (`submit` click and `Enter` fallback).
 - Label/type-aware form filling with constraint-aware valid, invalid, boundary, and unexpected-type values; deterministic create/update/delete payloads and CRUD-intent detection.
+- Baseline startup summaries with golden DOM/visual route counts and preexisting-readiness checks.
+- Cross-worker deduplication for accessibility findings and context anomalies, with occurrence and step-range detail.
 - Fuzzing with blended payloads (realistic + OWASP-style attack strings).
 - Network fault injection for API calls (latency and injected 5xx responses).
 - Accessibility checks with axe-core (`critical`/`serious` filtering).

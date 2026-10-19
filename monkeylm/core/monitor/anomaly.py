@@ -9,14 +9,56 @@ from playwright.async_api import Page
 from .defects import DefectTracker, sanitize_for_storage
 
 
+def _dedupe_batch(anomalies: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    deduped: Dict[tuple, Dict[str, Any]] = {}
+    order: List[tuple] = []
+    for anomaly in anomalies:
+        message = str(anomaly.get("message") or anomaly.get("failure_reason") or "")
+        key = (
+            anomaly.get("type"),
+            anomaly.get("action"),
+            anomaly.get("url"),
+            message[:200],
+        )
+        if key not in deduped:
+            merged = dict(anomaly)
+            merged["occurrences"] = 1
+            merged["occurrence_count"] = 1
+            step = anomaly.get("step")
+            merged["occurrence_steps"] = [step] if step is not None else []
+            deduped[key] = merged
+            order.append(key)
+            continue
+        existing = deduped[key]
+        existing["occurrences"] = int(existing.get("occurrences", 1)) + 1
+        existing["occurrence_count"] = existing["occurrences"]
+        step = anomaly.get("step")
+        if step is not None:
+            existing["last_seen_step"] = step
+            existing["occurrence_steps"] = sorted(
+                set(existing.get("occurrence_steps", []) + [step])
+            )
+    result: List[Dict[str, Any]] = []
+    for key in order:
+        item = deduped[key]
+        steps = item.get("occurrence_steps") or []
+        if steps:
+            item["step_range"] = [steps[0], steps[-1]]
+        result.append(item)
+    return result
+
+
 def format_anomaly_summary(anomalies: List[Dict[str, Any]], limit: int = 5) -> str:
     parts: List[str] = []
     for anomaly in anomalies[:limit]:
         message = str(anomaly.get("message") or anomaly.get("failure_reason") or "")
+        count = int(anomaly.get("occurrences", anomaly.get("occurrence_count", 1)) or 1)
+        count_part = f" occurrences={count}" if count > 1 else ""
         parts.append(
             f"step={anomaly.get('step', '?')} "
             f"action={anomaly.get('action', '?')} "
-            f"type={anomaly.get('type', '?')} "
+            f"type={anomaly.get('type', '?')}"
+            f"{count_part} "
             f"message={message[:120]}"
         )
     if len(anomalies) > limit:
@@ -141,7 +183,7 @@ class BrowserAnomalySensor:
     async def flush_anomalies(self) -> List[Dict[str, Any]]:
         if not self._anomalies:
             return []
-        batch = list(self._anomalies)
+        batch = _dedupe_batch(list(self._anomalies))
         for anomaly in batch:
             self.defects.add("context_anomalies", anomaly)
         self._anomalies.clear()
