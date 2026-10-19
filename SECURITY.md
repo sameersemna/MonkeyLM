@@ -8,7 +8,7 @@ MonkeyLM is an automated UI-testing framework using browser automation and LLM-b
 
 ---
 
-## 1. Config Hardening (`monkeylm/config.py`) — Step 1
+## 1. Config Hardening (`monkeylm/config/`) — Step 1
 
 | Control | Detail |
 |---|---|
@@ -110,6 +110,16 @@ Fuzzer payloads (`/etc/passwd`, SQLi strings, XSS tags) are intentional maliciou
 | httpx | 0.28.1 | Already latest; SSRF CVEs found in downstream consumers, not in httpx itself |
 
 > **All dependencies strictly pinned with `==`. Zero wildcards or loose version constraints.**
+
+### Python Runtime Note (asyncio `_add_writer`)
+
+Python 3.12.x and early 3.13.x include a CPython asyncio bug (gh-136234) in
+`StreamWriter.writelines()` that can raise `'NoneType' object has no attribute
+'_add_writer'` after a Redis connection is lost. MonkeyLM mitigates this by
+reconnecting the Redis client and retrying once, then failing open when an
+action-path lock cannot be claimed. Upgrading to Python 3.13.3+ removes the
+underlying race. Run `python -m monkeylm --inspect-runtime` to see the current
+Python version warning.
 
 ---
 

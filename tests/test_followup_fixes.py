@@ -2,11 +2,12 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from monkeylm.config import Settings
+from monkeylm.config import Settings, inspect_optional_runtime_dependencies
 from monkeylm.core.monitor import DefectTracker
 from monkeylm.core.monitor.anomaly import format_anomaly_summary
 from monkeylm.memory.postgres import PersistenceEngine
 from monkeylm.models.prompts.decision import build_decision_prompt
+from monkeylm.models.prompts.discovery import run_application_discovery
 
 
 class _FakeRedis:
@@ -87,6 +88,24 @@ class RedisRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
 
 class BaselineAndObservabilityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_discovery_logs_response_preview_on_parse_failure(self) -> None:
+        settings = Settings(
+            ollama_model="test-model",
+            openai_base_url="https://api.example.com/v1",
+        )
+        response = {"choices": [{"message": {"content": "not valid json"}}]}
+        with patch(
+            "monkeylm.models.prompts.discovery._ollama_chat_with_retry",
+            AsyncMock(return_value=response),
+        ):
+            with patch("monkeylm.models.prompts.discovery._local_service_log") as log:
+                strategy = await run_application_discovery(settings, "state")
+
+        self.assertIsNotNone(strategy)
+        self.assertTrue(
+            any("response preview" in str(call) for call in log.call_args_list)
+        )
+
     async def test_missing_baseline_logged_once_per_route(self) -> None:
         engine = PersistenceEngine(Settings(golden_baseline_mode="preexisting"), DefectTracker())
         engine.pg_pool = object()
@@ -105,6 +124,13 @@ class BaselineAndObservabilityTests(unittest.IsolatedAsyncioTestCase):
 
 
 class DefectAndAnomalyFormattingTests(unittest.TestCase):
+    def test_runtime_inspection_reports_python_version(self) -> None:
+        report = inspect_optional_runtime_dependencies()
+
+        self.assertIn("python", report)
+        self.assertIn("version", report["python"])
+        self.assertIn(report["python"]["status"], {"ok", "warning", "missing"})
+
     def test_accessibility_findings_are_deduplicated(self) -> None:
         tracker = DefectTracker()
         payload = {

@@ -129,6 +129,11 @@ The model names in `OLLAMA_MODEL`, `VISION_MODEL`, `PDF_VISION_MODEL`, and
 For backward compatibility, `OLLAMA_HOST` and `OLLAMA_API_KEY` are used as
 fallbacks when the corresponding `OPENAI_*` variables are unset.
 
+For application discovery and action planning, prefer a stable text model.
+Free-model pools can rotate to slow or unavailable upstreams; the harness logs
+model failures and falls back to the heuristic discovery strategy. Use
+`--ollama-model <name>` to override the planning model for a single run.
+
 ### Selective Vision Audit & Executive PDF
 
 When `PDF_GENERATE=true`, the runner selectively sends only the most relevant

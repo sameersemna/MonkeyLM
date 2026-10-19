@@ -271,6 +271,8 @@ async def run_application_discovery(
             candidate_models.append("mistral:latest")
 
     last_response = None
+    last_content = ""
+    last_model = ""
     for model_name in candidate_models:
         try:
             response = await _ollama_chat_with_retry(
@@ -285,11 +287,13 @@ async def run_application_discovery(
             response = None
 
         last_response = response
+        last_model = model_name
         if response is None:
             continue
 
         try:
             content = extract_content(response)
+            last_content = content
             strategy = _parse_testing_strategy(content)
             if strategy is not None:
                 print(f"   ✅ Discovery ready — domain: {strategy.app_domain}")
@@ -301,7 +305,11 @@ async def run_application_discovery(
     if last_response is None:
         _local_service_log("Application Discovery: LLM returned no response; using heuristic fallback strategy.", settings.output_dir)
     else:
-        _local_service_log("Application Discovery: could not parse strategy; using heuristic fallback strategy.", settings.output_dir)
+        preview = _sanitize_prompt_input(last_content)[:500] if last_content else "(empty)"
+        _local_service_log(
+            f"Application Discovery: could not parse strategy from {last_model}; response preview: {preview}",
+            settings.output_dir,
+        )
 
     strategy = _build_heuristic_strategy(page_state)
     print(f"   ⚠️ Discovery fallback — domain: {strategy.app_domain}")

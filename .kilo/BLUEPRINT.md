@@ -48,10 +48,12 @@
 | `browser.py` | 1,374 | CRITICAL | Requires refactoring |
 | `models.py` | 1,122 | HIGH | Requires refactoring |
 | `memory.py` | 1,093 | HIGH | Requires refactoring |
-| `config.py` | 947 | HIGH | Requires refactoring |
-| `types.py` | 404 | OK | ✅ Created |
+| `config/` | 1,519 total | MODULAR | ✅ Refactored (largest: `env.py` 354) |
+| `config.py` | — | — | ✅ Replaced by `config/` package |
+| `types.py` | 239 | OK | ✅ Split (`DefectTicket` → `defect_types.py`) |
+| `__init__.py` | 379 | OK | ✅ DI adapters split into `di/` |
 | `errors.py` | 66 | OK | ✅ Created |
-| `interfaces.py` | 529 | OK | ✅ Created (Phase 1) |
+| `interfaces.py` | 377 | OK | ✅ ABCs split into `interfaces_abc.py` |
 
 ### 1.3 Dependency Graph
 
@@ -621,7 +623,42 @@ time ./scripts/quickstart.sh  # <15 minutes
 
 ---
 
-## Milestone Checkpoints
+## Re-baselined Milestones (2026-10-19)
+
+The original Day 4/11/21/25 schedule started in July 2026 and is historical. The project is re-baselined from the current state: Phase 1 interfaces and the reporting split are complete; `browser/`, `models/`, `memory/`, and `core/` packages exist; the current suite passes 193 tests. Remaining work is grouped into five milestones.
+
+| Milestone | Target | Priority | Deliverables | Dependencies | Success Criteria |
+|---|---|---|---|---|---|
+| R1 Safety & reliability baseline | 2026-10-19 → 2026-10-21 | P0/P1 | Redact local plaintext credentials; report Python version and the known asyncio `_add_writer` risk in `--inspect-runtime`; verify Redis two-worker contention and fail-open; add discovery parse diagnostics; document stable-model guidance | None | No plaintext credentials in workspace notes; runtime inspection reports the Python risk; Redis tests cover contention and fail-open; discovery logs a sanitized response preview on parse failure |
+| R2 Codebase size compliance (M2) | 2026-10-22 → 2026-10-29 | P1 | Split `config.py` into `config/` modules; reduce `__init__.py`, `interfaces.py`, and `types.py` below 400 LOC or document exceptions; refresh blueprint statuses | R1 | Every module ≤400 LOC (or documented exception); full test suite passes |
+| R3 Form & CRUD coverage | 2026-10-30 → 2026-11-06 | P1 | Smart field mapping by control type and label; submit/upsert/add/edit/delete coverage; invalid, boundary, and unexpected-input cases | R1 | Deterministic tests for form CRUD; a demo run exercises create/update/delete |
+| R4 Observability & baselines | 2026-11-07 → 2026-11-12 | P2 | Baseline startup summary; a11y/anomaly dedup and detail; stable model fallback; full preexisting comparison verification | R1, R3 | Clean logs; baseline comparisons run; unique a11y counts; anomalies name step/action/type |
+| R5 Advanced roadmap | 2026-11-13 → 2026-11-27 | P3 | MCP integration, Android GUI support, natural-language test creation, enterprise features (accepted subset) | R1–R4 | Accepted subset implemented and documented |
+
+**Notes**
+- **R1 completed 2026-10-19:** local plaintext credentials redacted; `--inspect-runtime` now reports the Python asyncio risk; Redis contention/fail-open tests and discovery parse-preview diagnostics pass; stable-model guidance documented.
+- **R2 completed 2026-10-19:** `config.py` split into `config/` (`defaults`, `env`, `cli`, `validation`, `shutdown`, `helpers`, `overrides`) with backward-compatible re-exports; `__init__.py` reduced to 379 LOC by moving DI adapters to `di/`; `types.py` reduced to 239 LOC via `defect_types.py`; `interfaces.py` reduced to 377 LOC via `interfaces_abc.py`. Full suite passes (195 passed, 1 deselected); `ruff` clean. Nine larger cohesive modules are documented exceptions below.
+- The original M3 (multi-modal/visual/a11y/security) is largely implemented; remaining advanced items are in R5.
+- The original M4 (80% coverage/docs) is tracked across R2 and R4.
+- No calendar deadlines were previously defined for the recent reliability follow-ups; R1 establishes the first concrete window.
+
+### R2 Documented Size Exceptions
+
+These modules remain above the 400-LOC hard limit pending a state-boundary refactor. Each is a cohesive domain module whose split would require behavioral changes or cross-cutting state extraction; none is a grab-bag utility file.
+
+| Module | LOC | Rationale |
+|---|---:|---|
+| `monkeylm/core/worker/runner.py` | 665 | Worker lifecycle, loop detection, failure recovery, and signal handling share run-scoped state. |
+| `monkeylm/memory/postgres.py` | 525 | Baseline persistence, Redis path locks, and reconnect/fail-open logic share one transaction boundary. |
+| `monkeylm/browser/snapshot/cv.py` | 501 | OpenCV/OCR/SSIM/template pipeline with optional-dependency guards. |
+| `monkeylm/reporting/pdf.py` | 466 | ReportLab layout, tables, and screenshot annotations; previously accepted exception. |
+| `monkeylm/browser/actions/helpers.py` | 452 | Locator/interaction primitives shared by actions and executor; split would increase import churn. |
+| `monkeylm/browser/actions/executor.py` | 429 | Action orchestration interlocked with plan repair and loop guards. |
+| `monkeylm/reporting/markdown.py` | 413 | Report section formatting with cross-references to defect and telemetry output. |
+| `monkeylm/memory/qdrant.py` | 410 | Vector-store initialization, embedding, search, and telemetry. |
+| `monkeylm/reporting/defects.py` | 405 | Defect-ticket compilation across DOM, CV, and accessibility detector families. |
+
+## Milestone Checkpoints (historical)
 
 | Milestone | Target Date | Deliverables | Success Criteria |
 |-----------|-------------|--------------|------------------|
@@ -645,7 +682,7 @@ time ./scripts/quickstart.sh  # <15 minutes
 
 ---
 
-## Appendix A: Current File Structure
+## Appendix A: Historical File Structure (pre-refactor)
 
 ```
 monkeylm/
@@ -674,20 +711,32 @@ monkeylm/
 └── resources/
 ```
 
-## Appendix B: Target File Structure (Post-Refactoring)
+## Appendix B: Current Post-R2 File Structure
 
 ```
 monkeylm/
 ├── __init__.py
 ├── __main__.py
-├── interfaces.py (NEW)
-├── types.py
+├── interfaces.py (377 LOC)
+├── interfaces_abc.py (163 LOC)
+├── types.py (239 LOC)
+├── defect_types.py (206 LOC)
 ├── errors.py
-├── config/
+├── di/
 │   ├── __init__.py
-│   ├── cli.py (NEW)
-│   ├── env.py (NEW)
-│   └── validation.py (NEW)
+│   ├── browser.py
+│   ├── memory.py
+│   ├── model.py
+│   └── reporting.py
+├── config/
+│   ├── __init__.py (200 LOC)
+│   ├── cli.py (200 LOC)
+│   ├── defaults.py (238 LOC)
+│   ├── env.py (354 LOC)
+│   ├── helpers.py (193 LOC)
+│   ├── overrides.py (176 LOC)
+│   ├── shutdown.py (48 LOC)
+│   └── validation.py (115 LOC)
 ├── core/
 │   ├── __init__.py
 │   ├── worker.py (NEW)
