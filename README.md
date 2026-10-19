@@ -106,8 +106,8 @@ The advanced runner now supports both environment-variable configuration and CLI
 
 All chat, vision, embedding, and reranking calls go through a single
 OpenAI-compatible client. Configuration is read from the project-root `.env`
-file (see `.env.example`), and process environment variables take precedence
-over `.env` values.
+file (see `.env.example`); for `OPENAI_*` variables, process environment
+values take precedence over `.env` values.
 
 ```bash
 # Local Ollama (default; Ollama serves the OpenAI-compatible API on /v1)

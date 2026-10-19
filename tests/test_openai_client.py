@@ -49,10 +49,18 @@ class _FakeClient:
         return _FakeResponse({"choices": [{"message": {"content": "{}"}}]})
 
 
+class _RawResponse:
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.status_code = 200
+
+    def json(self) -> dict:
+        raise ValueError("not plain JSON")
+
+
 class OpenAICompatibleClientTests(unittest.TestCase):
     def setUp(self) -> None:
         openai_client.reset_client_cache()
-        openai_client._WARNED_INSECURE_ENDPOINTS.clear()
         _FakeClient.calls = []
         _FakeClient.instances = 0
 
@@ -111,14 +119,23 @@ class OpenAICompatibleClientTests(unittest.TestCase):
         self.assertEqual(_FakeClient.instances, 1)
         self.assertEqual(len(_FakeClient.calls), 2)
 
-    def test_plaintext_remote_endpoint_with_key_warns_once(self) -> None:
-        settings = Settings(openai_base_url="http://example.test:1234/v1", openai_api_key="sk-test")
-        with patch("monkeylm.models.openai_client.httpx", SimpleNamespace(Client=_FakeClient)):
-            with patch("monkeylm.models.openai_client._local_service_log") as log:
-                chat_completion(settings, model="test-model", messages=[{"role": "user", "content": "hi"}])
-                chat_completion(settings, model="test-model", messages=[{"role": "user", "content": "hi"}])
+    def test_chat_completion_tolerates_sse_done_sentinel(self) -> None:
+        class _SentinelClient(_FakeClient):
+            def post(self, url, json=None, headers=None, timeout=None):
+                type(self).calls.append({"url": url, "json": json, "headers": headers})
+                return _RawResponse(
+                    '{"choices": [{"message": {"content": "ok"}}]}\ndata: [DONE]\n\n'
+                )
 
-        self.assertEqual(log.call_count, 1)
+        settings = Settings(openai_base_url="https://api.example.com/v1")
+        with patch("monkeylm.models.openai_client.httpx", SimpleNamespace(Client=_SentinelClient)):
+            response = chat_completion(
+                settings,
+                model="test-model",
+                messages=[{"role": "user", "content": "hi"}],
+            )
+
+        self.assertEqual(extract_content(response), "ok")
 
     def test_chat_completion_omits_authorization_without_api_key(self) -> None:
         settings = Settings(openai_base_url="http://localhost:11434", openai_api_key="")
@@ -155,6 +172,23 @@ class OpenAICompatibleClientTests(unittest.TestCase):
         self.assertEqual(message["role"], "user")
         self.assertEqual(message["content"][0], {"type": "text", "text": "describe"})
         self.assertTrue(message["content"][1]["image_url"]["url"].startswith("data:image/png;base64,"))
+
+    def test_dotenv_vision_models_override_process_environment(self) -> None:
+        dotenv_values = {
+            "VISION_MODEL": "dotenv-vision",
+            "PDF_VISION_MODEL": "dotenv-pdf-vision",
+        }
+        shell_env = {
+            "VISION_MODEL": "shell-vision",
+            "PDF_VISION_MODEL": "shell-pdf-vision",
+        }
+        with patch.dict(os.environ, shell_env, clear=True):
+            with patch("dotenv.dotenv_values", return_value=dotenv_values):
+                with patch("monkeylm.config.os.makedirs"):
+                    settings = load_settings()
+
+        self.assertEqual(settings.vision_model, "dotenv-vision")
+        self.assertEqual(settings.pdf_vision_model, "dotenv-pdf-vision")
 
     def test_load_settings_reads_openai_environment(self) -> None:
         env = {"OPENAI_BASE_URL": "http://example.test:1234/v1", "OPENAI_API_KEY": "secret-key"}

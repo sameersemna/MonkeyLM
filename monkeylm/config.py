@@ -566,8 +566,16 @@ def load_settings(cli_args: Optional[argparse.Namespace] = None) -> Settings:
     s.qdrant_candidate_limit = max(3, int(ev_qcl) if ev_qcl is not None else s.qdrant_candidate_limit)
     ev_pg = env_vars.get("PDF_GENERATE")
     s.pdf_generate = _env_bool("PDF_GENERATE", default=_env_to_bool(ev_pg, s.pdf_generate))
-    s.pdf_vision_model = _env_str("PDF_VISION_MODEL", env_vars.get("PDF_VISION_MODEL") or s.pdf_vision_model)
-    s.vision_model = _env_str("VISION_MODEL", env_vars.get("VISION_MODEL") or s.vision_model)
+    s.pdf_vision_model = (
+        env_vars.get("PDF_VISION_MODEL")
+        or os.getenv("PDF_VISION_MODEL")
+        or s.pdf_vision_model
+    ).strip()
+    s.vision_model = (
+        env_vars.get("VISION_MODEL")
+        or os.getenv("VISION_MODEL")
+        or s.vision_model
+    ).strip()
     ev_pvt = env_vars.get("PDF_VISION_TIMEOUT_SECONDS")
     s.pdf_vision_timeout_seconds = max(1.0, float(ev_pvt) if ev_pvt is not None else s.pdf_vision_timeout_seconds)
     s.strict_sandbox = _env_bool("STRICT_SANDBOX", default=_env_to_bool(env_vars.get("STRICT_SANDBOX"), s.strict_sandbox))

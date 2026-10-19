@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 from urllib.parse import urlsplit
 
-from monkeylm.config import Settings, _local_service_log, httpx
+from monkeylm.config import Settings, httpx
 
 
 DEFAULT_OPENAI_BASE_URL = "http://localhost:11434"
@@ -27,7 +27,7 @@ DEFAULT_OPENAI_TIMEOUT_SECONDS = 15.0
 
 _CLIENTS: Dict[str, Any] = {}
 _CLIENTS_LOCK = threading.Lock()
-_WARNED_INSECURE_ENDPOINTS: set = set()
+_HTTP_TIMEOUT = getattr(httpx, "Timeout", None)
 
 
 class ModelAPIError(RuntimeError):
@@ -98,36 +98,21 @@ def _endpoint(settings: Settings, path: str) -> str:
 
 
 def _headers(settings: Settings) -> Dict[str, str]:
-    headers = {"Content-Type": "application/json"}
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
     api_key = (settings.openai_api_key or "").strip()
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     return headers
 
 
-def _warn_if_insecure(settings: Settings, url: str) -> None:
-    if not (settings.openai_api_key or "").strip():
-        return
-    parsed = urlsplit(url)
-    if parsed.scheme != "http":
-        return
-    host = (parsed.hostname or "").lower()
-    if host in {"localhost", "127.0.0.1", "::1"} or host.endswith(".localhost"):
-        return
-    if url in _WARNED_INSECURE_ENDPOINTS:
-        return
-    _WARNED_INSECURE_ENDPOINTS.add(url)
-    _local_service_log(
-        f"OPENAI_API_KEY is configured for plaintext HTTP endpoint {parsed.netloc}; "
-        "use HTTPS for remote endpoints.",
-        settings.output_dir,
-    )
-
-
-def _timeout(settings: Settings, timeout_seconds: Optional[float]) -> float:
+def _timeout(settings: Settings, timeout_seconds: Optional[float]) -> Any:
     if timeout_seconds is None:
         timeout_seconds = settings.ollama_timeout_seconds or DEFAULT_OPENAI_TIMEOUT_SECONDS
-    return max(0.001, float(timeout_seconds))
+    total = max(0.001, float(timeout_seconds))
+    if _HTTP_TIMEOUT is None:
+        return total
+    connect = min(total, 2.0)
+    return _HTTP_TIMEOUT(connect=connect, read=total, write=total, pool=connect)
 
 
 def _chat_payload(
@@ -140,7 +125,7 @@ def _chat_payload(
     json_mode: bool = False,
     stream: bool = False,
 ) -> Dict[str, Any]:
-    payload: Dict[str, Any] = {"model": model, "messages": messages}
+    payload: Dict[str, Any] = {"model": model, "messages": messages, "stream": bool(stream)}
     if temperature is not None:
         payload["temperature"] = float(temperature)
     if top_p is not None:
@@ -149,18 +134,22 @@ def _chat_payload(
         payload["max_tokens"] = int(max_tokens)
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
-    if stream:
-        payload["stream"] = True
     return payload
 
 
 def _decode_json(response: Any, url: str) -> Dict[str, Any]:
     try:
         data = response.json()
-    except ValueError as exc:
-        raise ModelAPIError(
-            f"LLM endpoint {url} returned invalid JSON: {response.text[:500]}"
-        ) from exc
+    except ValueError:
+        text = (response.text or "").strip()
+        if text.endswith("data: [DONE]"):
+            text = text[: -len("data: [DONE]")].rstrip()
+        try:
+            data = json.loads(text)
+        except ValueError as exc:
+            raise ModelAPIError(
+                f"LLM endpoint {url} returned invalid JSON: {response.text[:500]}"
+            ) from exc
     if not isinstance(data, dict):
         raise ModelAPIError(f"LLM endpoint {url} returned an unexpected payload: {str(data)[:500]}")
     return data
@@ -187,7 +176,6 @@ def chat_completion(
 ) -> Dict[str, Any]:
     """Send a chat completion request and return the decoded response."""
     url = _endpoint(settings, "chat/completions")
-    _warn_if_insecure(settings, url)
     payload = _chat_payload(
         model,
         messages,
@@ -218,7 +206,6 @@ def stream_chat_completion(
 ) -> Iterator[Dict[str, Any]]:
     """Yield server-sent-event chunks from a streaming chat completion."""
     url = _endpoint(settings, "chat/completions")
-    _warn_if_insecure(settings, url)
     payload = _chat_payload(
         model,
         messages,
@@ -264,7 +251,6 @@ def embed_text(
 ) -> List[float]:
     """Embed ``text`` through the configured ``/v1/embeddings`` endpoint."""
     url = _endpoint(settings, "embeddings")
-    _warn_if_insecure(settings, url)
     payload = {"model": model, "input": text}
     client = _client_for(settings)
     response = client.post(
