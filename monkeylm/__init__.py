@@ -33,6 +33,8 @@ try:
         TARGET_PASSWORD,
         OLLAMA_MODEL,
         OLLAMA_TIMEOUT_SECONDS,
+        OPENAI_BASE_URL,
+        OPENAI_API_KEY,
         VISION_MODEL,
         MAX_STEPS,
         MAX_STEPS_PER_WORKER,
@@ -67,6 +69,8 @@ try:
         DEFAULT_TARGET_PASSWORD,
         DEFAULT_OLLAMA_MODEL,
         DEFAULT_OLLAMA_TIMEOUT_SECONDS,
+        DEFAULT_OPENAI_BASE_URL,
+        DEFAULT_OPENAI_API_KEY,
         DEFAULT_MAX_STEPS,
         DEFAULT_WORKERS,
         DEFAULT_MAX_STEPS_PER_WORKER,
@@ -115,6 +119,8 @@ except Exception:
     TARGET_PASSWORD = DEFAULT_TARGET_PASSWORD = ""
     OLLAMA_MODEL = DEFAULT_OLLAMA_MODEL = "minimax-m3:cloud"
     OLLAMA_TIMEOUT_SECONDS = DEFAULT_OLLAMA_TIMEOUT_SECONDS = 15.0
+    OPENAI_BASE_URL = DEFAULT_OPENAI_BASE_URL = "http://localhost:11434"
+    OPENAI_API_KEY = DEFAULT_OPENAI_API_KEY = ""
     VISION_MODEL = DEFAULT_VISION_MODEL = "gemini-3-flash-preview"
     MAX_STEPS = DEFAULT_MAX_STEPS = 10
     MAX_STEPS_PER_WORKER = DEFAULT_MAX_STEPS_PER_WORKER = 10
@@ -266,6 +272,8 @@ __all__ = [
     "TARGET_URL",
     "OLLAMA_MODEL",
     "OLLAMA_TIMEOUT_SECONDS",
+    "OPENAI_BASE_URL",
+    "OPENAI_API_KEY",
     "VISION_MODEL",
     "MAX_STEPS",
     "MAX_STEPS_PER_WORKER",
@@ -298,6 +306,8 @@ __all__ = [
     "DEFAULT_TARGET_URL",
     "DEFAULT_OLLAMA_MODEL",
     "DEFAULT_OLLAMA_TIMEOUT_SECONDS",
+    "DEFAULT_OPENAI_BASE_URL",
+    "DEFAULT_OPENAI_API_KEY",
     "DEFAULT_MAX_STEPS",
     "DEFAULT_WORKERS",
     "DEFAULT_MAX_STEPS_PER_WORKER",
@@ -638,7 +648,13 @@ def create_model_client(settings: Optional[Settings] = None) -> IModelClient:
         parameter. See IMPROVEMENT_LOG.md Cycle 5.
     """
     import asyncio
-    import ollama
+
+    from monkeylm.models.openai_client import (
+        build_vision_message,
+        chat_completion,
+        extract_content,
+        stream_chat_completion,
+    )
 
     if settings is None:
         settings = load_settings()
@@ -658,13 +674,16 @@ def create_model_client(settings: Optional[Settings] = None) -> IModelClient:
             max_tokens: Optional[int] = None,
         ) -> Dict[str, Any]:
             response = await asyncio.to_thread(
-                ollama.chat,
+                chat_completion,
+                self._settings,
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
-                options={"temperature": temperature, "top_p": top_p},
+                temperature=temperature,
+                top_p=top_p,
+                max_tokens=max_tokens,
             )
             import json
-            content = response["message"]["content"]
+            content = extract_content(response)
             try:
                 return json.loads(content)
             except json.JSONDecodeError:
@@ -676,21 +695,15 @@ def create_model_client(settings: Optional[Settings] = None) -> IModelClient:
             image_path: str,
             model: str,
         ) -> Dict[str, Any]:
-            import base64
-            from pathlib import Path
-            with open(Path(image_path), "rb") as f:
-                image_data = base64.b64encode(f.read()).decode()
+            message = build_vision_message(prompt, image_path)
             response = await asyncio.to_thread(
-                ollama.chat,
+                chat_completion,
+                self._settings,
                 model=model,
-                messages=[{
-                    "role": "user",
-                    "content": prompt,
-                    "images": [image_data],
-                }],
+                messages=[message],
             )
             import json
-            content = response["message"]["content"]
+            content = extract_content(response)
             try:
                 return json.loads(content)
             except json.JSONDecodeError:
@@ -702,11 +715,11 @@ def create_model_client(settings: Optional[Settings] = None) -> IModelClient:
             model: str,
             temperature: float = 0.2,
         ) -> Any:
-            stream = ollama.chat(
+            stream = stream_chat_completion(
+                self._settings,
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
-                options={"temperature": temperature},
-                stream=True,
+                temperature=temperature,
             )
             for chunk in stream:
                 yield chunk

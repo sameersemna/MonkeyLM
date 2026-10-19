@@ -170,35 +170,32 @@ async def _annotate_with_description(
         _draw_red_box_arrow,
         _local_service_log,
     )
+    from monkeylm.models.openai_client import build_vision_message, chat_completion, extract_content
     import asyncio
-    import base64
     import shutil
-    import ollama
 
     active_model = settings.vision_model or settings.pdf_vision_model
     cloud = _is_cloud_vision_model(active_model)
     prompt_text = _build_vision_annotation_prompt(context_issue)
 
-    with open(image_path, "rb") as f:
-        img_b64 = base64.b64encode(f.read()).decode("utf-8")
-
     output_path = image_path.replace(".png", "_annotated.png").replace(".jpg", "_annotated.jpg")
-    chat_kwargs = {
-        "model": active_model,
-        "messages": [
-            {"role": "user", "content": prompt_text, "images": [img_b64]},
-        ],
-        "format": "json",
-        "options": {"temperature": 0.0},
-    }
+    messages = [build_vision_message(prompt_text, image_path)]
 
     route_label = "Cloud" if cloud else "Local"
     try:
         response = await asyncio.wait_for(
-            asyncio.to_thread(ollama.chat, **chat_kwargs),
+            asyncio.to_thread(
+                chat_completion,
+                settings,
+                model=active_model,
+                messages=messages,
+                timeout_seconds=settings.pdf_vision_timeout_seconds,
+                json_mode=True,
+                temperature=0.0,
+            ),
             timeout=settings.pdf_vision_timeout_seconds,
         )
-        content = response.get("message", {}).get("content", "")
+        content = extract_content(response)
     except Exception as exc:
         _local_service_log(f"{route_label} vision model failed: {exc}", settings.output_dir)
         return image_path, None

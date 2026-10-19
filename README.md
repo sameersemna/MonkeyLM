@@ -67,8 +67,10 @@ The advanced runner now supports both environment-variable configuration and CLI
 | Variable | Default | Purpose |
 |---|---|---|
 | `TARGET_URL` | `https://noblequran-85hu2yge.manus.space/dashboard` | Start URL for the monkey run. |
-| `OLLAMA_MODEL` | `minimax-m3:cloud` | LLM model used for action planning. |
-| `OLLAMA_TIMEOUT_SECONDS` | `15` | Hard timeout in seconds for each Ollama inference call. |
+| `OLLAMA_MODEL` | `minimax-m3:cloud` | LLM model used for action planning. Must exist on the configured endpoint. |
+| `OPENAI_BASE_URL` | `http://localhost:11434` | Base URL of an OpenAI-compatible API. Ollama's port 11434 gets `/v1` appended automatically; include the full path for other providers. |
+| `OPENAI_API_KEY` | unset | Optional bearer token sent to the configured endpoint. |
+| `OLLAMA_TIMEOUT_SECONDS` | `15` | Hard timeout in seconds for each LLM inference call. |
 | `MAX_STEPS` | `100` | Number of monkey actions to execute. |
 | `WORKERS` | `1` | Maximum number of concurrent worker browser contexts. |
 | `MAX_STEPS_PER_WORKER` | `100` | Per-worker step cap. Must be less than or equal to `MAX_STEPS`. |
@@ -99,6 +101,33 @@ The advanced runner now supports both environment-variable configuration and CLI
 | `CV_TEMPLATE_SCALE` | `0.5` | Downscale factor (0.25–1.0) for template matching; 0.5 roughly quarters matching cost. |
 | `CV_TEMPLATE_EVERY_N_STEPS` | `2` | Verify chrome every N steps instead of every step. |
 | `OCR_ENABLED` | `false` | Extract error text from failure screenshots via RapidOCR (canvas/iframe/PDF content the DOM cannot reach). |
+
+### Using OpenAI-Compatible LLM Endpoints
+
+All chat, vision, embedding, and reranking calls go through a single
+OpenAI-compatible client. Configuration is read from the project-root `.env`
+file (see `.env.example`), and process environment variables take precedence
+over `.env` values.
+
+```bash
+# Local Ollama (default; Ollama serves the OpenAI-compatible API on /v1)
+OPENAI_BASE_URL=http://localhost:11434
+
+# Hosted OpenAI-compatible providers (include the full API base path)
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_API_KEY=sk-...
+
+# Self-hosted vLLM / LM Studio / LiteLLM
+OPENAI_BASE_URL=http://localhost:8000/v1
+```
+
+`OPENAI_API_KEY` is optional and is only sent when non-empty. Remote endpoints
+should use HTTPS; the plaintext default is intended for loopback Ollama.
+The model names in `OLLAMA_MODEL`, `VISION_MODEL`, `PDF_VISION_MODEL`, and
+`QDRANT_RERANK_MODEL` must be valid for whichever endpoint you configure.
+
+For backward compatibility, `OLLAMA_HOST` and `OLLAMA_API_KEY` are used as
+fallbacks when the corresponding `OPENAI_*` variables are unset.
 
 ### Selective Vision Audit & Executive PDF
 

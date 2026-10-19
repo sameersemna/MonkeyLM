@@ -226,7 +226,7 @@ class IMemoryStore(Protocol):
 class IModelClient(Protocol):
     """Interface for LLM inference and vision model routing.
 
-    Implementations handle Ollama model communication, vision model selection,
+    Implementations handle LLM model communication, vision model selection,
     prompt engineering, and response parsing.
 
     Example implementation: monkeylm.models.ModelClient

@@ -70,7 +70,8 @@ def _load_dotenv() -> None:
     if dotenv is None:
         return
     try:
-        env_path = Path(__file__).resolve().parent / ".env"
+        project_root = Path(__file__).resolve().parent.parent
+        env_path = project_root / ".env"
         if env_path.is_file():
             dotenv.load_dotenv(env_path, override=False)
     except Exception:
@@ -110,6 +111,8 @@ DEFAULT_TARGET_USERNAME = ""
 DEFAULT_TARGET_PASSWORD = ""
 DEFAULT_OLLAMA_MODEL = "minimax-m3:cloud"
 DEFAULT_OLLAMA_TIMEOUT_SECONDS = 15.0
+DEFAULT_OPENAI_BASE_URL = "http://localhost:11434"
+DEFAULT_OPENAI_API_KEY = ""
 DEFAULT_MAX_STEPS = 10
 DEFAULT_WORKERS = 1
 DEFAULT_MAX_STEPS_PER_WORKER = 10
@@ -169,8 +172,6 @@ ACTION_COOLDOWN_SECONDS = 1.0
 OLLAMA_DECISION_OPTIONS: Dict[str, Any] = {
     "temperature": 0.2,
     "top_p": 0.9,
-    "repeat_penalty": 1.05,
-    "num_ctx": 4096,
 }
 
 ALLOWED_ACTIONS = {
@@ -264,6 +265,20 @@ def _normalize_window_size(raw: str, fallback: str = DEFAULT_WINDOW_SIZE) -> str
     if width < 320 or height < 200:
         return fallback
     return f"{width},{height}"
+
+
+def _ollama_host_base_url(value: Optional[str]) -> str:
+    """Translate a legacy ``OLLAMA_HOST`` value into an OpenAI-compatible base URL."""
+    host = (value or "").strip()
+    if not host:
+        return ""
+    if "://" not in host:
+        host = f"http://{host}"
+    host = host.rstrip("/")
+    parsed = urlparse(host)
+    if parsed.path in ("", "/"):
+        host = f"{host}/v1"
+    return host
 
 
 # ── CLI parsing ────────────────────────────────────────────────────────────────
@@ -480,6 +495,18 @@ def load_settings(cli_args: Optional[argparse.Namespace] = None) -> Settings:
     s.ollama_model = raw_ollama
     ollama_timeout = _env_float("OLLAMA_TIMEOUT_SECONDS", s.ollama_timeout_seconds)
     s.ollama_timeout_seconds = max(1.0, _env_to_float(env_vars.get("OLLAMA_TIMEOUT_SECONDS"), ollama_timeout))
+    raw_base_url = (
+        os.getenv("OPENAI_BASE_URL")
+        or env_vars.get("OPENAI_BASE_URL")
+        or _ollama_host_base_url(os.getenv("OLLAMA_HOST") or env_vars.get("OLLAMA_HOST"))
+        or s.openai_base_url
+    )
+    s.openai_base_url = (raw_base_url or DEFAULT_OPENAI_BASE_URL).strip().rstrip("/")
+    ollama_api_key = os.getenv("OLLAMA_API_KEY") or env_vars.get("OLLAMA_API_KEY") or ""
+    s.openai_api_key = _env_str(
+        "OPENAI_API_KEY",
+        env_vars.get("OPENAI_API_KEY") or ollama_api_key or s.openai_api_key,
+    )
 
     raw_max_steps = env_vars.get("MAX_STEPS")
     s.max_steps = max(1, int(raw_max_steps) if raw_max_steps is not None else s.max_steps)
@@ -997,6 +1024,8 @@ TARGET_USERNAME: str = DEFAULT_TARGET_USERNAME
 TARGET_PASSWORD: str = DEFAULT_TARGET_PASSWORD
 OLLAMA_MODEL: str = DEFAULT_OLLAMA_MODEL
 OLLAMA_TIMEOUT_SECONDS: float = DEFAULT_OLLAMA_TIMEOUT_SECONDS
+OPENAI_BASE_URL: str = DEFAULT_OPENAI_BASE_URL
+OPENAI_API_KEY: str = DEFAULT_OPENAI_API_KEY
 VISION_MODEL: str = DEFAULT_VISION_MODEL
 MAX_STEPS: int = DEFAULT_MAX_STEPS
 MAX_STEPS_PER_WORKER: int = DEFAULT_MAX_STEPS_PER_WORKER
@@ -1035,6 +1064,8 @@ _RUNTIME_GLOBAL_SCHEMA: Dict[str, Any] = {
     "TARGET_PASSWORD": str,
     "OLLAMA_MODEL": str,
     "OLLAMA_TIMEOUT_SECONDS": (int, float),
+    "OPENAI_BASE_URL": str,
+    "OPENAI_API_KEY": str,
     "VISION_MODEL": str,
     "MAX_STEPS": int,
     "MAX_STEPS_PER_WORKER": int,
@@ -1066,7 +1097,7 @@ _RUNTIME_GLOBAL_SCHEMA: Dict[str, Any] = {
     "QDRANT_ENABLE_WRITES": bool,
 }
 
-_SENSITIVE_CONFIG_KEYS: frozenset = frozenset(["POSTGRES_DSN", "REDIS_URL"])
+_SENSITIVE_CONFIG_KEYS: frozenset = frozenset(["POSTGRES_DSN", "REDIS_URL", "OPENAI_API_KEY"])
 _POS_INT_KEYS: frozenset = frozenset([
     "MAX_STEPS", "MAX_STEPS_PER_WORKER", "WORKERS",
     "WORKER_NAVIGATION_RETRIES", "WORKER_QDRANT_INIT_RETRIES",
@@ -1198,6 +1229,8 @@ __all__ = [
     "DEFAULT_TARGET_PASSWORD",
     "DEFAULT_OLLAMA_MODEL",
     "DEFAULT_OLLAMA_TIMEOUT_SECONDS",
+    "DEFAULT_OPENAI_BASE_URL",
+    "DEFAULT_OPENAI_API_KEY",
     "DEFAULT_MAX_STEPS",
     "DEFAULT_WORKERS",
     "DEFAULT_MAX_STEPS_PER_WORKER",
@@ -1279,6 +1312,8 @@ __all__ = [
     "TARGET_PASSWORD",
     "OLLAMA_MODEL",
     "OLLAMA_TIMEOUT_SECONDS",
+    "OPENAI_BASE_URL",
+    "OPENAI_API_KEY",
     "VISION_MODEL",
     "MAX_STEPS",
     "MAX_STEPS_PER_WORKER",

@@ -7,6 +7,7 @@ from typing import Any, Optional
 
 from monkeylm.config import Settings, _local_service_log
 from monkeylm.models.ollama import _sanitize_prompt_input, _safe_json_parse, _ollama_chat_with_retry
+from monkeylm.models.openai_client import extract_content
 from monkeylm.types import TestingStrategy, PersonaGoal, CriticalFlow
 
 
@@ -279,7 +280,7 @@ async def run_application_discovery(
             continue
 
         try:
-            content = response["message"]["content"]
+            content = extract_content(response)
             strategy = _parse_testing_strategy(content)
             if strategy is not None:
                 print(f"   ✅ Discovery ready — domain: {strategy.app_domain}")

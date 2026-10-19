@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 
 from monkeylm.config import Settings, _local_service_log, normalize_action_plan
 from monkeylm.models.ollama import _sanitize_prompt_input, _safe_json_parse, _ollama_chat_with_retry
+from monkeylm.models.openai_client import extract_content
 from monkeylm.types import TestingStrategy, PageSnapshot
 
 
@@ -203,11 +204,11 @@ async def decide_next_action(
 
     if response is not None:
         try:
-            content = response["message"]["content"]
+            content = extract_content(response)
             parsed = parse_action_plan_response(content)
             if parsed is not None:
                 return parsed
         except Exception as exc:
-            _local_service_log(f"Failed to parse Ollama action plan response: {exc}", settings.output_dir)
+            _local_service_log(f"Failed to parse LLM action plan response: {exc}", settings.output_dir)
 
     return normalize_action_plan({"action": "scroll", "target": "", "value": ""})

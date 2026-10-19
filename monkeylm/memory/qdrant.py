@@ -10,9 +10,8 @@ import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-import ollama
-
 from monkeylm.config import Settings, _local_service_log, httpx
+from monkeylm.models.openai_client import chat_completion, embed_text, extract_content
 
 
 def _stable_text_vector(text: str, vector_size: int) -> List[float]:
@@ -77,29 +76,9 @@ class QdrantMemoryStore:
         self._last_write_telemetry = {}
         return telemetry
 
-    def _extract_embedding_from_response(self, result: Any) -> Optional[List[float]]:
-        if isinstance(result, dict):
-            embedding = result.get("embedding")
-            if isinstance(embedding, list) and embedding:
-                return [float(x) for x in embedding]
-            embeddings = result.get("embeddings")
-            if isinstance(embeddings, list) and embeddings:
-                first = embeddings[0]
-                if isinstance(first, list) and first:
-                    return [float(x) for x in first]
-        return None
-
     def _ollama_embed_sync(self, text: str) -> Optional[List[float]]:
         try:
-            response = ollama.embed(model=self.embedding_model, input=text)
-            vector = self._extract_embedding_from_response(response)
-            if vector:
-                return vector
-        except Exception:
-            pass
-        try:
-            embed_response = ollama.embeddings(model=self.embedding_model, prompt=text)
-            vector = self._extract_embedding_from_response(embed_response)
+            vector = embed_text(self.settings, model=self.embedding_model, text=text)
             if vector:
                 return vector
         except Exception:
@@ -339,8 +318,16 @@ class QdrantMemoryStore:
         try:
             print(f"   └─ 🧠 Reranking memories with {self.rerank_model} (limit={final_limit})")
             prompt = self._build_rerank_prompt(query_text, candidates, final_limit)
-            response = await asyncio.to_thread(ollama.chat, model=self.rerank_model, messages=[{"role": "user", "content": prompt}], format="json", options={"temperature": 0.0, "top_p": 0.9})
-            ranked_indices = self._parse_rerank_response(response.get("message", {}).get("content", ""))
+            response = await asyncio.to_thread(
+                chat_completion,
+                self.settings,
+                model=self.rerank_model,
+                messages=[{"role": "user", "content": prompt}],
+                json_mode=True,
+                temperature=0.0,
+                top_p=0.9,
+            )
+            ranked_indices = self._parse_rerank_response(extract_content(response))
             if not ranked_indices:
                 return candidates[:final_limit], {"rerank_enabled": True, "rerank_applied": False, "rerank_model": self.rerank_model, "rerank_ms": round((time.perf_counter() - started) * 1000.0, 3), "reason": "empty_ranking"}
             picked: List[Dict[str, Any]] = []

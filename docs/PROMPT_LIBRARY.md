@@ -85,35 +85,37 @@ Return strict JSON only.
 - Keep target constraints explicit to reduce locator mismatch.
 - Add one scenario objective at a time; avoid overloaded instructions.
 
-## Ollama Tuning Tips
+## LLM Tuning Tips
 
-The current code uses `ollama.chat(...)` without explicit sampling options. If you add options, this is a practical starting point.
+All inference goes through the OpenAI-compatible client, which sends
+`temperature` and `top_p` from `OLLAMA_DECISION_OPTIONS`. Ollama-native options
+such as `num_ctx` and `repeat_penalty` are not forwarded because they are not
+part of the standard OpenAI chat-completions schema; configure them on the
+Ollama server or model instead.
 
 ### Recommended Defaults
 
 - `temperature`: `0.2` to `0.4`
 - `top_p`: `0.9`
-- `repeat_penalty`: `1.05`
-- `num_ctx`: `4096` or higher for rich state descriptions
 
 ### Why
 
 - Lower temperature improves action determinism and JSON validity.
-- Slight repeat penalty reduces repeated stale decisions.
-- Larger context helps when page state dumps are long.
+- For long page-state dumps, raise the model context window in the Ollama
+  server configuration rather than sending `num_ctx` per request.
 
 ### Example (copy-paste)
 
 ```python
-response = ollama.chat(
-    model=OLLAMA_MODEL,
+from monkeylm.models.openai_client import chat_completion
+
+response = chat_completion(
+    settings,
+    model=settings.ollama_model,
     messages=[{"role": "user", "content": prompt}],
-    options={
-        "temperature": 0.3,
-        "top_p": 0.9,
-        "repeat_penalty": 1.05,
-        "num_ctx": 4096,
-    },
+    temperature=0.3,
+    top_p=0.9,
+    json_mode=True,
 )
 ```
 

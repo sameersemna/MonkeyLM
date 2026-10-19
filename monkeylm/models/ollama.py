@@ -1,4 +1,4 @@
-"""Ollama client wrappers - chat with retry, JSON parsing, and security helpers."""
+"""LLM client wrappers - OpenAI-compatible chat with retry, JSON parsing, and security helpers."""
 
 from __future__ import annotations
 
@@ -8,9 +8,8 @@ import random
 import re
 from typing import Any, Dict, List, Optional
 
-import ollama
-
 from monkeylm.config import OLLAMA_DECISION_OPTIONS, Settings, _local_service_log
+from monkeylm.models.openai_client import chat_completion
 
 
 _MAX_LLM_INPUT_CHARS = 512_000
@@ -94,20 +93,33 @@ def _safe_json_parse(text: str) -> Optional[Any]:
 
 def _is_ollama_overload_error(exc: Exception) -> bool:
     status_code = getattr(exc, "status_code", None)
-    if status_code == 503:
+    if status_code in (429, 503):
         return True
     exc_str = str(exc).lower()
-    return any(marker in exc_str for marker in ["503", "overload", "queue", "busy", "too many requests"])
+    if any(
+        marker in exc_str
+        for marker in ["429", "503", "overload", "queue", "busy", "too many requests", "rate limit"]
+    ):
+        return True
+    exc_name = type(exc).__name__.lower()
+    return any(marker in exc_name for marker in ("timeout", "connect", "transport", "network"))
+
+
+def _decision_sampling_options() -> Dict[str, Any]:
+    return {
+        "temperature": OLLAMA_DECISION_OPTIONS.get("temperature"),
+        "top_p": OLLAMA_DECISION_OPTIONS.get("top_p"),
+    }
 
 
 async def _ollama_chat_with_retry(
     *,
     settings: Settings,
     model: str,
-    messages: List[Dict[str, str]],
+    messages: List[Dict[str, Any]],
     timeout_seconds: float,
     max_retries: int = 3,
-) -> Optional[ollama.ChatResponse]:
+) -> Optional[Dict[str, Any]]:
     if settings.ollama_model and model != settings.ollama_model:
         print(f"   └─ 🤖 Calling fallback model {model}")
     else:
@@ -115,16 +127,19 @@ async def _ollama_chat_with_retry(
 
     base_delay = 1.0
     last_exc: Optional[Exception] = None
+    sampling_options = _decision_sampling_options()
 
     for attempt in range(1, max_retries + 1):
         try:
             response = await asyncio.wait_for(
                 asyncio.to_thread(
-                    ollama.chat,
+                    chat_completion,
+                    settings,
                     model=model,
                     messages=messages,
-                    format="json",
-                    options=OLLAMA_DECISION_OPTIONS,
+                    timeout_seconds=timeout_seconds,
+                    json_mode=True,
+                    **sampling_options,
                 ),
                 timeout=timeout_seconds,
             )
@@ -132,14 +147,14 @@ async def _ollama_chat_with_retry(
         except asyncio.TimeoutError as exc:
             last_exc = exc
             _local_service_log(
-                f"Ollama inference timed out after {timeout_seconds}s (attempt {attempt}/{max_retries})",
+                f"LLM inference timed out after {timeout_seconds}s (attempt {attempt}/{max_retries})",
                 settings.output_dir,
             )
         except Exception as exc:
             last_exc = exc
             if _is_ollama_overload_error(exc):
                 _local_service_log(
-                    f"Ollama inference overloaded (attempt {attempt}/{max_retries}): {_redact_secrets(str(exc))}",
+                    f"LLM inference overloaded (attempt {attempt}/{max_retries}): {_redact_secrets(str(exc))}",
                     settings.output_dir,
                 )
             else:
@@ -150,14 +165,14 @@ async def _ollama_chat_with_retry(
 
         delay = base_delay * (2 ** (attempt - 1)) + random.uniform(0.0, 2.0)
         _local_service_log(
-            f"Backing off from Ollama for {delay:.2f}s before retry {attempt + 1}/{max_retries}",
+            f"Backing off from the LLM endpoint for {delay:.2f}s before retry {attempt + 1}/{max_retries}",
             settings.output_dir,
         )
         await asyncio.sleep(delay)
 
     if last_exc is not None:
         _local_service_log(
-            f"Ollama inference failed after {max_retries} attempts: {_redact_secrets(str(last_exc))}",
+            f"LLM inference failed after {max_retries} attempts: {_redact_secrets(str(last_exc))}",
             settings.output_dir,
         )
     return None

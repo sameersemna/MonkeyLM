@@ -1,4 +1,4 @@
-"""Models module - Ollama client, vision routing, and decision prompts."""
+"""Models module - OpenAI-compatible LLM client, vision routing, and decision prompts."""
 
 from monkeylm.models.ollama import (
     _ollama_chat_with_retry,

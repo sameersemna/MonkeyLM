@@ -59,6 +59,8 @@ class Settings:
     target_password: str = ""
     ollama_model: str = "minimax-m3:cloud"
     ollama_timeout_seconds: float = 15.0
+    openai_base_url: str = "http://localhost:11434"
+    openai_api_key: str = ""
     vision_model: str = "gemini-3-flash-preview"
     pdf_vision_model: str = "llama3.2-vision"
     pdf_vision_timeout_seconds: float = 30.0

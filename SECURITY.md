@@ -46,7 +46,7 @@ Fuzzer payloads (`/etc/passwd`, SQLi strings, XSS tags) are intentional maliciou
 
 | Control | Detail |
 |---|---|
-| `_redact_secrets()` | Scrubs visible secret material before exception logging in Ollama calls |
+| `_redact_secrets()` | Scrubs visible secret material before exception logging in LLM calls |
 | `_sanitize_prompt_input()` | Strips control chars / RTL overrides, removes injection boundary tags, size-caps input |
 | Prompt-injection fences | Untrusted data wrapped in `<<<UNTRUSTED_*_START/END>>>` with SEC BOUNDARY directive |
 | Safe JSON parsing | `_safe_json_parse()` uses brace-depth scanner (replaces fragile greedy regex) |
@@ -107,10 +107,9 @@ Fuzzer payloads (`/etc/passwd`, SQLi strings, XSS tags) are intentional maliciou
 
 | Package | Version | Rationale |
 |---|---|---|
-| ollama | 0.6.2 | CVE-2026-5757 affects the Ollama server binary (GGUF quantization engine), not this Python HTTP client library |
 | httpx | 0.28.1 | Already latest; SSRF CVEs found in downstream consumers, not in httpx itself |
 
-> **All 10 dependencies strictly pinned with `==`. Zero wildcards or loose version constraints.**
+> **All dependencies strictly pinned with `==`. Zero wildcards or loose version constraints.**
 
 ---
 
@@ -143,7 +142,7 @@ When adding new features or modifying existing code:
 1. Always use `_secure_atomic_write()` for file I/O with `mode=0o640` (reports) or `mode=0o600` (sensitive data).
 2. Apply `sanitize_for_storage()` before persisting any untrusted string from the browser, console, or page errors.
 3. Guard user-supplied paths/domains/routes through `_sanitize_path_component()` and verify containment with `relative_to()`.
-4. Never log raw Ollama responses or exception text — pass through `_redact_secrets()` first.
+4. Never log raw LLM responses or exception text — pass through `_redact_secrets()` first.
 5. Keep baseline data isolated within the designated output/baseline directory; never trust URL-derived path components.
 6. Run `pip-audit` (or manually cross-reference PyPI advisories) before merging dependency changes. Re-pin with `==`.
 
