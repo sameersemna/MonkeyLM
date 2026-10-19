@@ -17,6 +17,7 @@ from monkeylm.config import (
     _local_service_log,
 )
 from monkeylm.core.monitor import sanitize_for_storage
+from monkeylm.form_filling import prepare_submit_form_payloads
 from monkeylm.browser.snapshot import (
     get_page_state,
     compute_max_layout_shift,
@@ -123,6 +124,12 @@ async def execute_action(
             log_entry["status"] = "MODEL_PLAN_REJECTED"
             log_entry["error"] = f"no_typeable_control:{type_repair['rejected_from']}"
             print(f"   -> ⛔ No typeable control for '{type_repair['rejected_from']}'; falling back to scroll")
+
+    if action == "submit_form":
+        crud_operation, input_payloads = prepare_submit_form_payloads(action_plan, before_snapshot)
+        action_plan["input_payloads"] = input_payloads
+        log_entry["input_payloads"] = input_payloads
+        log_entry["crud_operation"] = crud_operation
 
     if persistence_engine is not None and target.strip() and action in {"click", "type", "submit_form", "handle_modal"}:
         from monkeylm.config import split_domain_and_route

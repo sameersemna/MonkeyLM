@@ -156,6 +156,10 @@ Rules:
 - Never return raw text labels as target.
 - For "submit_form", include "input_payloads": a list of objects with "target" ([id=N]), "value", and "reason".
 - The "action_strategy" field must be either "HAPPY_UPSERT" or "EDGE_CASE_FUZZ" and explain why you chose that payload block.
+- Map each field from its label, name, placeholder, and input type: email -> email address, phone -> telephone, number -> numeric value, date -> date, password -> password, select -> one of its listed options, and name/address/company fields -> realistic text.
+- Respect required, minlength, maxlength, pattern, min, max, and step constraints in every payload.
+- For create/add forms, fill every required field with valid data. For edit/update forms, change at least one field. For delete/remove forms, target the dedicated Delete/Remove control instead of inventing field values.
+- Cover CRUD behavior over time: create a record, then look for Edit/Update and Delete/Remove controls; separately probe invalid, boundary, and unexpected-type inputs.
 
 Respond ONLY with JSON:
 {{

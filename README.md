@@ -278,6 +278,7 @@ Operational guidance:
 - 1920x1080 browser windows with isolated per-worker persistent contexts under `playwright_user_data/session_<timestamp>/worker-XX/`.
 - Modal handling with fallback strategy: close button, cancel/dismiss, then `Escape`.
 - Form submission paths (`submit` click and `Enter` fallback).
+- Label/type-aware form filling with constraint-aware valid, invalid, boundary, and unexpected-type values; deterministic create/update/delete payloads and CRUD-intent detection.
 - Fuzzing with blended payloads (realistic + OWASP-style attack strings).
 - Network fault injection for API calls (latency and injected 5xx responses).
 - Accessibility checks with axe-core (`critical`/`serious` filtering).
@@ -557,5 +558,6 @@ Tips:
 - `docs/EXTENSION_GUIDE.md`
 - `docs/TESTING_STRATEGY.md`
 - `docs/PROMPT_LIBRARY.md`
+- `scripts/demo_form_crud.py` — local create/update/delete demo for label-aware form payloads.
 
 These docs are designed for fast “vibe coding” iteration while preserving architectural intent.

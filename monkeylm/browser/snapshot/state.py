@@ -188,6 +188,10 @@ def state_to_prompt(snapshot: PageSnapshot) -> str:
                     attrs = []
                     if fc.required:
                         attrs.append("required")
+                    if fc.name_attr:
+                        attrs.append(f"name={fc.name_attr}")
+                    if fc.placeholder and not fc.resolved_label:
+                        attrs.append(f"placeholder={fc.placeholder}")
                     if fc.input_type:
                         attrs.append(f"type={fc.input_type}")
                     if fc.minlength is not None:

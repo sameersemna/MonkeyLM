@@ -11,7 +11,17 @@ from __future__ import annotations
 import os
 from typing import Optional
 
-from monkeylm.types import Settings
+from monkeylm.types import (
+    CriticalFlow,
+    DefectTicket,
+    FormControlRecord,
+    FormRecord,
+    PageSnapshot,
+    PersonaGoal,
+    Settings,
+    TestingStrategy,
+    WorkerRunResult,
+)
 
 from . import cli, defaults, env, helpers, overrides, shutdown, validation
 from .cli import parse_cli_args
@@ -152,6 +162,14 @@ RUN_USER_DATA_DIR: str = f"playwright_user_data/session_{__import__('datetime').
 __all__ = [
     *defaults.__all__,
     "Settings",
+    "PersonaGoal",
+    "CriticalFlow",
+    "TestingStrategy",
+    "FormControlRecord",
+    "FormRecord",
+    "PageSnapshot",
+    "WorkerRunResult",
+    "DefectTicket",
     *cli.__all__,
     *env.__all__,
     *helpers.__all__,
