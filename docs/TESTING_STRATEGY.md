@@ -33,6 +33,34 @@ In short: this is not pure random chaos; it is guided chaos with instrumentation
 - markdown summary for humans,
 - JSON summary for automation.
 
+## User-Provided Scenarios
+
+A scenario bypasses LLM application discovery and becomes the initial
+`TestingStrategy` for every worker. The deterministic parser extracts:
+
+- persona from phrases such as `As a new user, ...`,
+- one critical flow per action-bearing sentence,
+- edge cases from terms such as `invalid`, `empty`, `duplicate`, `boundary`, and `timeout`,
+- security focus from terms such as `XSS`, `SQL injection`, `CSRF`, `permission`, and `token`.
+
+Provide it inline with `--scenario`, from a plain-text file with
+`--scenario-file`, or from structured JSON:
+
+```json
+{
+  "name": "account lifecycle",
+  "summary": "Create, update, and delete an account",
+  "personas": [{"name": "new user", "description": "First-time visitor", "behaviors": ["register"]}],
+  "flows": [{"name": "create", "description": "Register", "steps": ["open form", "submit"]}],
+  "edge_cases": ["empty fields", "duplicate email"],
+  "security_focus": ["XSS in display name"]
+}
+```
+
+The resolved strategy is written to `<output_dir>/scenario.json` and included in
+Markdown, JSON, and PDF reports. Set only one of `SCENARIO_TEXT` or
+`SCENARIO_FILE`; conflicting inputs fail startup.
+
 ## Fuzzing Inputs and Security Checks
 
 `Fuzzer` payload pool combines:

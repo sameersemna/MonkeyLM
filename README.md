@@ -67,6 +67,9 @@ The advanced runner now supports both environment-variable configuration and CLI
 | Variable | Default | Purpose |
 |---|---|---|
 | `TARGET_URL` | `https://noblequran-85hu2yge.manus.space/dashboard` | Start URL for the monkey run. |
+| `SCENARIO_TEXT` | unset | Inline natural-language scenario; bypasses LLM application discovery. |
+| `SCENARIO_FILE` | unset | Path to a `.json` or plain-text scenario file; bypasses LLM application discovery. |
+| `SCENARIO_NAME` | unset | Display name stored in the scenario artifact. |
 | `OLLAMA_MODEL` | `minimax-m3:cloud` | Primary LLM model used for action planning. Must exist on the configured endpoint. |
 | `OLLAMA_FALLBACK_MODELS` | unset | Comma-separated fallback planning models tried in order when the primary model fails. |
 | `OPENAI_BASE_URL` | `http://localhost:11434` | Base URL of an OpenAI-compatible API. Ollama's port 11434 gets `/v1` appended automatically; include the full path for other providers. |
@@ -179,6 +182,9 @@ python -m monkeylm
 | Flag | Purpose |
 |---|---|
 | `--target-url` | Override target URL for the run. |
+| `--scenario` | Inline natural-language scenario; bypasses LLM application discovery. |
+| `--scenario-file` | Load a `.json` or plain-text scenario file. |
+| `--scenario-name` | Set the scenario display name used in reports and `scenario.json`. |
 | `--ollama-model` | Override model name for the run. |
 | `--ollama-timeout-seconds` | Override Ollama inference timeout. |
 | `--max-steps` | Override step budget. |
@@ -248,6 +254,59 @@ python -m monkeylm \
 	--no-viewport
 ```
 
+### Natural-Language Scenarios
+
+Provide a scenario when you want deterministic, user-directed coverage instead of
+LLM application discovery:
+
+```bash
+python -m monkeylm \
+  --target-url "https://example.com/dashboard" \
+  --scenario "As a new user, create an account, then edit and delete it. Try invalid emails, empty fields, duplicate accounts, and XSS." \
+  --scenario-name "account lifecycle"
+```
+
+Scenario files may be plain text or JSON:
+
+```json
+{
+  "name": "account lifecycle",
+  "summary": "Create, update, and delete an account",
+  "personas": [
+    {"name": "new user", "description": "First-time visitor", "behaviors": ["register", "edit profile"]}
+  ],
+  "flows": [
+    {"name": "create_account", "description": "Register with valid data", "steps": ["open registration", "fill fields", "submit"]},
+    {"name": "delete_account", "description": "Remove the account", "steps": ["open settings", "delete", "confirm"]}
+  ],
+  "edge_cases": ["empty fields", "duplicate email", "invalid email"],
+  "security_focus": ["XSS in display name"]
+}
+```
+
+The runner writes the resolved scenario to `<output_dir>/scenario.json` and uses
+it for action planning and report provenance. If both `SCENARIO_TEXT` and
+`SCENARIO_FILE` are set, startup fails fast.
+
+### MCP Scenario Tool
+
+A minimal stdio MCP server exposes `create_test_scenario`, which converts
+natural-language scenarios into the same structured JSON format:
+
+```json
+{
+  "mcpServers": {
+    "monkeylm-scenario": {
+      "command": "/path/to/MonkeyLM/.venv/bin/python",
+      "args": ["-m", "monkeylm.mcp_scenario"]
+    }
+  }
+}
+```
+
+The MCP tool authors scenarios; execution still runs through `python -m monkeylm`
+so the browser, persistence, and reporting lifecycle stays explicit.
+
 Step-budget semantics:
 - `MAX_STEPS` is the global total budget for the run.
 - `MAX_STEPS_PER_WORKER` caps how many steps one worker can consume.
@@ -284,6 +343,8 @@ Operational guidance:
 - Label/type-aware form filling with constraint-aware valid, invalid, boundary, and unexpected-type values; deterministic create/update/delete payloads and CRUD-intent detection.
 - Baseline startup summaries with golden DOM/visual route counts and preexisting-readiness checks.
 - Cross-worker deduplication for accessibility findings and context anomalies, with occurrence and step-range detail.
+- Natural-language scenarios (inline, `.txt`, or `.json`) that bypass LLM discovery and drive deterministic flows; resolved scenarios are written to `scenario.json`.
+- Minimal stdio MCP server (`python -m monkeylm.mcp_scenario`) exposing `create_test_scenario` to MCP clients.
 - Fuzzing with blended payloads (realistic + OWASP-style attack strings).
 - Network fault injection for API calls (latency and injected 5xx responses).
 - Accessibility checks with axe-core (`critical`/`serious` filtering).

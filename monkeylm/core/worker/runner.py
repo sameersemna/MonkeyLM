@@ -138,6 +138,7 @@ async def _run_worker_with_limit(
     allocated_steps: int,
     start_step: int,
     persistence_engine: Any,
+    scenario_strategy: Any | None = None,
 ) -> WorkerRunResult:
     async with worker_semaphore:
         return await run_worker(
@@ -147,6 +148,7 @@ async def _run_worker_with_limit(
             allocated_steps=allocated_steps,
             start_step=start_step,
             persistence_engine=persistence_engine,
+            scenario_strategy=scenario_strategy,
         )
 
 
@@ -158,6 +160,7 @@ async def run_worker(
     allocated_steps: int,
     start_step: int,
     persistence_engine: Any,
+    scenario_strategy: Any | None = None,
 ) -> WorkerRunResult:
     from monkeylm.browser import (
         get_page_state,
@@ -217,7 +220,7 @@ async def run_worker(
     failure_reason: str | None = None
     failure_artifact: str | None = None
     failure_context: Dict[str, Any] | None = None
-    discovery_strategy: Any | None = None
+    discovery_strategy: Any | None = scenario_strategy
 
     loop_detection_state: Dict[str, Any] = {"blacklist": {}, "loop_count": 0}
     failed_plan_guard = FailedPlanGuard()
@@ -268,13 +271,19 @@ async def run_worker(
 
         await with_retry_backoff(f"{worker_label} qdrant initialize", worker_memory.initialize, retries=settings.worker_qdrant_init_retries, initial_delay_seconds=settings.retry_base_delay_seconds)
 
-        testing_strategy = None
-        try:
-            discovery_snapshot = await get_page_state(page, -1, phase="plan", output_dir=settings.output_dir)
-            discovery_state = state_to_prompt(discovery_snapshot)
-            testing_strategy = await run_application_discovery(settings, discovery_state)
-        except Exception as exc:
-            _local_service_log(f"{worker_label} Application Discovery failed: {exc}; proceeding without strategy.", settings.output_dir)
+        testing_strategy = scenario_strategy
+        if testing_strategy is None:
+            try:
+                discovery_snapshot = await get_page_state(page, -1, phase="plan", output_dir=settings.output_dir)
+                discovery_state = state_to_prompt(discovery_snapshot)
+                testing_strategy = await run_application_discovery(settings, discovery_state)
+            except Exception as exc:
+                _local_service_log(
+                    f"{worker_label} Application Discovery failed: {exc}; proceeding without strategy.",
+                    settings.output_dir,
+                )
+        else:
+            print(f"   🎯 {worker_label} using user-provided scenario: {testing_strategy.strategy_summary[:160]}")
 
         for idx in range(allocated_steps):
             if SHUTDOWN_EVENT.is_set():

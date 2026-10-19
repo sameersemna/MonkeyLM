@@ -625,7 +625,7 @@ time ./scripts/quickstart.sh  # <15 minutes
 
 ## Re-baselined Milestones (2026-10-19)
 
-The original Day 4/11/21/25 schedule started in July 2026 and is historical. The project is re-baselined from the current state: Phase 1 interfaces and the reporting split are complete; `browser/`, `models/`, `memory/`, and `core/` packages exist; the current suite passes 219 tests (1 external-network test deselected). Remaining work is grouped into five milestones.
+The original Day 4/11/21/25 schedule started in July 2026 and is historical. The project is re-baselined from the current state: Phase 1 interfaces and the reporting split are complete; `browser/`, `models/`, `memory/`, and `core/` packages exist; the current suite passes 240 tests (1 external-network test deselected). Remaining work is grouped into five milestones.
 
 | Milestone | Target | Priority | Deliverables | Dependencies | Success Criteria |
 |---|---|---|---|---|---|
@@ -640,7 +640,16 @@ The original Day 4/11/21/25 schedule started in July 2026 and is historical. The
 - **R2 completed 2026-10-19:** `config.py` split into `config/` (`defaults`, `env`, `cli`, `validation`, `shutdown`, `helpers`, `overrides`) with backward-compatible re-exports; `__init__.py` reduced to 379 LOC by moving DI adapters to `di/`; `types.py` reduced to 239 LOC via `defect_types.py`; `interfaces.py` reduced to 377 LOC via `interfaces_abc.py`. Full suite passes (195 passed, 1 deselected); `ruff` clean. Nine larger cohesive modules are documented exceptions below.
 - **R3 completed 2026-10-19:** added `monkeylm/form_filling/` (`common`, `values`, `planner`) with label/type-aware role inference, constraint-aware valid/invalid/boundary/unexpected values, deterministic create/update/delete payloads, and CRUD-intent detection. `submit_form` now auto-completes missing payloads before execution; prompts and page state expose field names/placeholders and CRUD guidance. Deterministic tests in `tests/test_form_filling.py` (13 tests, 4 subtests) and the local `scripts/demo_form_crud.py` demo passed create → update → delete. Full suite: 208 passed, 1 deselected; `ruff` clean.
 - **R4 completed 2026-10-19:** added an ordered `OLLAMA_FALLBACK_MODELS` / `--ollama-fallback-models` chain that retries the primary model and then stable fallbacks; startup baseline summaries now report golden DOM/visual route counts and warn when `preexisting` mode has no goldens; DOM and visual preexisting comparisons are covered by tests; a11y and context anomalies dedupe across workers with occurrence counts, step ranges, and action/type detail. Reports expose baseline mode/counts and fallback models. Full suite: 219 passed, 1 deselected; `ruff` clean.
+- **R5 completed 2026-10-19 (accepted subset):** added natural-language scenario authoring with inline/`.txt`/`.json` inputs, deterministic extraction of personas, flows, edge cases, and security focus, scenario-driven worker execution, and `<output_dir>/scenario.json` provenance. Added a minimal stdio MCP server (`python -m monkeylm.mcp_scenario`) exposing `create_test_scenario`. Android GUI support and a general MCP execution bridge are excluded from this subset. Full suite: 240 passed, 1 deselected; `ruff` clean.
 - The original M3 (multi-modal/visual/a11y/security) is largely implemented; remaining advanced items are in R5.
+
+### R5 Scope Decision
+
+| Included in accepted subset | Excluded | Reason |
+|---|---|---|
+| Natural-language scenario parsing and execution | Android GUI support | No Android device/emulator, ADB, or Appium dependency in this environment. |
+| Scenario JSON artifact and report provenance | General MCP execution bridge | MCP is used for scenario authoring; execution remains CLI-first and explicit. |
+| Minimal MCP `create_test_scenario` tool | Enterprise SSO/RBAC/multi-tenant controls | Not part of the accepted subset; no requirements or identity provider were defined. |
 - The original M4 (80% coverage/docs) is tracked across R2 and R4.
 - No calendar deadlines were previously defined for the recent reliability follow-ups; R1 establishes the first concrete window.
 

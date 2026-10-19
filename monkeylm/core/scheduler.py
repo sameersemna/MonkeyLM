@@ -29,6 +29,7 @@ async def main(settings: Settings) -> None:
     from monkeylm.memory import PersistenceEngine, QdrantMemoryStore
     from monkeylm.models import _is_cloud_vision_model
     from monkeylm.reporting import generate_markdown_report, generate_json_summary, generate_pdf_report
+    from monkeylm.scenario import load_scenario_from_settings, write_scenario_artifact
 
     start_time = datetime.now()
 
@@ -47,6 +48,13 @@ async def main(settings: Settings) -> None:
         finally:
             await qmem.close()
         return
+
+    scenario_strategy = load_scenario_from_settings(settings)
+    scenario_artifact = ""
+    if scenario_strategy is not None:
+        scenario_artifact = write_scenario_artifact(scenario_strategy, settings.output_dir)
+        print(f"🎯 Scenario loaded: {scenario_strategy.strategy_summary[:200]}")
+        print(f"   └─ Scenario artifact: {scenario_artifact}")
 
     defects = DefectTracker()
     persistence_engine = PersistenceEngine(settings, defects, max_workers=settings.workers)
@@ -87,6 +95,7 @@ async def main(settings: Settings) -> None:
                             allocated_steps=allocated_steps,
                             start_step=next_start_step,
                             persistence_engine=persistence_engine,
+                            scenario_strategy=scenario_strategy,
                         )
                     )
                 )
@@ -151,6 +160,8 @@ async def main(settings: Settings) -> None:
         "graceful_shutdown_requested": GRACEFUL_SHUTDOWN_REQUESTED,
         "runtime_preflight": inspect_optional_runtime_dependencies(),
         "baseline_summary": getattr(persistence_engine, "baseline_summary", {}),
+        "scenario_mode": "user-provided" if scenario_strategy is not None else "discovery",
+        "scenario_artifact": scenario_artifact,
     }
 
     end_time = datetime.now()

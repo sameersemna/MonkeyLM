@@ -72,6 +72,8 @@ def generate_markdown_report(
     baseline_visual = baseline_summary.get("visual_golden_routes", 0)
     baseline_available = baseline_summary.get("available", False)
     baseline_status = "unavailable" if not baseline_available else "ready"
+    scenario_mode = browser_launch_info.get("scenario_mode", "discovery")
+    scenario_artifact = browser_launch_info.get("scenario_artifact", "")
     fallback_models = getattr(settings, "ollama_fallback_models", []) or []
     fallback_display = ", ".join(f"`{model}`" for model in fallback_models) or "`none`"
 
@@ -92,6 +94,7 @@ def generate_markdown_report(
 **Graceful Shutdown:** {"requested" if browser_launch_info.get('graceful_shutdown_requested') else "not requested"}  
 **Baseline Mode:** `{baseline_mode}` ({baseline_status})<br>
 **Golden Baselines:** DOM routes={baseline_dom}, visual routes={baseline_visual}<br>
+**Scenario Mode:** `{scenario_mode}`{f" ({scenario_artifact})" if scenario_artifact else ""}<br>
 **Output Folder:** `{settings.output_dir}`
 
 ## LLM Configuration

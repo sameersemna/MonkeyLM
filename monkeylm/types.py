@@ -57,6 +57,9 @@ class Settings:
     target_url: str = "https://noblequran-85hu2yge.manus.space/"
     target_username: str = ""
     target_password: str = ""
+    scenario_text: str = ""
+    scenario_file: str = ""
+    scenario_name: str = ""
     ollama_model: str = "minimax-m3:cloud"
     ollama_fallback_models: List[str] = field(default_factory=list)
     ollama_timeout_seconds: float = 15.0

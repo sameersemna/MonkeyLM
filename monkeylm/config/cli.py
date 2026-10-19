@@ -10,6 +10,17 @@ def parse_cli_args() -> argparse.Namespace:
     parser.add_argument("--target-url", help="Target URL to test")
     parser.add_argument("--target-username", help="Username to use when the target site requires sign-in")
     parser.add_argument("--target-password", help="Password to use when the target site requires sign-in")
+    parser.add_argument(
+        "--scenario",
+        help="Inline natural-language test scenario; bypasses LLM application discovery",
+        default=None,
+    )
+    parser.add_argument(
+        "--scenario-file",
+        help="Path to a .json or plain-text scenario file; bypasses LLM application discovery",
+        default=None,
+    )
+    parser.add_argument("--scenario-name", help="Display name for the user-provided scenario")
     parser.add_argument("--ollama-model", help="Ollama model name to use")
     parser.add_argument(
         "--ollama-fallback-models",

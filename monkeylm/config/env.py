@@ -136,6 +136,9 @@ def load_settings(cli_args: Optional[argparse.Namespace] = None) -> Settings:
     s.target_url = raw_target
     s.target_username = _env_str("TARGET_USERNAME", env_vars.get("TARGET_USERNAME") or s.target_username)
     s.target_password = _env_str("TARGET_PASSWORD", env_vars.get("TARGET_PASSWORD") or s.target_password)
+    s.scenario_text = _env_str("SCENARIO_TEXT", env_vars.get("SCENARIO_TEXT") or s.scenario_text)
+    s.scenario_file = _env_str("SCENARIO_FILE", env_vars.get("SCENARIO_FILE") or s.scenario_file)
+    s.scenario_name = _env_str("SCENARIO_NAME", env_vars.get("SCENARIO_NAME") or s.scenario_name)
     raw_ollama: str = env_vars.get("OLLAMA_MODEL") or os.getenv("OLLAMA_MODEL") or s.ollama_model
     s.ollama_model = raw_ollama
     s.ollama_fallback_models = _parse_model_list(
@@ -257,6 +260,12 @@ def load_settings(cli_args: Optional[argparse.Namespace] = None) -> Settings:
             s.target_username = cli_args.target_username.strip()
         if getattr(cli_args, "target_password", None):
             s.target_password = cli_args.target_password.strip()
+        if getattr(cli_args, "scenario", None):
+            s.scenario_text = cli_args.scenario.strip()
+        if getattr(cli_args, "scenario_file", None):
+            s.scenario_file = cli_args.scenario_file.strip()
+        if getattr(cli_args, "scenario_name", None):
+            s.scenario_name = cli_args.scenario_name.strip()
         if getattr(cli_args, "ollama_model", None):
             s.ollama_model = cli_args.ollama_model
         if getattr(cli_args, "ollama_fallback_models", None) is not None:
