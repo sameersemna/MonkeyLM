@@ -15,6 +15,7 @@ from monkeylm.models.openai_client import (
     extract_content,
     normalize_base_url,
 )
+from monkeylm.models.prompts.discovery import _is_ollama_endpoint
 from monkeylm.types import Settings
 
 
@@ -189,6 +190,12 @@ class OpenAICompatibleClientTests(unittest.TestCase):
 
         self.assertEqual(settings.vision_model, "dotenv-vision")
         self.assertEqual(settings.pdf_vision_model, "dotenv-pdf-vision")
+
+    def test_discovery_fallbacks_only_enabled_for_ollama(self) -> None:
+        self.assertTrue(_is_ollama_endpoint(Settings(openai_base_url="http://localhost:11434")))
+        self.assertTrue(_is_ollama_endpoint(Settings(openai_base_url="http://gpu-box:11434")))
+        self.assertFalse(_is_ollama_endpoint(Settings(openai_base_url="http://zidan:20122/v1")))
+        self.assertFalse(_is_ollama_endpoint(Settings(openai_base_url="https://api.openai.com/v1")))
 
     def test_load_settings_reads_openai_environment(self) -> None:
         env = {"OPENAI_BASE_URL": "http://example.test:1234/v1", "OPENAI_API_KEY": "secret-key"}

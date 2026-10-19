@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import re
 from typing import Any, Optional
+from urllib.parse import urlsplit
 
 from monkeylm.config import Settings, _local_service_log
 from monkeylm.models.ollama import _sanitize_prompt_input, _safe_json_parse, _ollama_chat_with_retry
-from monkeylm.models.openai_client import extract_content
+from monkeylm.models.openai_client import extract_content, normalize_base_url
 from monkeylm.types import TestingStrategy, PersonaGoal, CriticalFlow
 
 
@@ -248,6 +249,13 @@ def refresh_testing_strategy(strategy: Optional[TestingStrategy], page_state: st
     return refreshed
 
 
+def _is_ollama_endpoint(settings: Settings) -> bool:
+    try:
+        return urlsplit(normalize_base_url(settings.openai_base_url)).port == 11434
+    except Exception:
+        return False
+
+
 async def run_application_discovery(
     settings: Settings,
     page_state: str,
@@ -256,10 +264,11 @@ async def run_application_discovery(
     prompt = _build_discovery_prompt(page_state)
 
     candidate_models = [settings.ollama_model]
-    if settings.ollama_model != "llama3.2:latest":
-        candidate_models.append("llama3.2:latest")
-    if settings.ollama_model != "mistral:latest":
-        candidate_models.append("mistral:latest")
+    if _is_ollama_endpoint(settings):
+        if settings.ollama_model != "llama3.2:latest":
+            candidate_models.append("llama3.2:latest")
+        if settings.ollama_model != "mistral:latest":
+            candidate_models.append("mistral:latest")
 
     last_response = None
     for model_name in candidate_models:

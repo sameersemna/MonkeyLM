@@ -151,6 +151,8 @@ Rules:
 - If you see a <MODAL>, prioritize "handle_modal".
 - Each element line starts with [id=N]. Use that numeric id for target selection.
 - For actions that need a target, return "target" as [id=N] (example: [id=3]).
+- Only choose "type" when the target is an <INPUT>, <TEXTAREA>, <SELECT>, or [contenteditable="true"].
+- Never choose "type" for a <FORM>, <BUTTON>, <A>, or a generic container; choose "click" or "submit_form" instead.
 - Never return raw text labels as target.
 - For "submit_form", include "input_payloads": a list of objects with "target" ([id=N]), "value", and "reason".
 - The "action_strategy" field must be either "HAPPY_UPSERT" or "EDGE_CASE_FUZZ" and explain why you chose that payload block.
@@ -163,7 +165,7 @@ Respond ONLY with JSON:
     "target_justification": "[id=1] is the quantity input because it's a numeric field without visible min/max constraints, making it the optimal probe vector"
   }},
   "action": "submit_form",
-  "target": "[id=0]",
+  "target": "[id=3]",
   "value": "",
   "action_strategy": "EDGE_CASE_FUZZ",{persona_fields}
   "input_payloads": [

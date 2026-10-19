@@ -30,7 +30,7 @@ from monkeylm.browser.snapshot.cv import (
 )
 from monkeylm.types import PageSnapshot
 
-from .helpers import _locator_for_target_id
+from .helpers import _extract_target_id, _is_typeable_control, _locator_for_target_id
 from .interaction import collect_failure_context, detect_click_interception
 from .actions import (
     _action_scroll,
@@ -43,6 +43,28 @@ from .actions import (
     _action_press_key,
     _action_type,
 )
+
+
+def _repair_type_plan(
+    action: str,
+    target: str,
+    snapshot: PageSnapshot,
+) -> Tuple[str, str, Optional[Dict[str, str]]]:
+    """Repair or reject a type plan that no longer points at a typeable control."""
+    if action != "type":
+        return action, target, None
+    parsed_id = _extract_target_id(target)
+    typeable_controls = [fc for fc in snapshot.form_controls if _is_typeable_control(fc)]
+    if parsed_id in {fc.control_id for fc in typeable_controls}:
+        return action, target, None
+    if typeable_controls:
+        replacement = typeable_controls[0]
+        repaired_target = f"[id={replacement.control_id}]"
+        return action, repaired_target, {
+            "repaired_from": target,
+            "repaired_to": repaired_target,
+        }
+    return "scroll", "", {"rejected_from": target}
 
 
 async def execute_action(
@@ -87,6 +109,21 @@ async def execute_action(
     }
 
     worker_label = f"worker-{worker_id:02d}"
+    action, target, type_repair = _repair_type_plan(action, target, before_snapshot)
+    if type_repair:
+        action_plan["action"] = action
+        action_plan["target"] = target
+        log_entry["action"] = action
+        log_entry["target"] = target
+        if "repaired_to" in type_repair:
+            log_entry["plan_repaired_from"] = type_repair["repaired_from"]
+            log_entry["plan_repaired_to"] = type_repair["repaired_to"]
+            print(f"   -> 🔧 Repaired type target '{type_repair['repaired_from']}' to '{type_repair['repaired_to']}'")
+        else:
+            log_entry["status"] = "MODEL_PLAN_REJECTED"
+            log_entry["error"] = f"no_typeable_control:{type_repair['rejected_from']}"
+            print(f"   -> ⛔ No typeable control for '{type_repair['rejected_from']}'; falling back to scroll")
+
     if persistence_engine is not None and target.strip() and action in {"click", "type", "submit_form", "handle_modal"}:
         from monkeylm.config import split_domain_and_route
         domain, route = split_domain_and_route(page.url)

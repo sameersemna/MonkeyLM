@@ -9,6 +9,21 @@ from playwright.async_api import Page
 from .defects import DefectTracker, sanitize_for_storage
 
 
+def format_anomaly_summary(anomalies: List[Dict[str, Any]], limit: int = 5) -> str:
+    parts: List[str] = []
+    for anomaly in anomalies[:limit]:
+        message = str(anomaly.get("message") or anomaly.get("failure_reason") or "")
+        parts.append(
+            f"step={anomaly.get('step', '?')} "
+            f"action={anomaly.get('action', '?')} "
+            f"type={anomaly.get('type', '?')} "
+            f"message={message[:120]}"
+        )
+    if len(anomalies) > limit:
+        parts.append(f"+{len(anomalies) - limit} more")
+    return "; ".join(parts)
+
+
 class BrowserAnomalySensor:
     """Intercepts hidden browser context anomalies and maps them to monkey actions."""
 

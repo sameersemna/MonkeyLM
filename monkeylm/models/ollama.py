@@ -158,6 +158,10 @@ async def _ollama_chat_with_retry(
                     settings.output_dir,
                 )
             else:
+                _local_service_log(
+                    f"LLM inference failed for {model}: {_redact_secrets(str(exc))}",
+                    settings.output_dir,
+                )
                 return None
 
         if attempt >= max_retries:

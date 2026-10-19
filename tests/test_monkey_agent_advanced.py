@@ -1324,10 +1324,15 @@ class MonkeyLMAsyncTests(unittest.IsolatedAsyncioTestCase):
                 self.store[key] = (value, ex)
                 return "OK"
 
+            async def get(self, key: str) -> Optional[str]:
+                entry = self.store.get(key)
+                return entry[0] if entry else None
+
         engine.redis_client = FakeRedis()
         try:
             self.assertTrue(await engine.claim_action_path_lock("abc123", "test-worker"))
-            self.assertFalse(await engine.claim_action_path_lock("abc123", "test-worker"))
+            self.assertFalse(await engine.claim_action_path_lock("abc123", "other-worker"))
+            self.assertTrue(await engine.claim_action_path_lock("abc123", "test-worker"))
             self.assertTrue(await engine.claim_action_path_lock("def456", "test-worker"))
         finally:
             engine.redis_client = None

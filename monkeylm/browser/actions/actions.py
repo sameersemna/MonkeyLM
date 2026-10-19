@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import random
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from playwright.async_api import Page
 
@@ -18,10 +19,79 @@ from .helpers import (
     _extract_target_id,
     _fill_input_resilient,
     _fill_select_option,
+    _is_typeable_control,
     _locator_for_target_id,
     _resolve_form_boundary,
     _resolve_interaction_mode,
 )
+
+
+async def _safe_count(locator: Any) -> int:
+    """Return the current match count; Playwright's count() takes no timeout."""
+    try:
+        return await locator.count()
+    except Exception:
+        return 0
+
+
+def _locator_candidates_for_control(page: Page, control: Any) -> List[Any]:
+    candidates: List[Any] = []
+    tag_name = (getattr(control, "tag_name", "") or "input").lower()
+    id_attr = getattr(control, "id_attr", "") or ""
+    name_attr = getattr(control, "name_attr", "") or ""
+    placeholder = getattr(control, "placeholder", "") or ""
+    aria_label = getattr(control, "aria_label", "") or ""
+    if id_attr:
+        candidates.append(page.locator(f"{tag_name}[id={json.dumps(id_attr)}]").first)
+    if name_attr:
+        candidates.append(page.locator(f"{tag_name}[name={json.dumps(name_attr)}]").first)
+    if placeholder:
+        candidates.append(page.get_by_placeholder(placeholder).first)
+    if aria_label:
+        candidates.append(page.get_by_label(aria_label).first)
+    return candidates
+
+
+async def _resolve_type_locator(
+    page: Page,
+    target: str,
+    before_snapshot: PageSnapshot,
+) -> tuple[Optional[Any], str, Optional[Any]]:
+    """Resolve a type target, retrying with stable selectors before giving up."""
+    parsed_id = _extract_target_id(target)
+    control = next(
+        (fc for fc in before_snapshot.form_controls if fc.control_id == parsed_id),
+        None,
+    )
+    locator = await _locator_for_target_id(page, target)
+    if locator is not None:
+        try:
+            await locator.wait_for(state="visible", timeout=3000)
+            if await locator.is_enabled():
+                mode = await _resolve_interaction_mode(locator)
+                if mode != "unsupported":
+                    return locator, "positional", control
+        except Exception:
+            pass
+
+    candidates: List[Any] = []
+    if control is not None and _is_typeable_control(control):
+        candidates.extend(_locator_candidates_for_control(page, control))
+    candidates.extend([
+        page.locator("input[type='search']:visible").first,
+        page.locator("input:visible, textarea:visible, [contenteditable='true']:visible").first,
+    ])
+    for candidate in candidates:
+        try:
+            await candidate.wait_for(state="visible", timeout=2000)
+            if not await candidate.is_enabled():
+                continue
+            mode = await _resolve_interaction_mode(candidate)
+            if mode != "unsupported":
+                return candidate, "semantic-fallback", control
+        except Exception:
+            continue
+    return None, "none", control
 
 
 async def _action_scroll(page: Page) -> None:
@@ -56,10 +126,7 @@ async def _action_random_jump(page: Page) -> None:
     """
     # Strategy 1: visible links
     links = page.locator("a[href]:visible")
-    try:
-        link_count = await links.count(timeout=2000)
-    except Exception:
-        link_count = 0
+    link_count = await _safe_count(links)
     if link_count > 0:
         idx = random.randint(0, min(link_count - 1, 10))
         await links.nth(idx).click(timeout=3000)
@@ -67,10 +134,7 @@ async def _action_random_jump(page: Page) -> None:
 
     # Strategy 2: visible buttons
     buttons = page.locator("button:visible, [role='button']:visible, input[type='button']:visible, input[type='submit']:visible")
-    try:
-        button_count = await buttons.count(timeout=2000)
-    except Exception:
-        button_count = 0
+    button_count = await _safe_count(buttons)
     if button_count > 0:
         idx = random.randint(0, min(button_count - 1, 5))
         await buttons.nth(idx).click(timeout=3000)
@@ -78,10 +142,7 @@ async def _action_random_jump(page: Page) -> None:
 
     # Strategy 3: any clickable element (spans, divs with onclick, etc.)
     clickables = page.locator("[onclick]:visible, [data-action]:visible, [data-click]:visible, .clickable:visible")
-    try:
-        clickable_count = await clickables.count(timeout=1500)
-    except Exception:
-        clickable_count = 0
+    clickable_count = await _safe_count(clickables)
     if clickable_count > 0:
         idx = random.randint(0, min(clickable_count - 1, 3))
         await clickables.nth(idx).click(timeout=3000)
@@ -94,19 +155,19 @@ async def _action_random_jump(page: Page) -> None:
 
 async def _action_handle_modal(page: Page) -> None:
     close_btn = page.locator("button[aria-label='Close'], .close, [title='Close']").first
-    try:
-        if await close_btn.count(timeout=2000) > 0:
+    if await _safe_count(close_btn) > 0:
+        try:
             await close_btn.click(timeout=2000)
             return
-    except Exception:
-        pass
+        except Exception:
+            pass
     cancel_btn = page.get_by_role("button", name=re.compile("cancel|close|no|dismiss", re.I)).first
-    try:
-        if await cancel_btn.count(timeout=2000) > 0:
+    if await _safe_count(cancel_btn) > 0:
+        try:
             await cancel_btn.click(timeout=2000)
             return
-    except Exception:
-        pass
+        except Exception:
+            pass
     await page.keyboard.press("Escape")
     print("   -> Sent Escape key to close modal")
 
@@ -171,10 +232,7 @@ async def _action_submit_form(page: Page, settings: Any, target: str, input_payl
                         _local_service_log(f"Step {step_num}: failed to mutate {payload_target}: {fill_exc}")
             log_entry["input_payloads"] = filled_payloads
             submit_btn = form_locator.locator("button[type='submit'], input[type='submit']").first
-            try:
-                submit_btn_count = await submit_btn.count(timeout=2000)
-            except Exception:
-                submit_btn_count = 0
+            submit_btn_count = await _safe_count(submit_btn)
             if submit_btn_count > 0:
                 clicked = await _click_element_resilient(page, submit_btn, target=target, timeout_ms=2200)
                 if not clicked:
@@ -204,10 +262,7 @@ async def _action_submit_form(page: Page, settings: Any, target: str, input_payl
                         log_entry["error"] = f"submit_fallback_failed:{fallback_exc}"
             else:
                 inputs = form_locator.locator("input:visible, textarea:visible")
-                try:
-                    inputs_count = await inputs.count(timeout=2000)
-                except Exception:
-                    inputs_count = 0
+                inputs_count = await _safe_count(inputs)
                 if inputs_count > 0:
                     try:
                         await asyncio.wait_for(inputs.last.press("Enter"), timeout=2.0)
@@ -260,62 +315,63 @@ async def _action_type(page: Page, settings: Any, target: str, value: str, actio
             payload_reason = payload_entry.get("reason", action_strategy)
             break
 
-    locator = await _locator_for_target_id(page, target)
-    mode = "unsupported"
-    type_control_options: List[str] = []
-    if locator:
-        mode = await _resolve_interaction_mode(locator)
-        parsed_id = _extract_target_id(target)
-        if parsed_id is not None:
-            control = next((fc for fc in before_snapshot.form_controls if fc.control_id == parsed_id), None)
-            if control is not None:
-                type_control_options = control.options
-    if mode == "unsupported":
-        fallback_locator = page.locator("input:visible, textarea:visible, select:visible").first
-        if await fallback_locator.count() > 0:
-            mode = await _resolve_interaction_mode(fallback_locator)
-            try:
-                fallback_options = await fallback_locator.evaluate("el => Array.from(el.options).map(o => o.value || o.textContent.trim()).filter(v => v)", timeout=2000)
-                if isinstance(fallback_options, list):
-                    type_control_options = [str(o) for o in fallback_options]
-            except Exception:
-                pass
+    def _record_recovery(reason: str) -> None:
+        defects.add("console_findings", {
+            "step": step_num,
+            "type": "recovered-missing-target:type",
+            "severity": "warning",
+            "selector": sanitize_for_storage(str(target), max_len=256),
+            "failure_reason": sanitize_for_storage(reason, max_len=512),
+            "url": sanitize_for_storage(page.url, max_len=1024),
+        })
 
-    if locator is not None:
-        try:
-            locator_count = await locator.count(timeout=2000)
-        except Exception:
-            locator_count = 0
+    locator, resolved_source, control = await _resolve_type_locator(page, target, before_snapshot)
+    log_entry["resolved_source"] = resolved_source
+    if locator is None:
+        log_entry["status"] = "RECOVERED_MISSING_TARGET"
+        log_entry["error"] = f"type_target_unresolved:{target}"
+        _record_recovery(log_entry["error"])
+        print(f"   -> ↩️ No typeable target for '{target}'; falling back to scroll")
+        await _action_scroll(page)
+        return
+
+    mode = await _resolve_interaction_mode(locator)
+    if mode == "unsupported":
+        log_entry["status"] = "RECOVERED_MISSING_TARGET"
+        log_entry["error"] = f"type_target_not_typeable:{target}"
+        _record_recovery(log_entry["error"])
+        print(f"   -> ↩️ Target '{target}' is not typeable; falling back to scroll")
+        await _action_scroll(page)
+        return
+
+    type_control_options: List[str] = control.options if control is not None else []
+    payload = payload_value or fuzzer.next_payload()
+    if mode == "select":
+        chosen, reason = await _fill_select_option(page, locator, payload, type_control_options, action_strategy)
+        log_entry["value"] = chosen[:120]
+        log_entry["input_payloads"] = [{"target": target, "value": chosen[:120], "reason": reason}]
+    elif mode == "checkbox_radio":
+        await locator.check(timeout=2200)
+        log_entry["value"] = "checked"
+        log_entry["input_payloads"] = [{"target": target, "value": "checked", "reason": payload_reason or "happy_checkbox_radio_check"}]
     else:
-        locator_count = 0
-    if locator is not None and locator_count > 0 and mode != "unsupported":
-        payload = payload_value or fuzzer.next_payload()
-        if mode == "select":
-            chosen, reason = await _fill_select_option(page, locator, payload, type_control_options, action_strategy)
-            log_entry["value"] = chosen[:120]
-            log_entry["input_payloads"] = [{"target": target, "value": chosen[:120], "reason": reason}]
-        elif mode == "checkbox_radio":
-            await locator.check(timeout=2200)
-            log_entry["value"] = "checked"
-            log_entry["input_payloads"] = [{"target": target, "value": "checked", "reason": payload_reason or "happy_checkbox_radio_check"}]
+        filled = await _fill_input_resilient(page, locator, payload, target=target, timeout_ms=2200)
+        if filled:
+            log_entry["value"] = payload[:120]
+            log_entry["input_payloads"] = [{"target": target, "value": payload[:120], "reason": payload_reason or "fallback_fuzzer"}]
+            if any(marker in payload.lower() for marker in ["<script", "onerror", " or 1=1", "drop table"]):
+                defects.add("security_risks", {"step": step_num, "type": "fuzz-payload-injected", "target": sanitize_for_storage(str(target), max_len=256), "payload_preview": sanitize_for_storage(payload[:200], max_len=256), "url": sanitize_for_storage(page.url, max_len=1024)})
+            if validation_prober and validation_prober.should_probe():
+                try:
+                    control_type = await locator.evaluate("el => el.type || (el.tagName === 'TEXTAREA' ? 'textarea' : '')", timeout=2000)
+                    probe_findings = await validation_prober.probe_field(page, locator, control_type or "text", step_num, f"{action}:{target}", target)
+                    if probe_findings:
+                        print(f"   ⚠️ Validation probe found {len(probe_findings)} issue(s) on '{target}'")
+                except Exception as probe_exc:
+                    _local_service_log(f"Step {step_num}: validation probe failed for '{target}': {probe_exc}")
         else:
-            filled = await _fill_input_resilient(page, locator, payload, target=target, timeout_ms=2200)
-            if filled:
-                log_entry["value"] = payload[:120]
-                log_entry["input_payloads"] = [{"target": target, "value": payload[:120], "reason": payload_reason or "fallback_fuzzer"}]
-                if any(marker in payload.lower() for marker in ["<script", "onerror", " or 1=1", "drop table"]):
-                    defects.add("security_risks", {"step": step_num, "type": "fuzz-payload-injected", "target": sanitize_for_storage(str(target), max_len=256), "payload_preview": sanitize_for_storage(payload[:200], max_len=256), "url": sanitize_for_storage(page.url, max_len=1024)})
-                if validation_prober and validation_prober.should_probe():
-                    try:
-                        control_type = await locator.evaluate("el => el.type || (el.tagName === 'TEXTAREA' ? 'textarea' : '')", timeout=2000)
-                        probe_findings = await validation_prober.probe_field(page, locator, control_type or "text", step_num, f"{action}:{target}", target)
-                        if probe_findings:
-                            print(f"   ⚠️ Validation probe found {len(probe_findings)} issue(s) on '{target}'")
-                    except Exception as probe_exc:
-                        _local_service_log(f"Step {step_num}: validation probe failed for '{target}': {probe_exc}")
-            else:
-                log_entry["status"] = "PARTIAL_SUCCESS"
-                log_entry["error"] = f"input_fill_failed:{target}"
-                _local_service_log(f"Step {step_num}: unable to fill target '{target}' reliably")
-    else:
-        raise Exception(f"Input or selectable target '{target}' not found")
+            log_entry["status"] = "RECOVERED_MISSING_TARGET"
+            log_entry["error"] = f"input_fill_failed:{target}"
+            _record_recovery(log_entry["error"])
+            _local_service_log(f"Step {step_num}: unable to fill target '{target}' reliably; falling back to scroll")
+            await _action_scroll(page)

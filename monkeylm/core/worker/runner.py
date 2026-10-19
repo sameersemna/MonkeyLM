@@ -26,9 +26,11 @@ from monkeylm.core.monitor import (
     StallDetector,
     ValidationProber,
 )
+from monkeylm.core.monitor.anomaly import format_anomaly_summary
 from monkeylm.types import WorkerRunResult
 
 from .helpers import build_worker_user_data_dir, with_retry_backoff
+from .guard import FailedPlanGuard, build_plan_signature
 from monkeylm.browser.actions.interaction import collect_failure_context, recover_nonresponsive_state
 from monkeylm.browser.snapshot.cv import capture_chrome_templates, phash_hamming, verify_chrome_templates, visual_phash
 
@@ -217,7 +219,8 @@ async def run_worker(
     failure_context: Dict[str, Any] | None = None
     discovery_strategy: Any | None = None
 
-    loop_detection_state: Dict[str, Any] = {"blacklist": {}, "loop_count": 0, "recent_actions": []}
+    loop_detection_state: Dict[str, Any] = {"blacklist": {}, "loop_count": 0}
+    failed_plan_guard = FailedPlanGuard()
     worker_data_dir = build_worker_user_data_dir(settings, worker_id)
 
     context = None
@@ -261,6 +264,7 @@ async def run_worker(
         await worker_network_monitor.install(page)
         await worker_perf_monitor.install(page)
         await worker_anomaly_sensor.install(page)
+        await worker_anomaly_sensor.check_network_failures(page)
 
         await with_retry_backoff(f"{worker_label} qdrant initialize", worker_memory.initialize, retries=settings.worker_qdrant_init_retries, initial_delay_seconds=settings.retry_base_delay_seconds)
 
@@ -323,10 +327,11 @@ async def run_worker(
             loop_break_applied = False
             if len(recent_model_plans) >= 3 and all(p == plan_signature for p in recent_model_plans[-3:]):
                 print(f"\U0001f504 Loop detected for {worker_label}; forcing path exploration variance.")
-                loop_detection_state["recent_actions"] = []
+                recent_model_plans.clear()
                 print(f"   \u251c\u2500 \u26d4 Cleared short-term action history for {worker_label}")
-                plan = _break_action_loop(plan, snapshot, worker_label, step, loop_state=loop_detection_state, blacklist_expiry_steps=settings.max_steps // 3)
+                plan = _break_action_loop(plan, snapshot, worker_label, step, loop_state=loop_detection_state, blacklist_expiry_steps=max(3, settings.max_steps // 3))
                 loop_break_applied = True
+
             recent_model_plans.append(plan_signature)
             recent_model_plans = recent_model_plans[-3:]
 
@@ -338,6 +343,18 @@ async def run_worker(
             # declaring a freeze after a few identical escape attempts.
             if not loop_break_applied and plan.get("action") in {"random_jump", "restart_target"}:
                 loop_break_applied = True
+
+            blacklist_key = f"{plan.get('action', '')}:{plan.get('target', '')}"
+            if loop_detection_state["blacklist"].get(blacklist_key, 0) > step:
+                print(f"   -> \u26d4 Skipping blacklisted target {blacklist_key} for {worker_label}")
+                plan = {"action": "scroll", "target": "", "value": "", "action_strategy": "", "input_payloads": []}
+
+            execution_signature = build_plan_signature(snapshot.url, snapshot.dom_hash, plan)
+            if failed_plan_guard.should_skip(execution_signature):
+                print(f"   -> \u26d4 Skipping previously failed target {plan.get('action')}:{plan.get('target')} for this DOM state")
+                plan = {"action": "scroll", "target": "", "value": "", "action_strategy": "", "input_payloads": []}
+                execution_signature = build_plan_signature(snapshot.url, snapshot.dom_hash, plan)
+
             if plan.get("action") == "click" and plan.get("target"):
                 seen_click_targets.add(plan.get("target"))
 
@@ -456,6 +473,8 @@ async def run_worker(
 
             log_entry["worker_id"] = worker_id
             log_entry["memory_retrieval"] = retrieval_telemetry
+            if log_entry.get("status") in {"FAILED", "RECOVERED_MISSING_TARGET", "MODEL_PLAN_REJECTED"} or log_entry.get("plan_repaired_from"):
+                failed_plan_guard.record_failure(execution_signature)
 
             if step % 5 == 0:
                 violations = await worker_a11y_checker.scan(page, step)
@@ -594,7 +613,7 @@ async def run_worker(
             try:
                 flushed = await worker_anomaly_sensor.flush_anomalies()
                 if flushed:
-                    print(f"\u26a0\ufe0f {worker_label} {len(flushed)} context anomaly(s) at step {step}")
+                    print(f"\u26a0\ufe0f {worker_label} {len(flushed)} context anomaly(s): {format_anomaly_summary(flushed)}")
             except Exception as anomaly_exc:
                 _local_service_log(f"{worker_label} anomaly flush failed: {anomaly_exc}", settings.output_dir)
 

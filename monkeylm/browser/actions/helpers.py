@@ -56,6 +56,26 @@ def _extract_target_id(target: Any) -> Optional[int]:
     return None
 
 
+_TYPEABLE_INPUT_TYPES = frozenset(
+    {"text", "search", "email", "url", "tel", "password", "number"}
+)
+
+
+def _is_typeable_control(control: Any) -> bool:
+    """Return True when a snapshot form control can accept a type/select action."""
+    if not getattr(control, "visible", True):
+        return False
+    if getattr(control, "disabled", False) or getattr(control, "readonly", False):
+        return False
+    tag_name = (getattr(control, "tag_name", "") or "").lower()
+    if tag_name in {"textarea", "select"}:
+        return True
+    if tag_name != "input":
+        return False
+    input_type = (getattr(control, "input_type", "") or "text").lower()
+    return input_type in _TYPEABLE_INPUT_TYPES
+
+
 async def _locator_for_target_id(page: Page, target_id: Any) -> Optional[Any]:
     """Resolve a model-chosen ``[id=N]`` to a real ``Locator``.
 

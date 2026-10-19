@@ -129,6 +129,7 @@ class PersistenceEngine:
         self.redis_client = None
         self.pg_write_semaphore = asyncio.Semaphore(max(2, self.max_workers * 2))
         self.redis_write_semaphore = asyncio.Semaphore(max(4, self.max_workers * 4))
+        self._missing_baseline_routes: set = set()
 
     async def initialize(self) -> None:
         await self._initialize_postgres()
@@ -258,25 +259,56 @@ class PersistenceEngine:
                 _local_service_log(f"Failed to close Redis client cleanly: {exc}", self.settings.output_dir)
             self.redis_client = None
 
+    def _is_recoverable_redis_error(self, exc: Exception) -> bool:
+        return "_add_writer" in str(exc) or isinstance(exc, (ConnectionError, OSError))
+
+    async def _reset_redis_client(self) -> None:
+        client = self.redis_client
+        self.redis_client = None
+        if client is not None:
+            try:
+                close_method = getattr(client, "aclose", None) or getattr(client, "close", None)
+                if close_method is not None:
+                    await close_method()
+            except Exception:
+                pass
+        await self._initialize_redis()
+
     async def increment_visited_state(self, state_key: str) -> Optional[int]:
         if self.redis_client is None:
             return None
         redis_key = f"monkeylm:visited_states:{self.settings.timestamp}"
-        try:
+
+        async def _do() -> int:
             async with self.redis_write_semaphore:
                 prefixed_key = build_redis_key(self.settings.redis_prefix, redis_key)
                 count = await self.redis_client.hincrby(prefixed_key, state_key, 1)
                 await self.redis_client.expire(prefixed_key, self.settings.redis_state_ttl_seconds)
             return int(count)
-        except Exception as exc:
-            _local_service_log(f"Redis visited-state update failed: {exc}", self.settings.output_dir)
-            return None
+
+        for attempt in (1, 2):
+            if self.redis_client is None:
+                return None
+            try:
+                return await _do()
+            except Exception as exc:
+                if attempt == 1 and self._is_recoverable_redis_error(exc):
+                    _local_service_log(
+                        f"Redis visited-state update lost its connection; reconnecting: {exc}",
+                        self.settings.output_dir,
+                    )
+                    await self._reset_redis_client()
+                    continue
+                _local_service_log(f"Redis visited-state update failed: {exc}", self.settings.output_dir)
+                return None
+        return None
 
     async def claim_action_path_lock(self, path_hash: str, worker_label: str) -> bool:
         if self.redis_client is None:
             return True
         redis_key = f"monkeylm:active_path:{path_hash}"
-        try:
+
+        async def _do() -> Optional[bool]:
             async with self.redis_write_semaphore:
                 prefixed_key = build_redis_key(self.settings.redis_prefix, redis_key)
                 acquired = await self.redis_client.set(prefixed_key, worker_label, nx=True, ex=self.settings.redis_path_lock_ttl_seconds)
@@ -290,9 +322,27 @@ class PersistenceEngine:
                 if current_owner == worker_label:
                     return True
             return False
-        except Exception as exc:
-            _local_service_log(f"Redis action-path lock claim failed for '{path_hash}': {exc}", self.settings.output_dir)
-            return False
+
+        for attempt in (1, 2):
+            if self.redis_client is None:
+                return True
+            try:
+                result = await _do()
+                return True if result is None else bool(result)
+            except Exception as exc:
+                if attempt == 1 and self._is_recoverable_redis_error(exc):
+                    _local_service_log(
+                        f"Redis action-path lock lost its connection; reconnecting: {exc}",
+                        self.settings.output_dir,
+                    )
+                    await self._reset_redis_client()
+                    continue
+                _local_service_log(
+                    f"Redis action-path lock claim failed for '{path_hash}': {exc}; proceeding without lock.",
+                    self.settings.output_dir,
+                )
+                return True
+        return True
 
     async def _fetch_golden_baseline(self, domain: str, page_route: str) -> Optional[Dict[str, Any]]:
         if self.pg_pool is None:
@@ -459,7 +509,10 @@ class PersistenceEngine:
                 await self._upsert_baseline(domain=domain, page_route=normalized_route, dom_structure_hash=snapshot.structure_hash, component_manifest=component_manifest, is_golden_standard=True)
                 _local_service_log(f"Auto-seeded golden baseline for {domain}{normalized_route}.", self.settings.output_dir)
             else:
-                _local_service_log(f"Golden baseline missing for {domain}{page_route}; comparison skipped.", self.settings.output_dir)
+                missing_key = (domain, normalized_route)
+                if missing_key not in self._missing_baseline_routes:
+                    self._missing_baseline_routes.add(missing_key)
+                    _local_service_log(f"Golden baseline missing for {domain}{page_route}; comparison skipped.", self.settings.output_dir)
             return
         missing_components, broken_selectors = diff_component_manifests(golden_manifest=golden.get("component_manifest", []), current_manifest=component_manifest)
         if not missing_components:

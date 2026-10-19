@@ -40,8 +40,29 @@ class DefectTracker:
 
     def add(self, category: str, payload: Dict[str, Any]) -> None:
         collection = getattr(self, category, None)
-        if collection is not None:
-            collection.append(_normalize_defect(payload))
+        if collection is None:
+            return
+        normalized = _normalize_defect(payload)
+        if category == "accessibility_violations":
+            key = (
+                normalized.get("id"),
+                normalized.get("selector"),
+                normalized.get("url"),
+            )
+            for existing in collection:
+                if (
+                    existing.get("id"),
+                    existing.get("selector"),
+                    existing.get("url"),
+                ) == key:
+                    existing["last_seen_step"] = normalized.get(
+                        "step", existing.get("last_seen_step")
+                    )
+                    existing["occurrences"] = int(existing.get("occurrences", 1)) + 1
+                    return
+            normalized["last_seen_step"] = normalized.get("step")
+            normalized["occurrences"] = 1
+        collection.append(normalized)
 
     def merge_from(self, other: "DefectTracker") -> None:
         categories = [
