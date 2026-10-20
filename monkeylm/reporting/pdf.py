@@ -308,13 +308,21 @@ def generate_pdf_report(
                 return None
 
             try:
-                img_width = max_width * inch
-                img_height = 4.0 * inch
+                max_w = max_width * inch
+                max_h = 3.5 * inch
+                img_width = max_w
+                img_height = max_h
                 if Image is not None and PIL_Image is not None:
                     with PIL_Image.open(image_path) as img:
                         orig_w, orig_h = img.size
-                        aspect = orig_h / max(1, orig_w)
-                        img_height = min(img_width * aspect, 3.5 * inch)
+                        if orig_w > 0 and orig_h > 0:
+                            aspect = orig_w / orig_h
+                            img_height = max_w / aspect
+                            if img_height > max_h:
+                                img_height = max_h
+                                img_width = max_h * aspect
+                            else:
+                                img_width = max_w
                 return RLImage(image_path, width=img_width, height=img_height)
             except Exception:
                 return None
