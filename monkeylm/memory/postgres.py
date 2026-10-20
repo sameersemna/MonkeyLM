@@ -228,6 +228,11 @@ class PersistenceEngine:
             _local_service_log("redis package not installed; Redis state cache disabled.", self.settings.output_dir)
             return
         try:
+            from redis.backoff import ExponentialBackoff
+            from redis.exceptions import ConnectionError as RedisConnectionError
+            from redis.exceptions import TimeoutError as RedisTimeoutError
+            from redis.retry import Retry
+
             self.redis_client = redis_asyncio.from_url(
                 self.settings.redis_url,
                 decode_responses=True,
@@ -236,6 +241,11 @@ class PersistenceEngine:
                 socket_timeout=5,
                 health_check_interval=30,
                 retry_on_timeout=True,
+                retry=Retry(
+                    ExponentialBackoff(),
+                    3,
+                    supported_errors=(RedisConnectionError, RedisTimeoutError),
+                ),
             )
             assert self.redis_client is not None
             await self.redis_client.ping()
@@ -316,7 +326,7 @@ class PersistenceEngine:
     def _is_recoverable_redis_error(self, exc: Exception) -> bool:
         return "_add_writer" in str(exc) or isinstance(exc, (ConnectionError, OSError))
 
-    async def _reset_redis_client(self) -> None:
+    async def _reset_redis_client(self) -> bool:
         client = self.redis_client
         self.redis_client = None
         if client is not None:
@@ -327,9 +337,10 @@ class PersistenceEngine:
             except Exception:
                 pass
         await self._initialize_redis()
+        return self.redis_client is not None
 
     async def increment_visited_state(self, state_key: str) -> Optional[int]:
-        if self.redis_client is None:
+        if self.redis_client is None or self.max_workers <= 1:
             return None
         redis_key = f"monkeylm:visited_states:{self.settings.timestamp}"
 
@@ -351,14 +362,24 @@ class PersistenceEngine:
                         f"Redis visited-state update lost its connection; reconnecting: {exc}",
                         self.settings.output_dir,
                     )
-                    await self._reset_redis_client()
+                    reconnected = await self._reset_redis_client()
+                    if reconnected:
+                        _local_service_log(
+                            "Redis reconnect succeeded after visited-state connection loss; retrying.",
+                            self.settings.output_dir,
+                        )
+                    else:
+                        _local_service_log(
+                            "Redis reconnect failed after visited-state connection loss; using local state.",
+                            self.settings.output_dir,
+                        )
                     continue
                 _local_service_log(f"Redis visited-state update failed: {exc}", self.settings.output_dir)
                 return None
         return None
 
     async def claim_action_path_lock(self, path_hash: str, worker_label: str) -> bool:
-        if self.redis_client is None:
+        if self.redis_client is None or self.max_workers <= 1:
             return True
         redis_key = f"monkeylm:active_path:{path_hash}"
 
@@ -389,7 +410,18 @@ class PersistenceEngine:
                         f"Redis action-path lock lost its connection; reconnecting: {exc}",
                         self.settings.output_dir,
                     )
-                    await self._reset_redis_client()
+                    reconnected = await self._reset_redis_client()
+                    if reconnected:
+                        _local_service_log(
+                            "Redis reconnect succeeded after action-path lock connection loss; retrying.",
+                            self.settings.output_dir,
+                        )
+                    else:
+                        _local_service_log(
+                            "Redis reconnect failed after action-path lock connection loss; "
+                            "proceeding without lock.",
+                            self.settings.output_dir,
+                        )
                     continue
                 _local_service_log(
                     f"Redis action-path lock claim failed for '{path_hash}': {exc}; proceeding without lock.",

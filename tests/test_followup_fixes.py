@@ -2,6 +2,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+from redis.retry import Retry
+
 from monkeylm.config import Settings, inspect_optional_runtime_dependencies
 from monkeylm.core.monitor import DefectTracker
 from monkeylm.core.monitor.anomaly import format_anomaly_summary
@@ -43,9 +45,17 @@ class _FakeRedis:
 
 class RedisRecoveryTests(unittest.IsolatedAsyncioTestCase):
     def _engine(self) -> PersistenceEngine:
-        engine = PersistenceEngine(Settings(), DefectTracker())
+        engine = PersistenceEngine(Settings(workers=2), DefectTracker(), max_workers=2)
         engine.settings.timestamp = "test"
         return engine
+
+    async def test_single_worker_skips_remote_state_and_locking(self) -> None:
+        engine = PersistenceEngine(Settings(workers=1), DefectTracker())
+        engine.redis_client = _FakeRedis()
+
+        self.assertIsNone(await engine.increment_visited_state("state"))
+        self.assertTrue(await engine.claim_action_path_lock("hash", "worker-01"))
+        self.assertEqual(engine.redis_client.calls, 0)
 
     async def test_action_path_lock_reconnects_after_add_writer_error(self) -> None:
         engine = self._engine()
@@ -85,6 +95,47 @@ class RedisRecoveryTests(unittest.IsolatedAsyncioTestCase):
         count = await engine.increment_visited_state("state")
 
         self.assertEqual(count, 1)
+
+    async def test_reconnect_logs_success_after_add_writer_error(self) -> None:
+        engine = self._engine()
+        engine.redis_client = _FakeRedis(fail_calls=1)
+
+        async def _reinitialize() -> None:
+            engine.redis_client = _FakeRedis()
+
+        engine._initialize_redis = AsyncMock(side_effect=_reinitialize)
+        with patch("monkeylm.memory.postgres._local_service_log") as log:
+            count = await engine.increment_visited_state("state")
+
+        self.assertEqual(count, 1)
+        self.assertTrue(
+            any("reconnect succeeded" in str(call) for call in log.call_args_list)
+        )
+
+    async def test_redis_client_configures_retry_policy(self) -> None:
+        engine = self._engine()
+        captured = {}
+
+        class _Client:
+            async def ping(self):
+                return True
+
+            async def aclose(self):
+                return None
+
+        class _RedisModule:
+            def from_url(self, url, **kwargs):
+                captured["url"] = url
+                captured["kwargs"] = kwargs
+                return _Client()
+
+        with patch("monkeylm.memory.postgres.redis_asyncio", _RedisModule()):
+            await engine._initialize_redis()
+
+        self.assertIsNotNone(engine.redis_client)
+        self.assertIsInstance(captured["kwargs"]["retry"], Retry)
+        self.assertEqual(captured["kwargs"]["health_check_interval"], 30)
+        self.assertIn("socket_timeout", captured["kwargs"])
 
 
 class BaselineAndObservabilityTests(unittest.IsolatedAsyncioTestCase):

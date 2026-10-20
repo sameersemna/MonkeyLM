@@ -115,11 +115,13 @@ Fuzzer payloads (`/etc/passwd`, SQLi strings, XSS tags) are intentional maliciou
 
 Python 3.12.x and early 3.13.x include a CPython asyncio bug (gh-136234) in
 `StreamWriter.writelines()` that can raise `'NoneType' object has no attribute
-'_add_writer'` after a Redis connection is lost. MonkeyLM mitigates this by
-reconnecting the Redis client and retrying once, then failing open when an
-action-path lock cannot be claimed. Upgrading to Python 3.13.3+ removes the
-underlying race. Run `python -m monkeylm --inspect-runtime` to see the current
-Python version warning.
+'_add_writer'` after a Redis connection is lost. MonkeyLM runs on Python 3.13.13
+and also mitigates the race by reconnecting the Redis client and retrying once,
+then failing open when an action-path lock cannot be claimed. Redis also uses a
+three-attempt exponential-backoff retry policy for connection and timeout errors.
+Single-worker runs bypass shared visited-state writes and action-path locks
+entirely. Run `python -m monkeylm --inspect-runtime` to see the current Python
+version warning.
 
 ---
 

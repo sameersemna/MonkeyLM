@@ -625,7 +625,7 @@ time ./scripts/quickstart.sh  # <15 minutes
 
 ## Re-baselined Milestones (2026-10-19)
 
-The original Day 4/11/21/25 schedule started in July 2026 and is historical. The project is re-baselined from the current state: Phase 1 interfaces and the reporting split are complete; `browser/`, `models/`, `memory/`, and `core/` packages exist; the current suite passes 240 tests (1 external-network test deselected). Remaining work is grouped into five milestones.
+The original Day 4/11/21/25 schedule started in July 2026 and is historical. The project is re-baselined from the current state: Phase 1 interfaces and the reporting split are complete; `browser/`, `models/`, `memory/`, and `core/` packages exist; the current suite passes 243 tests (1 external-network test deselected). Remaining work is grouped into five milestones.
 
 | Milestone | Target | Priority | Deliverables | Dependencies | Success Criteria |
 |---|---|---|---|---|---|
@@ -641,6 +641,7 @@ The original Day 4/11/21/25 schedule started in July 2026 and is historical. The
 - **R3 completed 2026-10-19:** added `monkeylm/form_filling/` (`common`, `values`, `planner`) with label/type-aware role inference, constraint-aware valid/invalid/boundary/unexpected values, deterministic create/update/delete payloads, and CRUD-intent detection. `submit_form` now auto-completes missing payloads before execution; prompts and page state expose field names/placeholders and CRUD guidance. Deterministic tests in `tests/test_form_filling.py` (13 tests, 4 subtests) and the local `scripts/demo_form_crud.py` demo passed create → update → delete. Full suite: 208 passed, 1 deselected; `ruff` clean.
 - **R4 completed 2026-10-19:** added an ordered `OLLAMA_FALLBACK_MODELS` / `--ollama-fallback-models` chain that retries the primary model and then stable fallbacks; startup baseline summaries now report golden DOM/visual route counts and warn when `preexisting` mode has no goldens; DOM and visual preexisting comparisons are covered by tests; a11y and context anomalies dedupe across workers with occurrence counts, step ranges, and action/type detail. Reports expose baseline mode/counts and fallback models. Full suite: 219 passed, 1 deselected; `ruff` clean.
 - **R5 completed 2026-10-19 (accepted subset):** added natural-language scenario authoring with inline/`.txt`/`.json` inputs, deterministic extraction of personas, flows, edge cases, and security focus, scenario-driven worker execution, and `<output_dir>/scenario.json` provenance. Added a minimal stdio MCP server (`python -m monkeylm.mcp_scenario`) exposing `create_test_scenario`. Android GUI support and a general MCP execution bridge are excluded from this subset. Full suite: 240 passed, 1 deselected; `ruff` clean.
+- **Redis resilience follow-up 2026-10-19:** runtime moved to Python 3.13.13; redis-py now uses a three-attempt exponential-backoff retry policy; reconnects log success/failure explicitly; single-worker runs bypass shared visited-state writes and action-path locks. Full suite: 243 passed, 1 deselected; `ruff` clean.
 - The original M3 (multi-modal/visual/a11y/security) is largely implemented; remaining advanced items are in R5.
 
 ### R5 Scope Decision

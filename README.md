@@ -331,6 +331,8 @@ Operational guidance:
 - Increase `WORKERS` only after verifying browser stability and service latency under load.
 - Keep `MAX_STEPS_PER_WORKER` moderate to improve route diversity across workers.
 - If PostgreSQL/Redis are remote, start with lower worker counts (for example 1-2) and scale up gradually.
+- With `WORKERS=1`, shared Redis visited-state writes and action-path locks are bypassed; use `WORKERS>1` when cross-worker coordination is required.
+- For high-latency remote Redis endpoints, prefer a co-located/local Redis instance or keep worker counts low.
 - Prefer `HEADLESS=true` for higher worker density and lower memory pressure.
 
 ## 📊 Features
