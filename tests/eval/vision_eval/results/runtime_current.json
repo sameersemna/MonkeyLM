@@ -1,0 +1,154 @@
+{
+  "arm": "runtime_current",
+  "fixtures": 4,
+  "records": [
+    {
+      "fixture_id": "synthetic_button_color_change_v1",
+      "arm": "runtime_current",
+      "result": {
+        "box_2d": [
+          0.1,
+          0.1,
+          0.85,
+          0.85
+        ],
+        "description": "Issue detected in the captured UI state",
+        "defect_type": "other",
+        "severity": "info",
+        "parsed": true,
+        "parse_failure_reason": "",
+        "verifier_answer": null,
+        "verifier_confidence": null
+      },
+      "metrics": {
+        "recall_at_05": 0.0,
+        "recall_at_075": 0.0,
+        "iou_top1": 0.027762378911608127,
+        "boundary_quality": 0.46875,
+        "center_hit": false,
+        "parsed": true,
+        "defect_type_match": false,
+        "severity_weighted_kappa": 0.6666666666666666
+      },
+      "fixture_source": "synthetic",
+      "fixture_splits": [
+        "train",
+        "test"
+      ],
+      "fixture_negative": false
+    },
+    {
+      "fixture_id": "synthetic_blank_screen_v1",
+      "arm": "runtime_current",
+      "result": {
+        "box_2d": [
+          0.1,
+          0.1,
+          0.85,
+          0.85
+        ],
+        "description": "Issue detected in the captured UI state",
+        "defect_type": "other",
+        "severity": "info",
+        "parsed": true,
+        "parse_failure_reason": "",
+        "verifier_answer": null,
+        "verifier_confidence": null
+      },
+      "metrics": {
+        "recall_at_05": 0.0,
+        "recall_at_075": 0.0,
+        "iou_top1": 0.0,
+        "boundary_quality": 0.0,
+        "center_hit": false,
+        "parsed": false,
+        "defect_type_match": false,
+        "severity_weighted_kappa": 0.0
+      },
+      "fixture_source": "synthetic",
+      "fixture_splits": [
+        "test"
+      ],
+      "fixture_negative": true
+    },
+    {
+      "fixture_id": "synthetic_element_missing_v1",
+      "arm": "runtime_current",
+      "result": {
+        "box_2d": [
+          0.1,
+          0.1,
+          0.85,
+          0.85
+        ],
+        "description": "Issue detected in the captured UI state",
+        "defect_type": "other",
+        "severity": "info",
+        "parsed": true,
+        "parse_failure_reason": "",
+        "verifier_answer": null,
+        "verifier_confidence": null
+      },
+      "metrics": {
+        "recall_at_05": 0.0,
+        "recall_at_075": 0.0,
+        "iou_top1": 0.012827088784167794,
+        "boundary_quality": 0.5,
+        "center_hit": false,
+        "parsed": true,
+        "defect_type_match": false,
+        "severity_weighted_kappa": 0.3333333333333333
+      },
+      "fixture_source": "synthetic",
+      "fixture_splits": [
+        "test"
+      ],
+      "fixture_negative": false
+    },
+    {
+      "fixture_id": "synthetic_negative_v1",
+      "arm": "runtime_current",
+      "result": {
+        "box_2d": [
+          0.1,
+          0.1,
+          0.85,
+          0.85
+        ],
+        "description": "Issue detected in the captured UI state",
+        "defect_type": "other",
+        "severity": "info",
+        "parsed": true,
+        "parse_failure_reason": "",
+        "verifier_answer": null,
+        "verifier_confidence": null
+      },
+      "metrics": {
+        "recall_at_05": 0.0,
+        "recall_at_075": 0.0,
+        "iou_top1": 0.0,
+        "boundary_quality": 0.0,
+        "center_hit": false,
+        "parsed": false,
+        "defect_type_match": false,
+        "severity_weighted_kappa": 0.0
+      },
+      "fixture_source": "synthetic",
+      "fixture_splits": [
+        "test"
+      ],
+      "fixture_negative": true
+    }
+  ],
+  "aggregate": {
+    "n": 4,
+    "parsed_rate": 0.5,
+    "center_hit_rate": 0.0,
+    "recall_at_05": 0.0,
+    "recall_at_075": 0.0,
+    "iou_top1": 0.01014736692394398,
+    "boundary_quality": 0.2421875,
+    "defect_type_match": 0.0,
+    "severity_distance": 0.25
+  }
+}

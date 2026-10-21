@@ -1,4 +1,17 @@
-"""Regression tests for executor annotation timeouts."""
+"""Regression tests for executor annotation timeouts.
+
+After Phase 1 unblocked the runtime vision call, the contract is:
+
+* ``annotate_relevant_screenshot`` returns a ``(output_path, description)``
+  tuple — the executor must unpack both.
+* The annotation budget is
+  ``settings.vision_annotation_timeout_seconds`` (env:
+  ``VISION_ANNOTATION_TIMEOUT_SECONDS``), default 20s.  The old hard
+  2-second cap from ``min(2.0, …*0.02)`` is gone.
+* When the budget elapses the executor cancels the annotation task and
+  proceeds with ``annotation_source = "none"``, never blocking the
+  step's downstream work.
+"""
 
 from __future__ import annotations
 
@@ -12,7 +25,10 @@ from monkeylm.browser.actions.executor import execute_action
 
 
 class ExecutorAnnotationTimeoutTests(unittest.IsolatedAsyncioTestCase):
-    async def test_execute_action_does_not_wait_for_slow_annotation(self) -> None:
+    async def test_execute_action_cancels_annotation_when_budget_elapses(self) -> None:
+        """Annotate for 3s, set budget to 0.5s → step completes quickly,
+        annotation is cancelled, log_entry records ``source=\"none\"``."""
+
         class DummyPage:
             url = "https://example.com"
 
@@ -37,8 +53,13 @@ class ExecutorAnnotationTimeoutTests(unittest.IsolatedAsyncioTestCase):
             return DummySnapshot()
 
         async def slow_annotation(*args, **kwargs):
+            # Honor cancellation so the cancel/discard path is exercised
+            # when the executor times out.
             await asyncio.sleep(3.0)
-            return "annotated.png"
+            return "annotated.png", "should not be used"
+
+        async def fake_log_sink(items: list) -> None:
+            return None
 
         settings = SimpleNamespace(
             output_dir=tempfile.mkdtemp(prefix="monkeylm-test-"),
@@ -46,6 +67,8 @@ class ExecutorAnnotationTimeoutTests(unittest.IsolatedAsyncioTestCase):
             vision_model="qwen3-vl:30b",
             pdf_vision_model="qwen3-vl:30b",
             step_timeout_seconds=30.0,
+            # Phase 1 budget replaces the historical ``min(2.0, …*0.02)``.
+            vision_annotation_timeout_seconds=0.5,
         )
 
         perf_monitor = SimpleNamespace(
@@ -55,6 +78,8 @@ class ExecutorAnnotationTimeoutTests(unittest.IsolatedAsyncioTestCase):
         network_monitor = SimpleNamespace(detect_zombie_ui=AsyncMock(return_value=None))
         defects = SimpleNamespace(add=lambda *args, **kwargs: None)
         fuzzer = SimpleNamespace(next_payload=lambda: "")
+
+        log_entries: list = []
 
         with patch("monkeylm.browser.actions.executor.get_page_state", side_effect=fake_get_page_state), \
              patch("monkeylm.browser.actions.executor.compare_screenshots_pixelmatch", return_value={"diff_ratio": 0.0, "diff_pixels": 0, "engine": "pixelmatch", "diff_image": ""}), \
@@ -70,14 +95,22 @@ class ExecutorAnnotationTimeoutTests(unittest.IsolatedAsyncioTestCase):
                 defects=defects,
                 network_monitor=network_monitor,
                 perf_monitor=perf_monitor,
-                log_sink=None,
+                log_sink=log_entries,
                 persistence_engine=None,
                 worker_id=1,
                 validation_prober=None,
             )
             elapsed = asyncio.get_running_loop().time() - started
 
-        self.assertLess(elapsed, 2.5)
+        self.assertLess(elapsed, 2.0)
+        # The annotation was cancelled → no description captured, source="none".
+        matching = [
+            entry for entry in log_entries if entry.get("step") == 1
+        ]
+        self.assertEqual(len(matching), 1)
+        entry = matching[0]
+        self.assertEqual(entry.get("annotation_source"), "none")
+        self.assertNotIn("screenshot_description", entry)
 
 
 if __name__ == "__main__":

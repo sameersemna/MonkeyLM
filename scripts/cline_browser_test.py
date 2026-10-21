@@ -15,10 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import re
-import sys
-import time
 import traceback
 from datetime import datetime
 from pathlib import Path
@@ -673,7 +670,6 @@ def compile_pdf(md_path: Path, pdf_path: Path) -> bool:
     # Fallback: reportlab minimal
     try:
         from reportlab.lib.pagesizes import LETTER
-        from reportlab.pdfgen import canvas
         from reportlab.lib.styles import getSampleStyleSheet
         from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
         styles = getSampleStyleSheet()

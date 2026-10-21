@@ -68,6 +68,13 @@ class Settings:
     vision_model: str = "gemini-3-flash-preview"
     pdf_vision_model: str = "llama3.2-vision"
     pdf_vision_timeout_seconds: float = 30.0
+    # Real per-step budget for the runtime vision-LLM annotation call.
+    # Decoupled from ``pdf_vision_timeout_seconds`` (which the report PDF
+    # generator treats as a hard budget).  Default 20s is enough for a
+    # ``gemini-3-flash-preview`` single-image call without making the step
+    # hang; raise ``VISION_ANNOTATION_TIMEOUT_SECONDS`` in ``.env`` for
+    # larger local models.
+    vision_annotation_timeout_seconds: float = 20.0
 
     max_steps: int = 10
     workers: int = 1
@@ -119,6 +126,17 @@ class Settings:
     cv_template_every_n_steps: int = 2
     ocr_enabled: bool = False
     ocr_contrast_enabled: bool = False
+    # Phase 1.5 (B8): composite CV-skip gate tuning.  The historical
+    # ``>=70% dominance`` rule conflated "diff is concentrated" with
+    # "region is correct"; the gate now requires minimum diff size, a strict
+    # dominance threshold, a meaningful SSIM disagreement score, and a
+    # single region so the SSIM call is unambiguous.  Defaults below are
+    # the initial values; calibration against the eval harness (Phase 3) is
+    # expected to nudge ``cv_skip_min_dominance`` slightly downward
+    # (Phase 1 maintained backward-compat by setting it at 0.7).
+    cv_skip_min_area_ratio: float = 0.02
+    cv_skip_min_dominance: float = 0.7
+    cv_skip_max_ssim: float = 0.6
     replay_from: str = ""
 
     active_seed: Optional[str] = None

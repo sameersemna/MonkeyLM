@@ -5,9 +5,6 @@ Target: https://noblequran-85hu2yge.manus.space
 Uses only Cline's native browser_action commands via subprocess
 """
 
-import subprocess
-import json
-import time
 from datetime import datetime
 from pathlib import Path
 

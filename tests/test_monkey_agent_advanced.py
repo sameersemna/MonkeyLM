@@ -1109,9 +1109,11 @@ class MonkeyLMTests(unittest.TestCase):
     def test_build_vision_annotation_prompt_contains_box_2d(self) -> None:
         prompt = _build_vision_annotation_prompt("button missing")
         self.assertIn("box_2d", prompt)
+        # Phase 2 (B5/B7) restructured the prompt around a per-class
+        # dispatcher; the schema footer still names box_2d in the
+        # documented ymin/xmin/ymax/xmax order.
         self.assertIn("[ymin, xmin, ymax, xmax]", prompt)
         self.assertNotIn('"box":', prompt)
-        self.assertIn("do not use `box`", prompt)
 
     def test_apply_runtime_overrides_vision_model(self) -> None:
         original_vision_model = config.VISION_MODEL

@@ -1,0 +1,154 @@
+{
+  "arm": "cv_only",
+  "fixtures": 4,
+  "records": [
+    {
+      "fixture_id": "synthetic_button_color_change_v1",
+      "arm": "cv_only",
+      "result": {
+        "box_2d": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "description": "",
+        "defect_type": "other",
+        "severity": "info",
+        "parsed": true,
+        "parse_failure_reason": "cv_only arm: no reference baseline in synthetic fixtures",
+        "verifier_answer": null,
+        "verifier_confidence": null
+      },
+      "metrics": {
+        "recall_at_05": 0.0,
+        "recall_at_075": 0.0,
+        "iou_top1": 0.0,
+        "boundary_quality": 0.0,
+        "center_hit": false,
+        "parsed": false,
+        "defect_type_match": false,
+        "severity_weighted_kappa": 0.0
+      },
+      "fixture_source": "synthetic",
+      "fixture_splits": [
+        "train",
+        "test"
+      ],
+      "fixture_negative": false
+    },
+    {
+      "fixture_id": "synthetic_blank_screen_v1",
+      "arm": "cv_only",
+      "result": {
+        "box_2d": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "description": "",
+        "defect_type": "other",
+        "severity": "info",
+        "parsed": true,
+        "parse_failure_reason": "cv_only arm: no reference baseline in synthetic fixtures",
+        "verifier_answer": null,
+        "verifier_confidence": null
+      },
+      "metrics": {
+        "recall_at_05": 0.0,
+        "recall_at_075": 0.0,
+        "iou_top1": 0.0,
+        "boundary_quality": 0.0,
+        "center_hit": false,
+        "parsed": false,
+        "defect_type_match": false,
+        "severity_weighted_kappa": 0.0
+      },
+      "fixture_source": "synthetic",
+      "fixture_splits": [
+        "test"
+      ],
+      "fixture_negative": true
+    },
+    {
+      "fixture_id": "synthetic_element_missing_v1",
+      "arm": "cv_only",
+      "result": {
+        "box_2d": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "description": "",
+        "defect_type": "other",
+        "severity": "info",
+        "parsed": true,
+        "parse_failure_reason": "cv_only arm: no reference baseline in synthetic fixtures",
+        "verifier_answer": null,
+        "verifier_confidence": null
+      },
+      "metrics": {
+        "recall_at_05": 0.0,
+        "recall_at_075": 0.0,
+        "iou_top1": 0.0,
+        "boundary_quality": 0.0,
+        "center_hit": false,
+        "parsed": false,
+        "defect_type_match": false,
+        "severity_weighted_kappa": 0.0
+      },
+      "fixture_source": "synthetic",
+      "fixture_splits": [
+        "test"
+      ],
+      "fixture_negative": false
+    },
+    {
+      "fixture_id": "synthetic_negative_v1",
+      "arm": "cv_only",
+      "result": {
+        "box_2d": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "description": "",
+        "defect_type": "other",
+        "severity": "info",
+        "parsed": true,
+        "parse_failure_reason": "cv_only arm: no reference baseline in synthetic fixtures",
+        "verifier_answer": null,
+        "verifier_confidence": null
+      },
+      "metrics": {
+        "recall_at_05": 0.0,
+        "recall_at_075": 0.0,
+        "iou_top1": 0.0,
+        "boundary_quality": 0.0,
+        "center_hit": false,
+        "parsed": false,
+        "defect_type_match": false,
+        "severity_weighted_kappa": 0.0
+      },
+      "fixture_source": "synthetic",
+      "fixture_splits": [
+        "test"
+      ],
+      "fixture_negative": true
+    }
+  ],
+  "aggregate": {
+    "n": 4,
+    "parsed_rate": 0.0,
+    "center_hit_rate": 0.0,
+    "recall_at_05": 0.0,
+    "recall_at_075": 0.0,
+    "iou_top1": 0.0,
+    "boundary_quality": 0.0,
+    "defect_type_match": 0.0,
+    "severity_distance": 0.0
+  }
+}

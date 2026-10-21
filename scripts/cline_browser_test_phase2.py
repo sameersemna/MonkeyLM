@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-import sys
 import traceback
 from datetime import datetime
 from pathlib import Path
@@ -653,7 +652,6 @@ def build_report() -> str:
 def compile_pdf(md_path: Path, pdf_path: Path) -> bool:
     try:
         # Use the existing gen_pdf.py style: reportlab-based, copy and adapt
-        from reportlab.lib import colors
         from reportlab.lib.pagesizes import letter
         from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
         from reportlab.lib.units import inch

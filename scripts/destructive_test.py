@@ -156,7 +156,7 @@ async def test_storage_manipulation(page):
         "STORAGE_MANIPULATION",
         "LocalStorage accepts malformed and dangerous data",
         "Major",
-        f"Successfully injected malformed JSON, null bytes, overflow data, and script tags into localStorage",
+        "Successfully injected malformed JSON, null bytes, overflow data, and script tags into localStorage",
         await take_screenshot(page, "storage_manipulation")
     )
     

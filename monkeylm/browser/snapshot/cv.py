@@ -11,7 +11,7 @@ gracefully to a no-op when their backing dependency is not installed.
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from monkeylm.config import cv2, np, RapidOCR
 from .state import _sanitize_filename
@@ -499,3 +499,122 @@ def ocr_error_text(screenshot_path: str, max_chars: int = 500) -> Dict[str, Any]
     except Exception as exc:
         result["error"] = f"ocr_failed: {exc}"
     return result
+
+
+# Phase 2 (B3): structured CV evidence payload the vision annotator
+# consumes.  Pure normalizer — never reads the screenshot or contacts a
+# model.  Test consumers (``tests/test_defect_context.py``) assert that
+# every ``box_2d`` is normalized and every field is JSON-roundtrip safe
+# so downstream prompts can include the payload verbatim.
+_MAX_DEFECT_CONTEXT_REGIONS = 5
+_DEFECT_CONTEXT_OCR_CHARS = 500
+
+
+def defect_context(
+    cv_diff: Optional[Dict[str, Any]] = None,
+    *,
+    ocr: Optional[Dict[str, Any]] = None,
+    max_regions: int = _MAX_DEFECT_CONTEXT_REGIONS,
+) -> Dict[str, Any]:
+    """Flatten CV/OCR evidence into the prompt-ready ``defect_context`` dict.
+
+    Shape (stable across the pipeline; do not change keys without
+    updating prompt consumers + eval-harness fixtures):
+
+    * ``ssim_score`` — float in [0,1] or ``None``.
+    * ``diff_ratio`` — float in [0,1] or ``None``.
+    * ``regions`` — list of ``{"box_2d": [y, x, y, x], "area_ratio": float}``,
+      capped at ``max_regions``, sorted by descending area.
+    * ``ocr_error_text`` — str, truncated to ``_DEFECT_CONTEXT_OCR_CHARS``.
+    * ``ocr_violations`` — list of OCR contrast-violation dicts (truncated).
+    * ``n_regions`` — int.
+    * ``error`` — str or ``None`` (mirrors ``cv_diff['error']`` if any).
+    """
+    cv = cv_diff if isinstance(cv_diff, dict) else {}
+    regions_raw = cv.get("diff_regions") or []
+    if not isinstance(regions_raw, list):
+        regions_raw = []
+    cleaned_regions: List[Dict[str, Any]] = []
+    for region in regions_raw:
+        if not isinstance(region, dict):
+            continue
+        box = region.get("box_2d")
+        if not (isinstance(box, (list, tuple)) and len(box) == 4):
+            continue
+        try:
+            floats = [float(v) for v in box]
+        except (TypeError, ValueError):
+            continue
+        if not all(0.0 <= v <= 1.0 for v in floats):
+            continue
+        if floats[2] <= floats[0] or floats[3] <= floats[1]:
+            continue
+        try:
+            area_ratio = float(region.get("area_ratio", 0.0))
+        except (TypeError, ValueError):
+            area_ratio = 0.0
+        cleaned_regions.append(
+            {
+                "box_2d": [round(v, 4) for v in floats],
+                "area_ratio": round(area_ratio, 4),
+            }
+        )
+    cleaned_regions.sort(key=lambda r: r["area_ratio"], reverse=True)
+
+    ocr_payload = ocr if isinstance(ocr, dict) else {}
+    ocr_text_raw = ocr_payload.get("text", "")
+    if not isinstance(ocr_text_raw, str):
+        ocr_text_raw = ""
+    ocr_lines = ocr_payload.get("lines")
+    if not isinstance(ocr_lines, list):
+        ocr_lines = []
+    violations_raw = ocr_payload.get("violations")
+    if not isinstance(violations_raw, list):
+        violations_raw = []
+    truncated_violations: List[Dict[str, Any]] = []
+    for violation in violations_raw[:5]:
+        if not isinstance(violation, dict):
+            continue
+        text_value = violation.get("text")
+        ratio_value = violation.get("contrast_ratio")
+        truncated_violations.append(
+            {
+                "text": text_value if isinstance(text_value, str) else "",
+                "contrast_ratio": (
+                    float(ratio_value)
+                    if isinstance(ratio_value, (int, float))
+                    else None
+                ),
+            }
+        )
+
+    try:
+        ssim_score = (
+            float(cv.get("ssim_score"))
+            if cv.get("ssim_score") is not None
+            else None
+        )
+    except (TypeError, ValueError):
+        ssim_score = None
+    try:
+        diff_ratio = (
+            float(cv.get("diff_ratio"))
+            if cv.get("diff_ratio") is not None
+            else None
+        )
+    except (TypeError, ValueError):
+        diff_ratio = None
+
+    return {
+        "ssim_score": ssim_score,
+        "diff_ratio": diff_ratio,
+        "regions": cleaned_regions[:max_regions],
+        "ocr_error_text": ocr_text_raw[:_DEFECT_CONTEXT_OCR_CHARS],
+        "ocr_violations": truncated_violations,
+        "n_regions": len(cleaned_regions),
+        "error": cv.get("error") if cv.get("error") else None,
+        "ocr_lines_sample": [
+            line for line in ocr_lines[:3]
+            if isinstance(line, str)
+        ],
+    }

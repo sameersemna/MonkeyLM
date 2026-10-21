@@ -1,0 +1,154 @@
+{
+  "arm": "fixed",
+  "fixtures": 4,
+  "records": [
+    {
+      "fixture_id": "synthetic_button_color_change_v1",
+      "arm": "fixed",
+      "result": {
+        "box_2d": [
+          0.75,
+          0.6875,
+          0.9167,
+          0.9219
+        ],
+        "description": "The primary 'Submit' button changed color.",
+        "defect_type": "visual-regression",
+        "severity": "serious",
+        "parsed": true,
+        "parse_failure_reason": "",
+        "verifier_answer": "yes",
+        "verifier_confidence": 0.92
+      },
+      "metrics": {
+        "recall_at_05": 1.0,
+        "recall_at_075": 1.0,
+        "iou_top1": 1.0,
+        "boundary_quality": 1.0,
+        "center_hit": true,
+        "parsed": true,
+        "defect_type_match": true,
+        "severity_weighted_kappa": 0.0
+      },
+      "fixture_source": "synthetic",
+      "fixture_splits": [
+        "train",
+        "test"
+      ],
+      "fixture_negative": false
+    },
+    {
+      "fixture_id": "synthetic_blank_screen_v1",
+      "arm": "fixed",
+      "result": {
+        "box_2d": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "description": "Screenshot is uniform near-white (no UI rendered).",
+        "defect_type": "blank-screen",
+        "severity": "critical",
+        "parsed": true,
+        "parse_failure_reason": "",
+        "verifier_answer": "yes",
+        "verifier_confidence": 0.92
+      },
+      "metrics": {
+        "recall_at_05": 0.0,
+        "recall_at_075": 0.0,
+        "iou_top1": 0.0,
+        "boundary_quality": 0.0,
+        "center_hit": false,
+        "parsed": false,
+        "defect_type_match": false,
+        "severity_weighted_kappa": 0.0
+      },
+      "fixture_source": "synthetic",
+      "fixture_splits": [
+        "test"
+      ],
+      "fixture_negative": true
+    },
+    {
+      "fixture_id": "synthetic_element_missing_v1",
+      "arm": "fixed",
+      "result": {
+        "box_2d": [
+          0.1389,
+          0.0312,
+          0.2222,
+          0.1875
+        ],
+        "description": "Profile label disappeared from the nav bar.",
+        "defect_type": "element-missing",
+        "severity": "minor",
+        "parsed": true,
+        "parse_failure_reason": "",
+        "verifier_answer": "yes",
+        "verifier_confidence": 0.92
+      },
+      "metrics": {
+        "recall_at_05": 1.0,
+        "recall_at_075": 1.0,
+        "iou_top1": 1.0,
+        "boundary_quality": 1.0,
+        "center_hit": true,
+        "parsed": true,
+        "defect_type_match": true,
+        "severity_weighted_kappa": 0.0
+      },
+      "fixture_source": "synthetic",
+      "fixture_splits": [
+        "test"
+      ],
+      "fixture_negative": false
+    },
+    {
+      "fixture_id": "synthetic_negative_v1",
+      "arm": "fixed",
+      "result": {
+        "box_2d": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "description": "",
+        "defect_type": "other",
+        "severity": "info",
+        "parsed": true,
+        "parse_failure_reason": "",
+        "verifier_answer": "yes",
+        "verifier_confidence": 0.92
+      },
+      "metrics": {
+        "recall_at_05": 0.0,
+        "recall_at_075": 0.0,
+        "iou_top1": 0.0,
+        "boundary_quality": 0.0,
+        "center_hit": false,
+        "parsed": false,
+        "defect_type_match": false,
+        "severity_weighted_kappa": 0.0
+      },
+      "fixture_source": "synthetic",
+      "fixture_splits": [
+        "test"
+      ],
+      "fixture_negative": true
+    }
+  ],
+  "aggregate": {
+    "n": 4,
+    "parsed_rate": 0.5,
+    "center_hit_rate": 0.5,
+    "recall_at_05": 0.5,
+    "recall_at_075": 0.5,
+    "iou_top1": 0.5,
+    "boundary_quality": 0.5,
+    "defect_type_match": 0.5,
+    "severity_distance": 0.0
+  }
+}

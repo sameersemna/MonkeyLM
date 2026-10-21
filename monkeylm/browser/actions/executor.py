@@ -252,16 +252,55 @@ async def execute_action(
                     log_entry["cv_diff_regions"] = len(regions)
                     # Keep the top region for the vision-annotation prompt so
                     # the LLM gets a candidate localization instead of scanning
-                    # the full frame blind.
+                    # the full frame blind.  Phase 1.4: pass the *normalized*
+                    # box_2d (the form the parser and the VLM both expect)
+                    # instead of the raw pixel-string — the previous literal
+                    # ``x=,y=,w=,h=`` collided with the prompt's ``box_2d``
+                    # schema and forced the model to convert coordinates twice.
                     top = regions[0]
-                    log_entry["cv_top_region"] = f"x={top['x']},y={top['y']},w={top['w']},h={top['h']}"
-                    # High-confidence localization: a single dominant region
-                    # (covers >=70% of total diff area) lets the annotation
-                    # step skip the vision-LLM call entirely and draw the
-                    # CV box directly — saving 2-30s of inference per step.
+                    log_entry["cv_top_region_box2d"] = top.get("box_2d")
+                    log_entry["cv_top_region"] = (
+                        f"x={top.get('x')},y={top.get('y')},w={top.get('w')},h={top.get('h')}"
+                    )
+                    log_entry["cv_top_region_area_ratio"] = top.get("area_ratio")
+                    # Phase 1.5 (B8): calibrated composite CV-skip gate.
+                    # The historical area-only rule (>=70% dominance) conflated
+                    # "diff is concentrated" with "region is correct"; the
+                    # composite below requires (a) minimum diff size, (b) a
+                    # strict dominance threshold, (c) a meaningful SSIM
+                    # disagreement score, and (d) a *single* region so the
+                    # SSIM call is unambiguous.  All thresholds are tunable
+                    # via Settings — see ``cv_skip_*`` fields — and the
+                    # bookkeeping fields below let the eval harness audit
+                    # the gate without re-running SSIM.
                     total_region_area = sum(r["area_ratio"] for r in regions)
-                    if top.get("box_2d") and total_region_area > 0 and top["area_ratio"] / total_region_area >= 0.7:
+                    dominance = (
+                        top["area_ratio"] / total_region_area if total_region_area > 0 else 0.0
+                    )
+                    ssim_score = float(cv_diff.get("ssim_score") or 1.0)
+                    skip_min_area = float(
+                        getattr(settings, "cv_skip_min_area_ratio", 0.02)
+                    )
+                    skip_dominance = float(
+                        getattr(settings, "cv_skip_min_dominance", 0.7)
+                    )
+                    skip_max_ssim = float(
+                        getattr(settings, "cv_skip_max_ssim", 0.6)
+                    )
+                    if (
+                        top.get("box_2d")
+                        and top["area_ratio"] >= skip_min_area
+                        and dominance >= skip_dominance
+                        and ssim_score < skip_max_ssim
+                        and len(regions) == 1
+                    ):
                         log_entry["cv_confident_box"] = top["box_2d"]
+                        log_entry["cv_skip_gate"] = {
+                            "area_ratio": top["area_ratio"],
+                            "dominance": dominance,
+                            "ssim_score": ssim_score,
+                            "n_regions": len(regions),
+                        }
 
         perf_findings = await perf_monitor.detect_bottlenecks(perf_before, perf_after, step_num, action, sanitize_for_storage(after_snapshot.url, max_len=1024))
         log_entry["performance_findings"] = len(perf_findings)
@@ -370,7 +409,19 @@ async def execute_action(
                 context_issue += "; " + "; ".join(defect_reasons)
             if log_entry.get("error"):
                 context_issue += f"; error={log_entry['error'][:120]}"
-            if log_entry.get("cv_top_region"):
+            # Phase 1.4: pass the *normalized* box_2d alongside (or instead
+            # of) the pixel-string — the parser and the VLM both expect the
+            # normalized form.  The pixel-string is preserved as
+            # ``cv_top_region`` for debug-only consumers (the eval harness
+            # uses ``cv_top_region_box2d``).
+            if log_entry.get("cv_top_region_box2d"):
+                try:
+                    context_issue += "; cv_candidate_region=" + json.dumps(
+                        {"box_2d": list(log_entry["cv_top_region_box2d"])}
+                    )
+                except Exception:
+                    pass
+            elif log_entry.get("cv_top_region"):
                 context_issue += f"; cv_candidate_region_px=({log_entry['cv_top_region']})"
             try:
                 original_path = os.path.join(settings.output_dir, log_entry["screenshot"])
@@ -396,25 +447,55 @@ async def execute_action(
                 else:
                     active_vision_model = settings.vision_model or settings.pdf_vision_model
                     print(f"   └─ 📸 Annotating screenshot with {active_vision_model}...")
-                    timeout_seconds = min(2.0, max(0.5, float(getattr(settings, "pdf_vision_timeout_seconds", 60.0)) * 0.02))
+                    # Phase 1 unblocker: respect the settings-driven budget
+                    # so callers (and the eval harness) can tune the wait
+                    # for fast-cancel tests.  The historical
+                    # ``min(2.0, …*0.02)`` cap that made every Gemini call
+                    # time out is gone.  Floor at 0.1s prevents zero/negative.
+                    timeout_seconds = max(
+                        0.1,
+                        float(getattr(settings, "vision_annotation_timeout_seconds", 20.0)),
+                    )
                     annotation_task = asyncio.create_task(
                         annotate_relevant_screenshot(settings, original_path, context_issue, step_num=step_num)
                     )
                     try:
-                        annotated_path = await asyncio.wait_for(annotation_task, timeout=timeout_seconds)
+                        annotation_result = await asyncio.wait_for(annotation_task, timeout=timeout_seconds)
+                        # Phase 2 (B5): 3-tuple now (path, description, verdict_dict)
+                        if isinstance(annotation_result, tuple) and len(annotation_result) == 3:
+                            annotated_path, description, verdict_dict = annotation_result
+                        else:
+                            annotated_path, description = annotation_result
+                            verdict_dict = {}
                         if annotated_path != original_path:
                             log_entry["screenshot"] = os.path.basename(annotated_path)
                             log_entry["screenshot_annotated"] = True
-                            log_entry["annotation_source"] = "vision"
+                            # ``annotation_source == "vision"`` when a real
+                            # bbox was drawn (B1 contract); ``"none"`` when
+                            # the call succeeded but parsing failed or the
+                            # B10 verifier rejected the candidate (Phase 2).
+                            log_entry["annotation_source"] = (
+                                "vision" if verdict_dict.get("box_2d")
+                                and verdict_dict["box_2d"] != [0.0, 0.0, 0.0, 0.0]
+                                else "none"
+                            )
+                        else:
+                            log_entry["annotation_source"] = "none"
+                        if description:
+                            log_entry["screenshot_description"] = description
+                        if verdict_dict:
+                            log_entry["screenshot_verdict"] = verdict_dict
                     except asyncio.TimeoutError:
                         annotation_task.cancel()
                         with contextlib.suppress(asyncio.CancelledError):
                             await annotation_task
-                        _local_service_log(f"Annotation hook timed out at step {step_num}; continuing without annotation.", settings.output_dir)
+                        log_entry["annotation_source"] = "none"
+                        _local_service_log(f"Annotation hook timed out at step {step_num} (budget {timeout_seconds}s); continuing without annotation.", settings.output_dir)
                     except Exception as exc:
                         annotation_task.cancel()
                         with contextlib.suppress(asyncio.CancelledError):
                             await annotation_task
+                        log_entry["annotation_source"] = "none"
                         _local_service_log(f"Annotation hook failed at step {step_num}: {exc}", settings.output_dir)
             except Exception as exc:
                 _local_service_log(f"Annotation hook failed at step {step_num}: {exc}", settings.output_dir)

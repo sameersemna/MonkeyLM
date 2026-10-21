@@ -229,6 +229,8 @@ def load_settings(cli_args: Optional[argparse.Namespace] = None) -> Settings:
     ).strip()
     ev_pvt = env_vars.get("PDF_VISION_TIMEOUT_SECONDS")
     s.pdf_vision_timeout_seconds = max(1.0, float(ev_pvt) if ev_pvt is not None else s.pdf_vision_timeout_seconds)
+    ev_vat = env_vars.get("VISION_ANNOTATION_TIMEOUT_SECONDS")
+    s.vision_annotation_timeout_seconds = max(2.0, float(ev_vat) if ev_vat is not None else s.vision_annotation_timeout_seconds)
     s.strict_sandbox = _env_bool("STRICT_SANDBOX", default=_env_to_bool(env_vars.get("STRICT_SANDBOX"), s.strict_sandbox))
     s.allow_no_sandbox_fallback = _env_bool("ALLOW_NO_SANDBOX_FALLBACK", default=_env_to_bool(env_vars.get("ALLOW_NO_SANDBOX_FALLBACK"), s.allow_no_sandbox_fallback))
     ev_cv = env_vars.get("CV_ANALYSIS_ENABLED")
@@ -251,6 +253,12 @@ def load_settings(cli_args: Optional[argparse.Namespace] = None) -> Settings:
     s.ocr_enabled = _env_bool("OCR_ENABLED", default=_env_to_bool(ev_ocr, s.ocr_enabled))
     ev_oc = env_vars.get("OCR_CONTRAST_ENABLED")
     s.ocr_contrast_enabled = _env_bool("OCR_CONTRAST_ENABLED", default=_env_to_bool(ev_oc, s.ocr_contrast_enabled))
+    ev_cs_min_area = env_vars.get("CV_SKIP_MIN_AREA_RATIO")
+    s.cv_skip_min_area_ratio = max(0.0, min(1.0, float(ev_cs_min_area) if ev_cs_min_area is not None else s.cv_skip_min_area_ratio))
+    ev_cs_min_dom = env_vars.get("CV_SKIP_MIN_DOMINANCE")
+    s.cv_skip_min_dominance = max(0.0, min(1.0, float(ev_cs_min_dom) if ev_cs_min_dom is not None else s.cv_skip_min_dominance))
+    ev_cs_max_ssim = env_vars.get("CV_SKIP_MAX_SSIM")
+    s.cv_skip_max_ssim = max(0.0, min(1.0, float(ev_cs_max_ssim) if ev_cs_max_ssim is not None else s.cv_skip_max_ssim))
     s.replay_from = _env_str("REPLAY_FROM", env_vars.get("REPLAY_FROM") or s.replay_from)
 
     if cli_args is not None:

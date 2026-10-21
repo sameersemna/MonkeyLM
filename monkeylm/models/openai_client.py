@@ -12,14 +12,15 @@ from __future__ import annotations
 
 import atexit
 import base64
+import io
 import json
 import mimetypes
 import threading
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 from urllib.parse import urlsplit
 
-from monkeylm.config import Settings, httpx
+from monkeylm.config import PIL_Image, Settings, httpx
 
 
 DEFAULT_OPENAI_BASE_URL = "http://localhost:11434"
@@ -304,8 +305,73 @@ def extract_content(response: Any) -> str:
     return ""
 
 
+DEFAULT_VISION_MAX_PIXELS = 1568
+DEFAULT_VISION_JPEG_QUALITY = 85
+
+
+def prepare_image_for_vlm(
+    image_path: str,
+    max_px: int = DEFAULT_VISION_MAX_PIXELS,
+    jpeg_quality: int = DEFAULT_VISION_JPEG_QUALITY,
+) -> Tuple[bytes, int, int, str]:
+    """Downscale + JPEG-encode a screenshot for vision-LLM transport.
+
+    Returns ``(jpeg_bytes, width, height, mime)`` where ``width``/``height`` are the
+    *post-resize* pixel dimensions. Downscales proportionally so the longest edge
+    fits within ``max_px``; re-encodes as JPEG to roughly 10x smaller payloads than
+    raw full-page PNG (a 2560x1440 PNG drops from ~7 MB to ~200 KB). When Pillow
+    is unavailable, falls back to reading the raw file bytes and returning the
+    first matching MIME type by extension so the caller can still send the
+    payload to the model.
+    """
+    path = Path(image_path)
+    mime_type = mimetypes.guess_type(path.name)[0] or "image/png"
+    try:
+        width = height = 0
+        if PIL_Image is not None:
+            with PIL_Image.open(path) as im:
+                width, height = im.size
+                im = im.convert("RGB")
+                im.thumbnail((max_px, max_px))
+                buf = io.BytesIO()
+                im.save(buf, "JPEG", quality=jpeg_quality, optimize=True)
+                width, height = im.size
+                return buf.getvalue(), width, height, "image/jpeg"
+        with path.open("rb") as fh:
+            return fh.read(), width, height, mime_type
+    except Exception:
+        try:
+            with path.open("rb") as fh:
+                return fh.read(), 0, 0, mime_type
+        except Exception:
+            return b"", 0, 0, mime_type
+
+
+def build_vision_message_bytes(
+    prompt: str,
+    image_bytes: bytes,
+    mime_type: str = "image/jpeg",
+) -> Dict[str, Any]:
+    """Build an OpenAI vision-format user message from already-prepared bytes."""
+    encoded = base64.b64encode(image_bytes).decode("ascii")
+    return {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": prompt},
+            {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{encoded}"}},
+        ],
+    }
+
+
 def build_vision_message(prompt: str, image_path: str) -> Dict[str, Any]:
-    """Build an OpenAI vision-format user message with a base64 data URL."""
+    """Build an OpenAI vision-format user message with a base64 data URL.
+
+    The image is sent **as-stored on disk** with no preprocessing so existing
+    callers (e.g. ``scripts/backfill_annotations.py --full-resolution``) keep
+    their byte-for-byte behavior. For the runtime annotation path, prefer
+    :func:`prepare_image_for_vlm` + :func:`build_vision_message_bytes` which
+    downscale and JPEG-encode to keep payloads bounded.
+    """
     path = Path(image_path)
     mime_type = mimetypes.guess_type(path.name)[0] or "image/png"
     encoded = base64.b64encode(path.read_bytes()).decode("ascii")
