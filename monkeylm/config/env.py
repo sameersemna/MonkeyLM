@@ -45,6 +45,18 @@ def _env_to_float(value: Any, default: float) -> float:
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
+    """Resolve a boolean setting with the precedence shell > .env > default.
+
+    ``os.environ`` is consulted only when the key was a *real shell export*.
+    ``monkeylm.config.defaults`` calls ``load_dotenv`` at import time, which
+    copies every ``.env`` entry into ``os.environ``; treating those injected
+    values as shell exports would let ``.env`` shadow an explicit CLI flag and
+    make ``default`` (already parsed from ``.env``) unreachable.
+    """
+    from monkeylm.config.defaults import _pre_dotenv_env_keys
+
+    if name not in _pre_dotenv_env_keys():
+        return default
     value = os.getenv(name)
     if value is None:
         return default
@@ -291,6 +303,8 @@ def load_settings(cli_args: Optional[argparse.Namespace] = None) -> Settings:
 
     if s.max_steps_per_worker > s.max_steps:
         s.max_steps_per_worker = s.max_steps
+
+    if cli_args is not None:
         if getattr(cli_args, "worker_navigation_retries", None) is not None:
             s.worker_navigation_retries = max(0, int(cli_args.worker_navigation_retries))
         if getattr(cli_args, "worker_qdrant_init_retries", None) is not None:

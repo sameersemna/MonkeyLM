@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -42,6 +43,9 @@ def _optional_import(module_name: str, attr_name: Optional[str] = None):
         return None
 
 
+_PRE_DOTENV_ENV_KEYS: "frozenset[str]" = frozenset()
+
+
 def _load_dotenv() -> None:
     dotenv = _optional_import("dotenv")
     if dotenv is None:
@@ -49,9 +53,28 @@ def _load_dotenv() -> None:
     try:
         env_path = PROJECT_ROOT / ".env"
         if env_path.is_file():
+            _pre_dotenv_env_keys_update()
             dotenv.load_dotenv(env_path, override=False)
     except Exception:
         pass
+
+
+def _pre_dotenv_env_keys_update() -> None:
+    """Record the environment keys a real shell exported before ``.env`` load."""
+    global _PRE_DOTENV_ENV_KEYS
+    _PRE_DOTENV_ENV_KEYS = frozenset(os.environ)
+
+
+def _pre_dotenv_env_keys() -> frozenset:
+    """Keys that were already exported by the real shell before ``.env`` load.
+
+    ``load_dotenv`` copies every ``.env`` entry into :data:`os.environ`, which
+    makes an ``.env`` value indistinguishable from a genuine shell export to
+    any later ``os.getenv`` call. Settings resolution needs the distinction to
+    keep the documented precedence (CLI > shell > ``.env`` > default), so the
+    pre-load key set is captured before the copy happens.
+    """
+    return _PRE_DOTENV_ENV_KEYS
 
 
 _load_dotenv()
