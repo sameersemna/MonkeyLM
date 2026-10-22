@@ -27,7 +27,6 @@ from monkeylm.models.openai_client import (
     extract_content,
     prepare_image_for_vlm,
 )
-from monkeylm.models.vision.verdict import parse_verdict
 
 
 DEFAULT_VERIFIER_CONFIDENCE_THRESHOLD = 0.7
@@ -87,6 +86,14 @@ async def run_verification(
         f"<<<VERIFY_END>>>"
     )
     messages = [build_vision_message_bytes(user_text, image_bytes, mime_type=mime)]
+    # Reasoning vision LLMs need headroom above the terse JSON answer; a
+    # small ceiling truncates to ``finish_reason="length"`` with empty
+    # content and the verifier silently degrades to "uncertain".
+    try:
+        max_tokens = int(getattr(settings, "vision_verifier_max_tokens", 2048))
+    except (TypeError, ValueError):
+        max_tokens = 2048
+    max_tokens = max(256, max_tokens)
     try:
         response = await asyncio.wait_for(
             asyncio.to_thread(
@@ -97,7 +104,7 @@ async def run_verification(
                 timeout_seconds=budget,
                 json_mode=True,
                 temperature=0.0,
-                max_tokens=256,
+                max_tokens=max_tokens,
             ),
             timeout=budget,
         )
@@ -111,7 +118,7 @@ async def run_verification(
         return None
     if not isinstance(content, str) or not content:
         return None
-    parsed = parse_verdict(content) if False else None  # legacy fallback if needed
+    parsed = None
     # Lightweight verifier-specific parse: keep it small and tolerant.
     answer = "uncertain"
     confidence = 0.0

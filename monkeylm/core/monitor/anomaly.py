@@ -19,6 +19,9 @@ def _dedupe_batch(anomalies: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             anomaly.get("action"),
             anomaly.get("url"),
             message[:200],
+            anomaly.get("status"),
+            anomaly.get("method"),
+            anomaly.get("resource_type"),
         )
         if key not in deduped:
             merged = dict(anomaly)
@@ -48,10 +51,42 @@ def _dedupe_batch(anomalies: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return result
 
 
+def _network_detail(anomaly: Dict[str, Any]) -> str:
+    """Render the actionable part of a network anomaly.
+
+    Network anomalies have no human-readable ``message``; the operator needs
+    the URL, the HTTP status, and the method. Rendering them into ``message``
+    keeps one summary format for every anomaly type instead of printing an
+    empty ``message=`` for exactly the anomalies that matter most.
+    """
+    url = str(anomaly.get("url") or "")
+    status = anomaly.get("status")
+    method = str(anomaly.get("method") or "")
+    resource_type = str(anomaly.get("resource_type") or "")
+    if not url and status is None:
+        return ""
+    bits = []
+    if status is not None:
+        bits.append(f"status={status}")
+    if method:
+        bits.append(f"method={method}")
+    if resource_type:
+        bits.append(f"type={resource_type}")
+    suffix = " ".join(bits)
+    return f"{suffix} url={url}" if suffix else f"url={url}"
+
+
 def format_anomaly_summary(anomalies: List[Dict[str, Any]], limit: int = 5) -> str:
     parts: List[str] = []
     for anomaly in anomalies[:limit]:
-        message = str(anomaly.get("message") or anomaly.get("failure_reason") or "")
+        # Prefer the structured network rendering over a terse failure_reason:
+        # it carries method, status, and resource type, which is what an
+        # operator needs to act on a 5xx.
+        message = str(anomaly.get("message") or "")
+        if not message:
+            message = _network_detail(anomaly)
+        if not message:
+            message = str(anomaly.get("failure_reason") or "")
         count = int(anomaly.get("occurrences", anomaly.get("occurrence_count", 1)) or 1)
         count_part = f" occurrences={count}" if count > 1 else ""
         parts.append(
@@ -59,7 +94,7 @@ def format_anomaly_summary(anomalies: List[Dict[str, Any]], limit: int = 5) -> s
             f"action={anomaly.get('action', '?')} "
             f"type={anomaly.get('type', '?')}"
             f"{count_part} "
-            f"message={message[:120]}"
+            f"message={message[:200]}"
         )
     if len(anomalies) > limit:
         parts.append(f"+{len(anomalies) - limit} more")
@@ -155,28 +190,81 @@ class BrowserAnomalySensor:
         if self._network_installed:
             return
         try:
+            def _record(entry: Dict[str, Any]) -> None:
+                self._anomalies.append(entry)
+
             def _on_response(response) -> None:
                 try:
                     status = response.status
-                    if status >= 400:
-                        request = response.request
-                        resource_type = request.resource_type
-                        url = sanitize_for_storage(request.url, max_len=2048)
-                        method = request.method
-                        if resource_type in ("xhr", "fetch") or "/api/" in url.lower():
-                            self._anomalies.append({
-                                "step": self._current_step,
-                                "action": self._current_action,
-                                "type": f"network-{status // 100}xx-fetch",
-                                "severity": "error" if status >= 500 else "warning",
-                                "url": url,
-                                "method": sanitize_for_storage(str(method), max_len=64),
-                                "status": status,
-                                "resource_type": sanitize_for_storage(str(resource_type), max_len=64),
-                            })
+                    if status < 400:
+                        return
+                    request = response.request
+                    resource_type = request.resource_type
+                    url = sanitize_for_storage(request.url, max_len=2048)
+                    method = request.method
+                    if resource_type not in ("xhr", "fetch") and "/api/" not in url.lower():
+                        return
+                    # Framework route prefetch (Next.js ``?_rsc=``) answers 5xx
+                    # routinely during client navigation and is not an
+                    # application defect.  Report it under its own type at
+                    # warning severity so a genuine API failure is not buried
+                    # under prefetch noise.
+                    is_prefetch = "_rsc=" in url.lower()
+                    entry = {
+                        "step": self._current_step,
+                        "action": self._current_action,
+                        "type": (
+                            f"network-{status // 100}xx-prefetch"
+                            if is_prefetch
+                            else f"network-{status // 100}xx-fetch"
+                        ),
+                        "severity": (
+                            "warning"
+                            if (is_prefetch or status < 500)
+                            else "error"
+                        ),
+                        "url": url,
+                        "method": sanitize_for_storage(str(method), max_len=64),
+                        "status": status,
+                        "resource_type": sanitize_for_storage(str(resource_type), max_len=64),
+                        "failure_reason": f"HTTP {status} on {method} {url}",
+                    }
+                    if is_prefetch:
+                        entry["prefetch"] = True
+                    _record(entry)
                 except Exception:
                     pass
+
+            def _on_request_failed(request) -> None:
+                # Transport-level failures (DNS, TLS, connection reset,
+                # aborted preflight) never produce a ``response`` event, so
+                # without this handler they vanish silently.
+                try:
+                    resource_type = request.resource_type
+                    url = sanitize_for_storage(request.url, max_len=2048)
+                    failure = request.failure or ""
+                    text = str(failure)
+                    if resource_type not in ("xhr", "fetch", "document") and "/api/" not in url.lower():
+                        return
+                    _record({
+                        "step": self._current_step,
+                        "action": self._current_action,
+                        "type": "network-request-failed",
+                        "severity": "error",
+                        "url": url,
+                        "method": sanitize_for_storage(str(request.method), max_len=64),
+                        "status": None,
+                        "resource_type": sanitize_for_storage(str(resource_type), max_len=64),
+                        "failure_reason": sanitize_for_storage(
+                            f"{request.method} {url} failed: {text or 'unknown transport error'}",
+                            max_len=512,
+                        ),
+                    })
+                except Exception:
+                    pass
+
             page.on("response", _on_response)
+            page.on("requestfailed", _on_request_failed)
         except Exception:
             pass
 

@@ -423,6 +423,8 @@ async def annotate_relevant_screenshot(
     removed_element: Optional[str] = None,
     overlay_image_path: Optional[str] = None,
     confidence_threshold: float = 0.7,
+    max_attempts: int = 1,
+    on_retry: Optional[Any] = None,
 ) -> Tuple[str, Optional[str], Dict[str, Any]]:
     """Call the configured vision model and draw the returned bounding box.
 
@@ -520,21 +522,68 @@ async def annotate_relevant_screenshot(
         image_bytes, width, height, mime = prepare_image_for_vlm(send_path)
         if image_bytes:
             messages = [build_vision_message_bytes(prompt_text, image_bytes, mime_type=mime)]
+            # Reasoning vision LLMs emit hidden reasoning before the JSON
+            # body, so a small ceiling truncates the reply to
+            # ``finish_reason="length"`` with empty content and silently
+            # drops every mark.  Budget from settings, not a literal.
             try:
-                response = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        chat_completion,
-                        settings,
-                        model=active_model,
-                        messages=messages,
-                        timeout_seconds=timeout_seconds,
-                        json_mode=True,
-                        temperature=0.0,
-                        max_tokens=512,
-                    ),
-                    timeout=timeout_seconds,
-                )
+                max_tokens = int(getattr(settings, "vision_annotation_max_tokens", 2048))
+            except (TypeError, ValueError):
+                max_tokens = 2048
+            max_tokens = max(256, max_tokens)
+            response = None
+            attempts = max(1, int(max_attempts))
+            last_error: Optional[BaseException] = None
+            for attempt in range(1, attempts + 1):
+                try:
+                    response = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            chat_completion,
+                            settings,
+                            model=active_model,
+                            messages=messages,
+                            timeout_seconds=timeout_seconds,
+                            json_mode=True,
+                            temperature=0.0,
+                            max_tokens=max_tokens,
+                        ),
+                        timeout=timeout_seconds,
+                    )
+                    break
+                except (asyncio.TimeoutError, Exception) as attempt_exc:
+                    last_error = attempt_exc
+                    if attempt < attempts:
+                        config._local_service_log(
+                            f"Vision model {active_model} attempt {attempt}/{attempts} "
+                            f"failed for {image_path} ({type(attempt_exc).__name__}: "
+                            f"{attempt_exc}); retrying once.",
+                            os.path.dirname(output_path) or ".",
+                        )
+                        if on_retry is not None:
+                            try:
+                                on_retry(attempt, attempts, attempt_exc)
+                            except Exception:
+                                pass
+            if response is None and last_error is not None:
+                raise last_error
+            try:
                 content = extract_content(response) if response else ""
+                # A truncated reply is not a legitimate "no defect" answer:
+                # surface it instead of silently shipping an unmarked copy.
+                finish_reason = ""
+                try:
+                    finish_reason = str(response["choices"][0].get("finish_reason") or "")
+                except Exception:
+                    finish_reason = ""
+                if finish_reason == "length" and not content.strip():
+                    config._local_service_log(
+                        f"Vision model {active_model} hit the {max_tokens}-token "
+                        f"ceiling (finish_reason='length') and returned no JSON "
+                        f"for {image_path}; no annotation will be drawn. Raise "
+                        f"VISION_ANNOTATION_MAX_TOKENS or lower "
+                        f"VISION_ANNOTATION_TIMEOUT_SECONDS pressure on the model.",
+                        os.path.dirname(output_path) or ".",
+                    )
             except asyncio.TimeoutError:
                 config._local_service_log(
                     f"Vision model {active_model} timed out at {timeout_seconds}s for {image_path}",

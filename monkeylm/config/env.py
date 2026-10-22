@@ -191,10 +191,21 @@ def load_settings(cli_args: Optional[argparse.Namespace] = None) -> Settings:
     s.retry_base_delay_seconds = max(0.1, float(raw_rbd) if raw_rbd is not None else s.retry_base_delay_seconds)
     raw_step_timeout = env_vars.get("STEP_TIMEOUT_SECONDS")
     s.step_timeout_seconds = max(1.0, float(raw_step_timeout) if raw_step_timeout is not None else s.step_timeout_seconds)
+    raw_max_cst = env_vars.get("MAX_CONSECUTIVE_STEP_TIMEOUTS")
+    s.max_consecutive_step_timeouts = max(1, int(raw_max_cst) if raw_max_cst is not None else s.max_consecutive_step_timeouts)
     raw_stuck_threshold = env_vars.get("STUCK_STATE_THRESHOLD")
     s.stuck_state_threshold = max(2, int(raw_stuck_threshold) if raw_stuck_threshold is not None else s.stuck_state_threshold)
     ev_headless = env_vars.get("HEADLESS")
     s.headless = _env_bool("HEADLESS", default=_env_to_bool(ev_headless, s.headless))
+    # Record which layer supplied HEADLESS so launch-time diagnostics can
+    # explain *why* headless is on/off instead of leaving operators to guess.
+    from monkeylm.config.defaults import _pre_dotenv_env_keys
+    if "HEADLESS" in _pre_dotenv_env_keys():
+        s._headless_source = "shell"
+    elif ev_headless is not None:
+        s._headless_source = "dotenv"
+    else:
+        s._headless_source = "default"
     raw_bws = env_vars.get("BROWSER_WINDOW_SIZE") or os.getenv("BROWSER_WINDOW_SIZE") or s.browser_window_size
     s.browser_window_size = _normalize_window_size(raw_bws)
     ev_nv = env_vars.get("NO_VIEWPORT")
@@ -243,6 +254,12 @@ def load_settings(cli_args: Optional[argparse.Namespace] = None) -> Settings:
     s.pdf_vision_timeout_seconds = max(1.0, float(ev_pvt) if ev_pvt is not None else s.pdf_vision_timeout_seconds)
     ev_vat = env_vars.get("VISION_ANNOTATION_TIMEOUT_SECONDS")
     s.vision_annotation_timeout_seconds = max(2.0, float(ev_vat) if ev_vat is not None else s.vision_annotation_timeout_seconds)
+    ev_vamt = env_vars.get("VISION_ANNOTATION_MAX_TOKENS")
+    s.vision_annotation_max_tokens = max(256, int(ev_vamt) if ev_vamt is not None else s.vision_annotation_max_tokens)
+    ev_vama = env_vars.get("VISION_ANNOTATION_MAX_ATTEMPTS")
+    s.vision_annotation_max_attempts = max(1, min(3, int(ev_vama) if ev_vama is not None else s.vision_annotation_max_attempts))
+    ev_vvmt = env_vars.get("VISION_VERIFIER_MAX_TOKENS")
+    s.vision_verifier_max_tokens = max(256, int(ev_vvmt) if ev_vvmt is not None else s.vision_verifier_max_tokens)
     s.strict_sandbox = _env_bool("STRICT_SANDBOX", default=_env_to_bool(env_vars.get("STRICT_SANDBOX"), s.strict_sandbox))
     s.allow_no_sandbox_fallback = _env_bool("ALLOW_NO_SANDBOX_FALLBACK", default=_env_to_bool(env_vars.get("ALLOW_NO_SANDBOX_FALLBACK"), s.allow_no_sandbox_fallback))
     ev_cv = env_vars.get("CV_ANALYSIS_ENABLED")
@@ -319,6 +336,7 @@ def load_settings(cli_args: Optional[argparse.Namespace] = None) -> Settings:
             s.stuck_state_threshold = max(2, int(cli_args.stuck_state_threshold))
         if getattr(cli_args, "headless", None) is not None:
             s.headless = bool(cli_args.headless)
+            s._headless_source = "cli"
         if getattr(cli_args, "window_size", None):
             s.browser_window_size = _normalize_window_size(
                 cli_args.window_size, fallback=s.browser_window_size

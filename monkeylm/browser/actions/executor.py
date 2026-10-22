@@ -17,6 +17,7 @@ from monkeylm.config import (
     _local_service_log,
 )
 from monkeylm.core.monitor import sanitize_for_storage
+from monkeylm.core.worker.budget import StepBudget, resolve_stage_budget
 from monkeylm.form_filling import prepare_submit_form_payloads
 from monkeylm.browser.snapshot import (
     get_page_state,
@@ -68,6 +69,21 @@ def _repair_type_plan(
     return "scroll", "", {"rejected_from": target}
 
 
+async def _timed(budget: Optional[StepBudget], stage: str, awaitable: Any) -> Any:
+    """Await ``awaitable`` while recording its wall-clock cost under ``stage``.
+
+    Without a budget this is a transparent passthrough, so uncapped callers
+    (tests, one-off scripts) keep exactly the previous behavior.
+    """
+    if budget is None:
+        return await awaitable
+    budget.start_stage(stage)
+    try:
+        return await awaitable
+    finally:
+        budget.end_stage()
+
+
 async def execute_action(
     page: Page,
     settings: Any,
@@ -81,6 +97,7 @@ async def execute_action(
     persistence_engine: Any = None,
     worker_id: int = 0,
     validation_prober: Any = None,
+    step_budget: Optional[StepBudget] = None,
 ) -> Tuple[Optional[PageSnapshot], Dict[str, Any]]:
     from monkeylm.models import annotate_relevant_screenshot, _step_defects_summary
 
@@ -92,7 +109,7 @@ async def execute_action(
     if not isinstance(input_payloads, list):
         input_payloads = []
 
-    before_snapshot = await get_page_state(page, step_num, phase="before", output_dir=settings.output_dir)
+    before_snapshot = await _timed(step_budget, "before_snapshot", get_page_state(page, step_num, phase="before", output_dir=settings.output_dir))
     perf_before = await perf_monitor.snapshot(page)
 
     safe_page_url = sanitize_for_storage(page.url, max_len=1024)
@@ -146,39 +163,47 @@ async def execute_action(
     print(f"🤖 Step {step_num}: Executing {action} on '{target}'")
 
     try:
-        if action == "scroll":
-            await _action_scroll(page)
-        elif action == "back":
-            await _action_back(page, settings)
-        elif action == "restart_target":
-            await _action_restart_target(page, settings)
-        elif action == "random_jump":
-            await _action_random_jump(page)
-        elif action == "handle_modal":
-            await _action_handle_modal(page)
-        elif action == "press_key":
-            await _action_press_key(page, value or "Enter")
-        elif action == "submit_form":
-            await _action_submit_form(page, settings, target, input_payloads, action_strategy, step_num, before_snapshot, validation_prober, log_entry)
-        elif action == "click":
-            locator = await _locator_for_target_id(page, target)
-            if locator is not None:
-                interception = await detect_click_interception(page, locator, target)
-                if interception.get("is_blocked"):
-                    error_msg = f"overlay_blocked:{interception.get('reason', 'overlay_blocked')}"
-                    log_entry["status"] = "FAILED"
-                    log_entry["error"] = error_msg
-                    print(f"   -> 🔒 Click intercepted for {target}; stopping run instead of continuing against a blocked page")
-                    raise RuntimeError(error_msg)
-                await _action_click(page, target)
-            else:
+        if step_budget is not None:
+            step_budget.start_stage("action")
+        try:
+            if action == "scroll":
                 await _action_scroll(page)
-                log_entry["action"] = "scroll"
-                log_entry["target"] = ""
-                log_entry["status"] = "RECOVERED_MISSING_TARGET"
-                log_entry["error"] = None
-        elif action == "type":
-            await _action_type(page, settings, target, value, action_strategy, input_payloads, step_num, before_snapshot, fuzzer, defects, validation_prober, log_entry)
+            elif action == "back":
+                await _action_back(page, settings)
+            elif action == "restart_target":
+                await _action_restart_target(page, settings)
+            elif action == "random_jump":
+                await _action_random_jump(page)
+            elif action == "handle_modal":
+                await _action_handle_modal(page)
+            elif action == "press_key":
+                await _action_press_key(page, value or "Enter")
+            elif action == "submit_form":
+                await _action_submit_form(page, settings, target, input_payloads, action_strategy, step_num, before_snapshot, validation_prober, log_entry)
+            elif action == "click":
+                locator = await _locator_for_target_id(page, target)
+                if locator is not None:
+                    interception = await detect_click_interception(page, locator, target)
+                    if interception.get("is_blocked"):
+                        error_msg = f"overlay_blocked:{interception.get('reason', 'overlay_blocked')}"
+                        log_entry["status"] = "FAILED"
+                        log_entry["error"] = error_msg
+                        print(f"   -> 🔒 Click intercepted for {target}; stopping run instead of continuing against a blocked page")
+                        raise RuntimeError(error_msg)
+                    await _action_click(page, target)
+                else:
+                    await _action_scroll(page)
+                    log_entry["action"] = "scroll"
+                    log_entry["target"] = ""
+                    log_entry["status"] = "RECOVERED_MISSING_TARGET"
+                    log_entry["error"] = None
+            elif action == "type":
+                await _action_type(page, settings, target, value, action_strategy, input_payloads, step_num, before_snapshot, fuzzer, defects, validation_prober, log_entry)
+        finally:
+            # Close the action stage even when the action raises, so a failure
+            # artifact can attribute elapsed time to the stage that failed.
+            if step_budget is not None:
+                step_budget.end_stage()
 
         try:
             await page.wait_for_load_state("networkidle", timeout=5000)
@@ -186,7 +211,7 @@ async def execute_action(
             pass
         log_entry["url"] = sanitize_for_storage(page.url, max_len=1024)
 
-        after_snapshot = await get_page_state(page, step_num, phase="after", output_dir=settings.output_dir)
+        after_snapshot = await _timed(step_budget, "after_snapshot", get_page_state(page, step_num, phase="after", output_dir=settings.output_dir))
         perf_after = await perf_monitor.snapshot(page)
 
         if before_snapshot.is_empty_capture or after_snapshot.is_empty_capture:
@@ -446,59 +471,139 @@ async def execute_action(
                         log_entry["annotation_source"] = "cv"
                 else:
                     active_vision_model = settings.vision_model or settings.pdf_vision_model
-                    print(f"   └─ 📸 Annotating screenshot with {active_vision_model}...")
-                    # Phase 1 unblocker: respect the settings-driven budget
-                    # so callers (and the eval harness) can tune the wait
-                    # for fast-cancel tests.  The historical
-                    # ``min(2.0, …*0.02)`` cap that made every Gemini call
-                    # time out is gone.  Floor at 0.1s prevents zero/negative.
-                    timeout_seconds = max(
+                    configured_budget = max(
                         0.1,
                         float(getattr(settings, "vision_annotation_timeout_seconds", 20.0)),
                     )
-                    annotation_task = asyncio.create_task(
-                        annotate_relevant_screenshot(settings, original_path, context_issue, step_num=step_num)
-                    )
-                    try:
-                        annotation_result = await asyncio.wait_for(annotation_task, timeout=timeout_seconds)
-                        # Phase 2 (B5): 3-tuple now (path, description, verdict_dict)
-                        if isinstance(annotation_result, tuple) and len(annotation_result) == 3:
-                            annotated_path, description, verdict_dict = annotation_result
-                        else:
-                            annotated_path, description = annotation_result
-                            verdict_dict = {}
-                        if annotated_path != original_path:
-                            log_entry["screenshot"] = os.path.basename(annotated_path)
-                            log_entry["screenshot_annotated"] = True
-                            # ``annotation_source == "vision"`` when a real
-                            # bbox was drawn (B1 contract); ``"none"`` when
-                            # the call succeeded but parsing failed or the
-                            # B10 verifier rejected the candidate (Phase 2).
-                            log_entry["annotation_source"] = (
-                                "vision" if verdict_dict.get("box_2d")
-                                and verdict_dict["box_2d"] != [0.0, 0.0, 0.0, 0.0]
-                                else "none"
+                    # Clamp the annotation to what the step actually has left.
+                    # Without this the annotation's own TimeoutError handler
+                    # below is unreachable whenever the configured budget
+                    # exceeds the enclosing step timeout: the outer
+                    # ``_execute_step_with_timeout`` cap wins, cancels the
+                    # step mid-annotation, and tears the worker down even
+                    # though the action itself already succeeded.
+                    timeout_seconds = resolve_stage_budget(configured_budget, step_budget)
+                    if timeout_seconds <= 0.0:
+                        log_entry["annotation_source"] = "none"
+                        log_entry["annotation_error"] = "skipped_no_step_budget"
+                        _local_service_log(
+                            f"Annotation hook skipped at step {step_num}: the step "
+                            f"budget is exhausted (configured {configured_budget}s); "
+                            f"continuing without annotation.",
+                            settings.output_dir,
+                        )
+                        print("   └─ ⏭️ Skipping annotation: no step budget left.")
+                    else:
+                        if timeout_seconds < configured_budget:
+                            _local_service_log(
+                                f"Annotation budget clamped at step {step_num}: "
+                                f"{configured_budget}s -> {timeout_seconds}s to fit the "
+                                f"remaining step window.",
+                                settings.output_dir,
                             )
-                        else:
+                        print(
+                            f"   └─ 📸 Annotating screenshot with {active_vision_model} "
+                            f"(budget {timeout_seconds:.1f}s)..."
+                        )
+                        annotation_task = asyncio.create_task(
+                            annotate_relevant_screenshot(
+                                settings,
+                                original_path,
+                                context_issue,
+                                step_num=step_num,
+                                max_attempts=max(1, int(getattr(settings, "vision_annotation_max_attempts", 2))),
+                                on_retry=lambda attempt, total, exc: _local_service_log(
+                                    f"Annotation retry at step {step_num} "
+                                    f"({attempt}/{total}): {type(exc).__name__}",
+                                    settings.output_dir,
+                                ),
+                            )
+                        )
+                        if step_budget is not None:
+                            step_budget.start_stage("annotation")
+                        try:
+                            annotation_result = await asyncio.wait_for(annotation_task, timeout=timeout_seconds)
+                            # Phase 2 (B5): 3-tuple now (path, description, verdict_dict)
+                            if isinstance(annotation_result, tuple) and len(annotation_result) == 3:
+                                annotated_path, description, verdict_dict = annotation_result
+                            else:
+                                annotated_path, description = annotation_result
+                                verdict_dict = {}
+                            if annotated_path != original_path:
+                                log_entry["screenshot"] = os.path.basename(annotated_path)
+                                log_entry["screenshot_annotated"] = True
+                                # ``annotation_source == "vision"`` when a real
+                                # bbox was drawn (B1 contract); ``"none"`` when
+                                # the call succeeded but parsing failed or the
+                                # B10 verifier rejected the candidate (Phase 2).
+                                log_entry["annotation_source"] = (
+                                    "vision" if verdict_dict.get("box_2d")
+                                    and verdict_dict["box_2d"] != [0.0, 0.0, 0.0, 0.0]
+                                    else "none"
+                                )
+                            else:
+                                log_entry["annotation_source"] = "none"
+                            if description:
+                                log_entry["screenshot_description"] = description
+                            if verdict_dict:
+                                log_entry["screenshot_verdict"] = verdict_dict
+                        except asyncio.TimeoutError:
+                            annotation_task.cancel()
+                            with contextlib.suppress(asyncio.CancelledError):
+                                await annotation_task
                             log_entry["annotation_source"] = "none"
-                        if description:
-                            log_entry["screenshot_description"] = description
-                        if verdict_dict:
-                            log_entry["screenshot_verdict"] = verdict_dict
-                    except asyncio.TimeoutError:
-                        annotation_task.cancel()
-                        with contextlib.suppress(asyncio.CancelledError):
-                            await annotation_task
-                        log_entry["annotation_source"] = "none"
-                        _local_service_log(f"Annotation hook timed out at step {step_num} (budget {timeout_seconds}s); continuing without annotation.", settings.output_dir)
-                    except Exception as exc:
-                        annotation_task.cancel()
-                        with contextlib.suppress(asyncio.CancelledError):
-                            await annotation_task
-                        log_entry["annotation_source"] = "none"
-                        _local_service_log(f"Annotation hook failed at step {step_num}: {exc}", settings.output_dir)
+                            log_entry["annotation_error"] = "timeout"
+                            log_entry["annotation_budget_seconds"] = round(timeout_seconds, 3)
+                            _local_service_log(
+                                f"Annotation hook timed out at step {step_num} "
+                                f"(budget {timeout_seconds:.1f}s, model={active_vision_model}); "
+                                f"continuing without annotation. The step budget was "
+                                f"left intact so the run can proceed.",
+                                settings.output_dir,
+                            )
+                            print(
+                                f"   └─ ⏱️ Annotation timed out after {timeout_seconds:.1f}s "
+                                f"({active_vision_model}); continuing without annotation."
+                            )
+                        except Exception as exc:
+                            annotation_task.cancel()
+                            with contextlib.suppress(asyncio.CancelledError):
+                                await annotation_task
+                            log_entry["annotation_source"] = "none"
+                            log_entry["annotation_error"] = f"{type(exc).__name__}: {exc}"[:300]
+                            log_entry["annotation_budget_seconds"] = round(timeout_seconds, 3)
+                            _local_service_log(
+                                f"Annotation hook failed at step {step_num} "
+                                f"(model={active_vision_model}, budget={timeout_seconds:.1f}s): "
+                                f"{type(exc).__name__}: {exc}",
+                                settings.output_dir,
+                            )
+                            print(
+                                f"   └─ ⚠️ Annotation failed ({type(exc).__name__}); "
+                                f"continuing without annotation."
+                            )
             except Exception as exc:
                 _local_service_log(f"Annotation hook failed at step {step_num}: {exc}", settings.output_dir)
+
+    if step_budget is not None:
+        # The advisory annotation stage is not part of the step's "work" and
+        # must not be reported as the culprit when a later stage times out.
+        step_budget.stage_timings.pop("annotation", None)
+        log_entry["stage_timings"] = step_budget.to_dict()
+
+    try:
+        final_snapshot = await _timed(
+            step_budget,
+            "final_snapshot",
+            get_page_state(page, step_num, phase="final", output_dir=settings.output_dir),
+        )
+    except Exception:
+        final_snapshot = None
+
+    # Re-snapshot after the final capture so the returned entry accounts for
+    # every stage that ran.
+    if step_budget is not None:
+        log_entry["stage_timings"] = step_budget.to_dict()
 
     if log_sink is None:
         from monkeylm.core import test_logs
@@ -506,10 +611,7 @@ async def execute_action(
     else:
         log_sink.append(log_entry)
 
-    try:
-        return await get_page_state(page, step_num, phase="final", output_dir=settings.output_dir), log_entry
-    except Exception:
-        return None, log_entry
+    return final_snapshot, log_entry
 
 
 def _compute_action_path_hash(domain: str, route: str, action: str, target: str) -> str:

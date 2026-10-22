@@ -70,11 +70,27 @@ class Settings:
     pdf_vision_timeout_seconds: float = 30.0
     # Real per-step budget for the runtime vision-LLM annotation call.
     # Decoupled from ``pdf_vision_timeout_seconds`` (which the report PDF
-    # generator treats as a hard budget).  Default 20s is enough for a
-    # ``gemini-3-flash-preview`` single-image call without making the step
-    # hang; raise ``VISION_ANNOTATION_TIMEOUT_SECONDS`` in ``.env`` for
-    # larger local models.
-    vision_annotation_timeout_seconds: float = 20.0
+    # generator treats as a hard budget).  The default is sized for
+    # reasoning vision LLMs, which spend 15-45s on a single image before
+    # emitting JSON; a 20s budget timed them out and silently dropped every
+    # mark.  Lower it for fast non-reasoning models, raise it for large
+    # local ones.
+    vision_annotation_timeout_seconds: float = 60.0
+    # Token ceiling for the annotation call.  Reasoning vision LLMs (e.g.
+    # nemotron-VL, Qwen3-VL ``-thinking``) spend part of their budget on
+    # hidden reasoning before emitting the JSON body, so a small ceiling
+    # truncates the reply into ``finish_reason="length"`` with *empty*
+    # content and silently drops every annotation.  2048 leaves headroom
+    # for that reasoning while still bounding the call.
+    vision_annotation_max_tokens: int = 2048
+    # Bounded retries for the annotation call. Retrying helps against
+    # transient gateway errors that fail fast (connection reset, 5xx on an
+    # upstream hop); it cannot help against a gateway that hangs, so the
+    # overall annotation budget is still capped independently.
+    vision_annotation_max_attempts: int = 2
+    # Same reasoning-buffer consideration for the B10 second-pass verifier,
+    # which asks a narrower question and so needs fewer tokens.
+    vision_verifier_max_tokens: int = 2048
 
     max_steps: int = 10
     workers: int = 1
@@ -84,9 +100,19 @@ class Settings:
     worker_boundary_recovery_retries: int = 1
     retry_base_delay_seconds: float = 0.75
     step_timeout_seconds: float = 30.0
+    # How many step timeouts in a row are tolerated before the worker stops.
+    # A single slow step is recoverable (the harness reloads the page and
+    # moves on), but a worker that times out on every step is stuck and must
+    # terminate with a structured explanation instead of burning the run.
+    max_consecutive_step_timeouts: int = 3
     stuck_state_threshold: int = 6
 
     headless: bool = True
+    # Which configuration layer supplied ``headless`` ("cli" / "shell" /
+    # "dotenv" / "default").  Purely diagnostic: launch-time logging reports
+    # it so an operator can tell *why* the mode is what it is instead of
+    # guessing between a stale flag and ``.env``.
+    _headless_source: str = field(default="default", repr=False)
     browser_window_size: str = "1920,1080"
     no_viewport: bool = True
     strict_sandbox: bool = False

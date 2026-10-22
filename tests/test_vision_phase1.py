@@ -400,4 +400,4 @@ def test_settings_expose_cv_skip_composite_defaults():
 
 def test_settings_expose_vision_annotation_timeout():
     settings = Settings()
-    assert settings.vision_annotation_timeout_seconds == 20.0
+    assert settings.vision_annotation_timeout_seconds == 60.0

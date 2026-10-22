@@ -5,11 +5,29 @@ Target: https://noblequran-85hu2yge.manus.space
 """
 
 import asyncio
+import argparse
 import json
 import time
 from datetime import datetime
 from pathlib import Path
 from playwright.async_api import async_playwright
+
+
+def _resolve_headless():
+    """Resolve headless mode from MonkeyLM's standard configuration chain.
+
+    Prefers the repository ``.env`` (``HEADLESS=true``) and the shell
+    environment over a hardcoded literal, so the script honors the same
+    setting as ``python -m monkeylm``.
+    """
+    try:
+        from monkeylm.config import load_settings
+
+        return bool(load_settings().headless)
+    except Exception as exc:
+        print(f"⚠️  Could not load MonkeyLM settings ({exc}); defaulting to headless=True")
+        return True
+
 
 TARGET_URL = "https://noblequran-85hu2yge.manus.space"
 DASHBOARD_URL = "https://noblequran-85hu2yge.manus.space/dashboard"
@@ -499,16 +517,26 @@ The autonomous destructive testing session completed successfully. All identifie
     
     return md_path
 
-async def main():
-    """Main testing entry point."""
+async def main(headless=None):
+    """Main testing entry point.
+
+    ``headless`` mirrors the main MonkeyLM CLI: when omitted it resolves from
+    the standard configuration chain (``--headless``/``--headed`` > shell env >
+    ``.env`` > default), so this script no longer forces a visible window and
+    overrides ``HEADLESS=true`` in ``.env``.
+    """
     print("=" * 60)
     print("DESTRUCTIVE WEB APPLICATION TESTING")
     print(f"Target: {TARGET_URL}")
     print("=" * 60)
-    
+
+    if headless is None:
+        headless = _resolve_headless()
+    print(f"   └─ 🖥️  headless={bool(headless)}")
+
     async with async_playwright() as p:
         browser = await p.chromium.launch(
-            headless=False,
+            headless=bool(headless),
             args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
         )
         
@@ -571,4 +599,10 @@ async def main():
     print("=" * 60)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    _parser = argparse.ArgumentParser(description="Destructive web application testing")
+    _hl = _parser.add_mutually_exclusive_group()
+    _hl.add_argument("--headless", dest="headless", action="store_true", help="Run in headless mode")
+    _hl.add_argument("--headed", dest="headless", action="store_false", help="Run with a visible UI")
+    _parser.set_defaults(headless=None)
+    _args = _parser.parse_args()
+    asyncio.run(main(_args.headless))

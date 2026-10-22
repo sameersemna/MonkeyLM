@@ -170,6 +170,25 @@ async def launch_context_with_fallback(
     sandbox_args = list(base_args)
     no_sandbox_args = base_args + ["--no-sandbox", "--disable-setuid-sandbox"]
 
+    # Diagnostic: headless resolution is the single most misdiagnosed setting
+    # (a stale ``--headed``, a shell export, or a script that hardcodes the
+    # flag can each silently override it).  Log the resolved value and its
+    # source on every launch so the effective mode is always visible.
+    headless_value = bool(getattr(settings, "headless", False))
+    headless_source = (
+        "cli(--headless/--headed)"
+        if getattr(settings, "_headless_source", "") == "cli"
+        else (
+            "shell-env"
+            if getattr(settings, "_headless_source", "") == "shell"
+            else ".env/default"
+        )
+    )
+    print(
+        f"   └─ 🖥️  headless={headless_value} (source={headless_source})"
+        f" window={window_size} no_viewport={bool(getattr(settings, 'no_viewport', True))}"
+    )
+
     try:
         context = await playwright_instance.chromium.launch_persistent_context(
             user_data_dir=user_data_dir,

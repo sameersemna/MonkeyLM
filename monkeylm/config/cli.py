@@ -3,9 +3,24 @@
 from __future__ import annotations
 
 import argparse
+from typing import Optional
+
+# Namespace captured by the most recent :func:`parse_cli_args` call.  Runtime
+# helpers that build their own ``Settings`` (the DI factories, for example)
+# would otherwise call ``load_settings()`` with no arguments and silently
+# drop every CLI flag — including ``--headless``/``--headed``, which made the
+# DI browser provider ignore the operator's explicit choice.  They can now
+# recover the namespace the entry point already parsed.
+_LAST_CLI_ARGS: "Optional[argparse.Namespace]" = None
+
+
+def last_parsed_cli_args() -> Optional[argparse.Namespace]:
+    """Return the namespace from the last :func:`parse_cli_args` call."""
+    return _LAST_CLI_ARGS
 
 
 def parse_cli_args() -> argparse.Namespace:
+    global _LAST_CLI_ARGS
     parser = argparse.ArgumentParser(description="Advanced monkey testing agent")
     parser.add_argument("--target-url", help="Target URL to test")
     parser.add_argument("--target-username", help="Username to use when the target site requires sign-in")
@@ -210,7 +225,8 @@ def parse_cli_args() -> argparse.Namespace:
     )
     parser.set_defaults(strict_persistence=None)
 
-    return parser.parse_args()
+    _LAST_CLI_ARGS = parser.parse_args()
+    return _LAST_CLI_ARGS
 
 
-__all__ = ["parse_cli_args"]
+__all__ = ["parse_cli_args", "last_parsed_cli_args"]

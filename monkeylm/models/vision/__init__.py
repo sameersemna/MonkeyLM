@@ -43,6 +43,7 @@ from .overlays import (
     regions_to_som,
     som_prompt_intro,
 )
+from .callouts import render_callouts
 from .context import defect_context
 from .verifier import (
     DEFAULT_VERIFIER_CONFIDENCE_THRESHOLD,
@@ -77,6 +78,8 @@ __all__ = [
     "render_numbered_overlay",
     "regions_to_som",
     "som_prompt_intro",
+    # Multi-region numbered callouts.
+    "render_callouts",
     # B3 CV evidence normalizer.
     "defect_context",
     # B10 second-pass verifier.

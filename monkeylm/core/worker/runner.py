@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import json
+import time
 from datetime import datetime
 from typing import Any, Dict, List, Tuple
 
@@ -30,6 +31,7 @@ from monkeylm.core.monitor.anomaly import format_anomaly_summary
 from monkeylm.types import WorkerRunResult
 
 from .helpers import build_worker_user_data_dir, with_retry_backoff
+from .budget import StepBudget
 from .guard import FailedPlanGuard, build_plan_signature
 from monkeylm.browser.actions.interaction import collect_failure_context, recover_nonresponsive_state
 from monkeylm.browser.snapshot.cv import capture_chrome_templates, phash_hamming, verify_chrome_templates, visual_phash
@@ -222,6 +224,13 @@ async def run_worker(
     failure_context: Dict[str, Any] | None = None
     discovery_strategy: Any | None = scenario_strategy
 
+    # A single slow step must not end the run: advisory stages (vision
+    # annotation in particular) can exceed the step window on a flaky gateway.
+    # Consecutive timeouts are tolerated up to this many in a row, after which
+    # the worker stops with a structured explanation instead of looping.
+    consecutive_step_timeouts = 0
+    max_consecutive_step_timeouts = max(1, int(getattr(settings, "max_consecutive_step_timeouts", 3)))
+
     loop_detection_state: Dict[str, Any] = {"blacklist": {}, "loop_count": 0}
     failed_plan_guard = FailedPlanGuard()
     worker_data_dir = build_worker_user_data_dir(settings, worker_id)
@@ -379,6 +388,7 @@ async def run_worker(
 
             worker_anomaly_sensor.set_action_context(step, f"{plan.get('action', '?')}:{plan.get('target', '')}")
 
+            step_budget = StepBudget(deadline=time.monotonic() + settings.step_timeout_seconds)
             try:
                 _, log_entry = await _execute_step_with_timeout(
                     execute_action(
@@ -394,11 +404,21 @@ async def run_worker(
                         persistence_engine=persistence_engine,
                         worker_id=worker_id,
                         validation_prober=worker_validation_prober,
+                        step_budget=step_budget,
                     ),
                     timeout_seconds=settings.step_timeout_seconds,
                 )
+                consecutive_step_timeouts = 0
             except asyncio.TimeoutError as timeout_exc:
-                failure_reason = "step_timeout"
+                # Name the stage that consumed the budget. Without this the
+                # artifact only says "step_timeout", which cannot distinguish a
+                # hung page from a hung advisory stage such as the vision
+                # annotation call.
+                stalled_stage = step_budget.current_stage()
+                stage_timings = step_budget.to_dict()
+                consecutive_step_timeouts += 1
+                recoverable = consecutive_step_timeouts <= max_consecutive_step_timeouts
+                failure_reason = "step_timeout" if not recoverable else None
                 failure_context = await collect_failure_context(
                     page,
                     step=step,
@@ -411,8 +431,15 @@ async def run_worker(
                     "timeout_seconds": settings.step_timeout_seconds,
                     "failure_source": "harness",
                     "failure_category": "step_timeout",
+                    "stalled_stage": stalled_stage or "unknown",
+                    "stage_timings": stage_timings,
+                    "consecutive_timeouts": consecutive_step_timeouts,
+                    "max_consecutive_timeouts": max_consecutive_step_timeouts,
+                    "recoverable": recoverable,
                 })
-                print(f"⏰ {worker_label} step {step} timed out after {settings.step_timeout_seconds}s; stopping run.")
+                stage_detail = (
+                    f" (stalled stage: {stalled_stage})" if stalled_stage else ""
+                )
                 await page.screenshot(path=os.path.join(settings.output_dir, f"timeout_step_{step}.png"))
                 failure_artifact = os.path.basename(write_failure_debug_artifact(
                     settings,
@@ -427,15 +454,61 @@ async def run_worker(
                     failure_context["recovery"] = recovery
                 except Exception:
                     pass
+                recovery_summary = json.dumps(failure_context.get("recovery", {}), sort_keys=True)[:2000]
                 worker_defects.add("console_findings", {
                     "step": step,
                     "type": "step-timeout",
                     "failure_reason": "step_timeout",
+                    "severity": "error" if not recoverable else "warning",
                     "url": sanitize_for_storage(page.url, max_len=2048),
                     "selector": sanitize_for_storage(plan.get("target", "") or "(none)", max_len=256),
-                    "remediation_advice": "Increase the step timeout or investigate a frozen or blocked target page.",
-                    "recovery": sanitize_for_storage(json.dumps(failure_context.get("recovery", {}), sort_keys=True)[:2000], max_len=2000),
+                    "message": sanitize_for_storage(
+                        f"Step {step} exceeded {settings.step_timeout_seconds}s"
+                        f"{stage_detail}. Stage timings: "
+                        f"{json.dumps(stage_timings.get('timings', {}), sort_keys=True)}.",
+                        max_len=512,
+                    ),
+                    "stalled_stage": stalled_stage or "unknown",
+                    "stage_timings": sanitize_for_storage(json.dumps(stage_timings, sort_keys=True)[:2000], max_len=2000),
+                    "consecutive_timeouts": consecutive_step_timeouts,
+                    "remediation_advice": (
+                        "Inspect stalled_stage in the failure artifact: an advisory stage "
+                        "(e.g. vision annotation) that exceeds the step budget should be "
+                        "bounded via VISION_ANNOTATION_TIMEOUT_SECONDS; a frozen page "
+                        "should be investigated directly."
+                        if stalled_stage in {"annotation", "unknown", ""}
+                        else "Investigate the stalled stage in the failure artifact."
+                    ),
+                    "recovery": sanitize_for_storage(recovery_summary, max_len=2000),
                 })
+                if recoverable:
+                    print(
+                        f"⏰ {worker_label} step {step} timed out after "
+                        f"{settings.step_timeout_seconds}s{stage_detail}; recovering and "
+                        f"continuing ({consecutive_step_timeouts}/"
+                        f"{max_consecutive_step_timeouts} consecutive timeouts)."
+                    )
+                    print(
+                        f"   └─ 🩹 recovery={recovery_summary[:200]}"
+                    )
+                    # Mark the action so the next state does not replay it and
+                    # the guard does not hammer the same unresponsive target.
+                    worker_defects.add("capture_diagnostics", {
+                        "step": step,
+                        "type": "step-timeout-recovered",
+                        "url": sanitize_for_storage(page.url, max_len=1024),
+                        "message": (
+                            f"Step {step} timed out{stage_detail}; worker recovered and "
+                            f"continued."
+                        ),
+                    })
+                    continue
+                print(
+                    f"⏰ {worker_label} step {step} timed out after "
+                    f"{settings.step_timeout_seconds}s{stage_detail}; "
+                    f"{consecutive_step_timeouts} consecutive timeouts reached the limit "
+                    f"of {max_consecutive_step_timeouts}; stopping run."
+                )
                 break
             except Exception as exc:
                 runtime_failure = classify_runtime_failure(exc)

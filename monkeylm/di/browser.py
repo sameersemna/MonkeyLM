@@ -39,7 +39,12 @@ def create_browser_provider(settings: Optional[Settings] = None) -> IBrowserProv
     from playwright.async_api import async_playwright, BrowserContext, Page, Playwright
 
     if settings is None:
-        settings = load_settings()
+        # Reuse the namespace the entry point already parsed so
+        # --headless/--headed are not silently dropped here; fall back to
+        # the .env / shell / default chain when this runs standalone.
+        from monkeylm.config.cli import last_parsed_cli_args
+
+        settings = load_settings(last_parsed_cli_args())
 
     class BrowserProviderAdapter:
         """Adapter that wraps browser.py functions to implement IBrowserProvider."""
