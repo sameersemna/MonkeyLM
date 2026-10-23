@@ -7,7 +7,12 @@ whichever side happened to be imported first. The budget helpers are safe to
 expose directly; ``run_worker`` is resolved lazily through ``__getattr__``.
 """
 
-from monkeylm.core.worker.budget import StepBudget, resolve_stage_budget
+from monkeylm.core.worker.budget import (
+    StepBudget,
+    resolve_stage_budget,
+    step_window_seconds,
+    vision_annotation_allowance,
+)
 from monkeylm.core.worker.helpers import (
     build_worker_user_data_dir,
     with_retry_backoff,
@@ -17,6 +22,8 @@ from monkeylm.core.worker.helpers import (
 __all__ = [
     "StepBudget",
     "resolve_stage_budget",
+    "step_window_seconds",
+    "vision_annotation_allowance",
     "build_worker_user_data_dir",
     "with_retry_backoff",
     "allocate_worker_steps",

@@ -31,7 +31,7 @@ from monkeylm.core.monitor.anomaly import format_anomaly_summary
 from monkeylm.types import WorkerRunResult
 
 from .helpers import build_worker_user_data_dir, with_retry_backoff
-from .budget import StepBudget
+from .budget import StepBudget, step_window_seconds
 from .guard import FailedPlanGuard, build_plan_signature
 from monkeylm.browser.actions.interaction import collect_failure_context, recover_nonresponsive_state
 from monkeylm.browser.snapshot.cv import capture_chrome_templates, phash_hamming, verify_chrome_templates, visual_phash
@@ -388,7 +388,13 @@ async def run_worker(
 
             worker_anomaly_sensor.set_action_context(step, f"{plan.get('action', '?')}:{plan.get('target', '')}")
 
-            step_budget = StepBudget(deadline=time.monotonic() + settings.step_timeout_seconds)
+            # The step window must be able to fit the configured vision
+            # annotation budget, or ``resolve_stage_budget`` clamps the
+            # annotation below the model's real latency and every screenshot
+            # ships unannotated (the Oct 21, 2026 regression). The outer cap
+            # uses the same window so it can never fire mid-annotation.
+            step_window = step_window_seconds(settings)
+            step_budget = StepBudget(deadline=time.monotonic() + step_window)
             try:
                 _, log_entry = await _execute_step_with_timeout(
                     execute_action(
@@ -406,7 +412,7 @@ async def run_worker(
                         validation_prober=worker_validation_prober,
                         step_budget=step_budget,
                     ),
-                    timeout_seconds=settings.step_timeout_seconds,
+                    timeout_seconds=step_window,
                 )
                 consecutive_step_timeouts = 0
             except asyncio.TimeoutError as timeout_exc:

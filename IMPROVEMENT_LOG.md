@@ -588,3 +588,66 @@ separate initiative (packaging metadata, a from-scratch redesign of
 `IMemoryStore`/`IReportGenerator` against the real architecture), this is
 a good point to report back rather than picking a sixth cycle
 unilaterally.
+
+## Cycle — Vision annotation regression: step-budget clamp starved the stage (2026-10-22)
+
+**Symptom:** Reports from `testrun_20261021_205421` onward carried no
+annotated screenshots (no `*_annotated.png`, no red boxes/arrows/captions,
+no "Visual Proof Plates" in the PDF, no vision descriptions anywhere).
+Every attempt recorded `annotation_source: "none"` +
+`annotation_error: "timeout"` — 65/65 timeouts in `testrun_20261022_131518`.
+
+**Root cause (verified, not inferred):** Commit `77d71ac` (working tree
+from the Oct 21 evening, committed Oct 22 11:44) introduced
+`StepBudget(deadline = now + step_timeout_seconds)` and
+`resolve_stage_budget`, clamping the annotation stage to
+`min(configured, remaining - reserve)`. `step_timeout_seconds` is 30s by
+default and is not overridden in `.env`, while
+`VISION_ANNOTATION_TIMEOUT_SECONDS` is 60s — so the clamp re-wrote the
+operator's annotation budget to the ~7-21s the step had left. A live
+probe (2026-10-22) measured one `annotate_relevant_screenshot` attempt
+against `free-failsafe-vision` at **58.5s**: the stage could never win.
+The clamp was built to stop the *outer* step cap from cancelling a slow
+annotation; as a side effect it made every annotation fail by a slower,
+quieter path and the feature died.
+
+**Fix:**
+- `monkeylm/core/worker/budget.py`: new `vision_annotation_allowance()`
+  (returns the configured annotation budget exactly when annotation can
+  run) + `step_window_seconds()` (work window + allowance).
+- `monkeylm/core/worker/runner.py`: both the `StepBudget` deadline and the
+  outer `_execute_step_with_timeout` cap derive from `step_window_seconds`
+  now, so the annotation stage gets its configured budget and the outer
+  cap can no longer fire mid-annotation. `resolve_stage_budget` stays as
+  the safety valve for steps that genuinely overrun.
+- `.env`: `VISION_ANNOTATION_TIMEOUT_SECONDS` 60 → 120 (measured 58.5s per
+  attempt; 60s left <3% headroom; two attempts need ~120s).
+- `monkeylm/browser/actions/executor.py`: the CV fast-path now records
+  `annotation_source/annotation_error` on draw failure (every unannotated
+  screenshot is explainable).
+- Reports reflect the vision stage in all formats:
+  `reporting/utils.py::summarize_vision_annotation` (shared counts),
+  markdown gains a "Visual Inspection (Vision LLM)" section with outcome
+  counts, per-step vision findings and an annotated gallery; JSON gains a
+  machine-readable `vision_annotation` block; the PDF states the vision
+  totals and, when no plate can be produced despite attempts, names the
+  reasons and the recovery knob instead of silently dropping the section.
+- `scripts/backfill_annotations.py`: new `--unannotated` mode restores
+  screenshots whose annotation never happened (metadata repair included),
+  plus fixes: stale `_local_service_log` import (moved to
+  `monkeylm.config.helpers` in the Oct 21 refactor) and a latent crash in
+  `_regenerate_pdf` (JSON defects mapping adapted for the attribute-based
+  renderer).
+
+**Tests:** added `tests/test_vision_annotation_window.py` (13 tests):
+allowance/window derivation, the clamp honouring the configured budget
+when the window covers it (the field failure mode in reverse:
+`annotation_source == "vision"`), and summary counting. Full suite:
+233 tests OK.
+
+**Verification:** live backfill of `testrun_20261022_144158` step 70
+restored `error_step_70_annotated.png` (box + arrow + caption:
+"Skip main content accessibility link failed to become visible or stable
+within the click timeout."), repaired `results.json` metadata and
+regenerated the PDF. The synthetic-report harness verified the new
+markdown/PDF sections end-to-end.

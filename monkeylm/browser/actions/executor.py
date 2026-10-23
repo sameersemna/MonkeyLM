@@ -469,6 +469,12 @@ async def execute_action(
                         log_entry["screenshot"] = annotated_name
                         log_entry["screenshot_annotated"] = True
                         log_entry["annotation_source"] = "cv"
+                    else:
+                        # Record the outcome so the reports can distinguish a
+                        # CV draw failure from a stage that never ran; an
+                        # unannotated screenshot must always be explainable.
+                        log_entry["annotation_source"] = "none"
+                        log_entry["annotation_error"] = "cv_draw_failed"
                 else:
                     active_vision_model = settings.vision_model or settings.pdf_vision_model
                     configured_budget = max(

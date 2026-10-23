@@ -121,3 +121,52 @@ def resolve_stage_budget(
     if usable <= MIN_STAGE_BUDGET_SECONDS:
         return 0.0
     return max(MIN_STAGE_BUDGET_SECONDS, min(configured, usable))
+
+
+def vision_annotation_allowance(settings: object) -> float:
+    """Extra wall-clock the step window must reserve for vision annotation.
+
+    The annotation stage runs inside ``execute_action`` while the runner caps
+    the whole step at ``step_timeout_seconds``. Without reserving an
+    allowance the clamp above silently rewrites the operator's annotation
+    budget down to whatever seconds remain of that cap — with the default
+    30s step window and a ~55-60s vision model, *every* annotation timed out
+    and recent reports shipped without any annotated screenshot (observed
+    from the Oct 21, 2026 runs). Reserving the allowance in the step window
+    is what makes the configured annotation budget achievable; the clamp
+    remains as the safety valve for steps that genuinely overrun.
+
+    Returns ``0.0`` when annotation cannot run: PDF generation disabled or
+    no vision model configured. The annotation gate in the executor keys on
+    exactly the same settings, so the two cannot disagree.
+    """
+    try:
+        if not getattr(settings, "pdf_generate", False):
+            return 0.0
+        vision_model = getattr(settings, "vision_model", "") or getattr(
+            settings, "pdf_vision_model", ""
+        )
+        if not vision_model:
+            return 0.0
+        return max(
+            0.0,
+            float(getattr(settings, "vision_annotation_timeout_seconds", 20.0)),
+        )
+    except (AttributeError, TypeError, ValueError):
+        return 0.0
+
+
+def step_window_seconds(settings: object) -> float:
+    """Total wall-clock cap for one step.
+
+    Work window (``step_timeout_seconds``) plus the vision annotation
+    allowance when annotation can run. Both the ``StepBudget`` deadline and
+    the outer ``_execute_step_with_timeout`` cap must derive from this value
+    — if they diverge, the outer cap re-opens the exact mid-annotation
+    teardown bug the clamping mechanism exists to prevent.
+    """
+    try:
+        work_window = max(1.0, float(getattr(settings, "step_timeout_seconds", 30.0)))
+    except (TypeError, ValueError):
+        work_window = 30.0
+    return work_window + vision_annotation_allowance(settings)

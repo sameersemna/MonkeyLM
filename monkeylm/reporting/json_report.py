@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any, Dict, List
 
 from monkeylm.memory import _secure_atomic_write
-from monkeylm.reporting.utils import redact_sensitive_content
+from monkeylm.reporting.utils import redact_sensitive_content, summarize_vision_annotation
 from monkeylm.reporting.telemetry import summarize_semantic_memory_telemetry
 from monkeylm.reporting.accountability import summarize_vibe_coding_accountability
 from monkeylm.reporting.accessibility import _compile_accessibility_violations
@@ -71,6 +71,7 @@ def generate_json_summary(
         "duration_seconds": (end_time - start_time).total_seconds(),
         "steps": len(test_logs),
         "failed_steps": len([log for log in test_logs if log["status"] != "SUCCESS"]),
+        "vision_annotation": summarize_vision_annotation(test_logs, settings),
         "run_summary_status": accountability.get("run_summary_status"),
         "regression_drift_index": accountability.get("regression_drift_index"),
         "app_defect_count": accountability.get("app_defect_count", 0),

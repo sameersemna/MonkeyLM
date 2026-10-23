@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any, Dict, List
 
 from monkeylm.memory import _secure_atomic_write
-from monkeylm.reporting.utils import redact_sensitive_content
+from monkeylm.reporting.utils import redact_sensitive_content, summarize_vision_annotation
 from monkeylm.reporting.telemetry import summarize_semantic_memory_telemetry
 from monkeylm.reporting.accountability import summarize_vibe_coding_accountability, _derive_severity
 from monkeylm.reporting.accessibility import _compile_accessibility_violations
@@ -21,6 +21,81 @@ def _fmt_occurrence(item: Dict[str, Any]) -> str:
     if count and count > 1 and step_range:
         return f" (seen {count}x, steps {step_range[0]}-{step_range[1]})"
     return ""
+
+
+def _step_vision_lines(log: Dict[str, Any]) -> str:
+    """Markdown lines describing what the vision stage found for one step."""
+    description = str(log.get("screenshot_description") or "")
+    verdict = log.get("screenshot_verdict") if isinstance(log.get("screenshot_verdict"), dict) else {}
+    source = str(log.get("annotation_source") or "")
+    annotation_error = str(log.get("annotation_error") or "")
+
+    if log.get("screenshot_annotated"):
+        src_label = "CV heuristic" if source == "cv" else "vision LLM"
+        lines = [f"- **Vision finding** ({src_label}): {description or '(no caption returned)'}"]
+        if verdict.get("defect_type"):
+            box = verdict.get("box_2d")
+            box_str = ""
+            if isinstance(box, list) and len(box) == 4:
+                try:
+                    box_str = ", box [ymin,xmin,ymax,xmax]=[" + ", ".join(f"{float(c):.2f}" for c in box) + "]"
+                except (TypeError, ValueError):
+                    box_str = ""
+            verdict_line = (
+                f"  - Verdict: `{verdict.get('verdict', '?')}` — type `{verdict.get('defect_type')}`"
+                f", severity `{verdict.get('severity', '?')}`{box_str}"
+            )
+            lines.append(verdict_line)
+        return "\n".join(lines) + "\n"
+    if annotation_error == "timeout":
+        return f"- **Vision annotation:** attempted but timed out (see *Visual Inspection* budget notes)\n"
+    if annotation_error == "skipped_no_step_budget":
+        return "- **Vision annotation:** skipped — step budget exhausted before the model could be called\n"
+    if annotation_error:
+        return f"- **Vision annotation:** failed ({annotation_error})\n"
+    if source == "none":
+        return "- **Vision annotation:** model checked the screenshot but located nothing to mark\n"
+    return ""
+
+
+def _render_vision_summary_md(vision_summary: Dict[str, Any], annotated_logs: List[Dict[str, Any]]) -> str:
+    """Markdown section summarising the vision-LLM screenshot checks."""
+    model = vision_summary.get("vision_model") or vision_summary.get("pdf_vision_model") or "not configured"
+    budget = vision_summary.get("budget_seconds")
+    attempts = vision_summary.get("max_attempts")
+    md = (
+        "\n## Visual Inspection (Vision LLM)\n\n"
+        f"Vision-model screenshots are analysed by **`{model}`** with a "
+        f"{budget}s annotation budget ({attempts} max attempts per step).\n\n"
+        "| Screenshot checks | Count |\n|---|---|\n"
+        f"| Steps in run | {vision_summary.get('total_steps', 0)} |\n"
+        f"| Annotation calls attempted | {vision_summary.get('attempted', 0)} |\n"
+        f"| Annotated (red box + arrow) | {vision_summary.get('annotated', 0)} |\n"
+        f"| Model reached, no drawable region | {vision_summary.get('no_region_found', 0)} |\n"
+        f"| Timed out | {vision_summary.get('timeouts', 0)} |\n"
+        f"| Skipped (step budget exhausted) | {vision_summary.get('skipped_no_step_budget', 0)} |\n"
+        f"| Other errors | {vision_summary.get('errors', 0)} |\n\n"
+    )
+    if annotated_logs:
+        md += "Annotated screenshots show the region of interest, a pointer arrow, and a caption written by the vision model.\n"
+    elif vision_summary.get("attempted"):
+        md += (
+            "⚠️ No annotated screenshots were produced this run even though "
+            f"{vision_summary.get('attempted')} annotation call(s) were attempted — see the per-step "
+            "notes and `annotation_error` fields in `results.json`.\n"
+        )
+    else:
+        md += "No failing or defect-tagged steps triggered an annotation call this run.\n"
+    if annotated_logs:
+        md += "\n### Annotated Screenshots\n\n"
+        for log in annotated_logs:
+            shot = str(log.get("screenshot") or "")
+            md += f"**Step {log.get('step', 'n/a')}** ({log.get('status', 'UNKNOWN')}): ![annotated](./{shot})\n\n"
+            finding = _step_vision_lines(log)
+            if finding:
+                md += finding
+            md += "\n"
+    return md
 
 
 def generate_markdown_report(
@@ -111,6 +186,12 @@ The agent performed {total_steps} actions using **{settings.ollama_model}**.
 Actions included: Clicking, Typing, Form Submission, Modal Handling, and State Escapes.
 """
 
+    vision_summary = summarize_vision_annotation(test_logs, settings)
+    annotated_logs_vision = [
+        log for log in test_logs if log.get("screenshot_annotated")
+    ]
+    md_content += _render_vision_summary_md(vision_summary, annotated_logs_vision)
+
     if discovery_strategy is not None:
         md_content += "\n## Application Discovery\n"
         md_content += f"- **Domain:** {discovery_strategy.app_domain}\n"
@@ -142,6 +223,7 @@ Actions included: Clicking, Typing, Form Submission, Modal Handling, and State E
                 md_content += f"- **DOM Context:** `{failure_context.get('dom_context', '')[:400]}`\n"
             if log["screenshot"]:
                 md_content += f"- **Screenshot:** `![Screenshot](./{log['screenshot']})`\n"
+            md_content += _step_vision_lines(log)
 
     compiled_tickets = _compile_defect_tickets(defects, test_logs)
     if compiled_tickets:

@@ -13,6 +13,7 @@ from monkeylm.config import (
 from monkeylm.reporting.accountability import summarize_vibe_coding_accountability, _derive_severity
 from monkeylm.reporting.defects import _compile_defect_tickets
 from monkeylm.reporting.dedup import dedupe_findings
+from monkeylm.reporting.utils import summarize_vision_annotation
 
 
 if _REPORTLAB_AVAILABLE:
@@ -466,6 +467,42 @@ def generate_pdf_report(
                 else:
                     story.append(Paragraph("⚠️ Screenshot not available", styles["BodyText"]))
                 story.append(Spacer(1, 0.2 * inch))
+
+        # The report must reflect whether the vision LLM actually checked the
+        # screenshots — even when no annotated screenshot was produced. A
+        # silently absent plate section previously hid the Oct 21, 2026
+        # step-budget regression (all annotations timing out).
+        vision_summary = summarize_vision_annotation(test_logs, settings)
+        if not annotated_logs and vision_summary["attempted"]:
+            story.append(PageBreak())
+            story.append(Paragraph("Visual Proof Plates", styles["Heading2"]))
+            story.append(Spacer(1, 0.1 * inch))
+            checked_model = vision_summary.get("vision_model") or vision_summary.get("pdf_vision_model") or "?"
+            story.append(Paragraph(
+                f"The vision LLM ({_xml_escape(str(checked_model))}) checked "
+                f"{vision_summary['attempted']} screenshot(s) this run, but no annotated "
+                f"plates could be produced: {vision_summary['timeouts']} timed out, "
+                f"{vision_summary['no_region_found']} reached the model without a drawable region, "
+                f"{vision_summary['skipped_no_step_budget']} were skipped on an exhausted step budget, "
+                f"{vision_summary['errors']} errored. Each attempt is recorded per step in "
+                f"results.json as annotation_source / annotation_error.",
+                styles["BodyText"],
+            ))
+            story.append(Spacer(1, 0.1 * inch))
+            story.append(Paragraph(
+                "If timeouts dominate, raise VISION_ANNOTATION_TIMEOUT_SECONDS or verify the "
+                "vision endpoint latency; the runner reserves this budget inside the step window.",
+                description_style,
+            ))
+        elif annotated_logs:
+            story.append(Paragraph(
+                f"Vision LLM screenshot checks: {vision_summary['annotated']} annotated "
+                f"({vision_summary['annotated_by_vision']} by model, {vision_summary['annotated_by_cv']} "
+                f"by CV heuristics), {vision_summary['timeouts']} timed out, "
+                f"{vision_summary['no_region_found']} with no drawable region, "
+                f"{vision_summary['skipped_no_step_budget']} skipped on step budget.",
+                description_style,
+            ))
 
         doc.build(story)
         os.chmod(pdf_path, 0o640)
