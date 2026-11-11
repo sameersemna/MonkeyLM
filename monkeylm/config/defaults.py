@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from monkeylm.types import Settings
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -44,6 +46,27 @@ def _optional_import(module_name: str, attr_name: Optional[str] = None):
 
 
 _PRE_DOTENV_ENV_KEYS: "frozenset[str]" = frozenset()
+_PRE_DOTENV_ENV: Dict[str, str] = {}
+
+#: ``MONKEYLM_ENV_PRECEDENCE`` values that restore the old shell-first order.
+_SHELL_PRECEDENCE_VALUES: "frozenset[str]" = frozenset({"shell", "environment", "env"})
+
+
+def _dotenv_overrides_shell() -> bool:
+    """Whether ``.env`` is authoritative over exported shell variables.
+
+    ``.env`` is the configuration source of truth, so a key it defines wins
+    over an exported shell variable of the same name. ``load_dotenv`` must
+    therefore run with ``override=True``; otherwise a value captured by an
+    editor-injected terminal before an edit would keep beating the file.
+
+    Set ``MONKEYLM_ENV_PRECEDENCE=shell`` in the *process environment* before
+    start-up to restore the previous ``CLI > shell > .env > default`` order,
+    for example when CI injects real credentials while the checkout carries a
+    placeholder ``.env``.
+    """
+    raw = os.getenv("MONKEYLM_ENV_PRECEDENCE", "dotenv")
+    return (raw or "").strip().lower() not in _SHELL_PRECEDENCE_VALUES
 
 
 def _load_dotenv() -> None:
@@ -54,27 +77,39 @@ def _load_dotenv() -> None:
         env_path = PROJECT_ROOT / ".env"
         if env_path.is_file():
             _pre_dotenv_env_keys_update()
-            dotenv.load_dotenv(env_path, override=False)
+            dotenv.load_dotenv(env_path, override=_dotenv_overrides_shell())
     except Exception:
         pass
 
 
 def _pre_dotenv_env_keys_update() -> None:
-    """Record the environment keys a real shell exported before ``.env`` load."""
-    global _PRE_DOTENV_ENV_KEYS
-    _PRE_DOTENV_ENV_KEYS = frozenset(os.environ)
+    """Snapshot the environment as it was a real shell export before ``.env`` load.
+
+    The values are kept, not just the keys, because ``load_dotenv`` with
+    ``override=True`` replaces an exported value with the ``.env`` one. Without
+    the snapshot the shadowed value is unrecoverable and no diagnostic can name
+    what was overridden.
+    """
+    global _PRE_DOTENV_ENV_KEYS, _PRE_DOTENV_ENV
+    _PRE_DOTENV_ENV = dict(os.environ)
+    _PRE_DOTENV_ENV_KEYS = frozenset(_PRE_DOTENV_ENV)
 
 
 def _pre_dotenv_env_keys() -> frozenset:
-    """Keys that were already exported by the real shell before ``.env`` load.
+    """Keys that were exported by the real shell before ``.env`` load.
 
     ``load_dotenv`` copies every ``.env`` entry into :data:`os.environ`, which
     makes an ``.env`` value indistinguishable from a genuine shell export to
     any later ``os.getenv`` call. Settings resolution needs the distinction to
-    keep the documented precedence (CLI > shell > ``.env`` > default), so the
-    pre-load key set is captured before the copy happens.
+    keep the documented precedence (CLI > ``.env`` > shell > default) and to
+    report when an exported value was shadowed by the file.
     """
     return _PRE_DOTENV_ENV_KEYS
+
+
+def _pre_dotenv_env_values() -> Dict[str, str]:
+    """Shell values captured before ``.env`` load, for shadowing diagnostics."""
+    return _PRE_DOTENV_ENV
 
 
 _load_dotenv()
@@ -105,65 +140,86 @@ except Exception:
 
 # ── Default constants ──────────────────────────────────────────────────────────
 
-DEFAULT_TARGET_URL = "https://noblequran-85hu2yge.manus.space/"
-DEFAULT_TARGET_USERNAME = ""
-DEFAULT_TARGET_PASSWORD = ""
-DEFAULT_OLLAMA_MODEL = "minimax-m3:cloud"
+# ── Configuration defaults ────────────────────────────────────────────────────
+#
+# ``Settings`` (``monkeylm/types.py``) owns the literal values; every constant
+# below is derived from it, so a default exists in exactly one place. These
+# used to be retyped here *and* in ``monkeylm/__init__.py``, where the copies
+# could drift silently — and the copy here was not even consulted during
+# resolution, so editing it changed nothing.
+#
+# ``Settings`` imports only ``monkeylm.defect_types`` (stdlib-only), so this
+# import cannot create a cycle: ``monkeylm/config/__init__.py`` imports
+# ``monkeylm.types`` before ``.defaults``.
+#
+# Credentials are deliberately ABSENT from these defaults: connection strings
+# come from the untracked ``.env``. Never commit a service password here.
+_DEFAULTS = Settings()
+
+DEFAULT_TARGET_URL = _DEFAULTS.target_url
+DEFAULT_TARGET_USERNAME = _DEFAULTS.target_username
+DEFAULT_TARGET_PASSWORD = _DEFAULTS.target_password
+DEFAULT_OLLAMA_MODEL = _DEFAULTS.ollama_model
+# Kept literal: the dataclass field is a list, but this seeds comma-separated
+# ``.env`` parsing, so its default stays a string.
 DEFAULT_OLLAMA_FALLBACK_MODELS = ""
-DEFAULT_OLLAMA_TIMEOUT_SECONDS = 15.0
-DEFAULT_OPENAI_BASE_URL = "http://localhost:11434"
-DEFAULT_OPENAI_API_KEY = ""
-DEFAULT_MAX_STEPS = 10
-DEFAULT_WORKERS = 1
-DEFAULT_MAX_STEPS_PER_WORKER = 10
-DEFAULT_WORKER_NAVIGATION_RETRIES = 2
-DEFAULT_WORKER_QDRANT_INIT_RETRIES = 1
-DEFAULT_WORKER_BOUNDARY_RECOVERY_RETRIES = 1
-DEFAULT_RETRY_BASE_DELAY_SECONDS = 0.75
-DEFAULT_STEP_TIMEOUT_SECONDS = 30.0
-DEFAULT_STUCK_STATE_THRESHOLD = 6
+DEFAULT_OLLAMA_TIMEOUT_SECONDS = _DEFAULTS.ollama_timeout_seconds
+DEFAULT_OPENAI_BASE_URL = _DEFAULTS.openai_base_url
+DEFAULT_OPENAI_API_KEY = _DEFAULTS.openai_api_key
+DEFAULT_MAX_STEPS = _DEFAULTS.max_steps
+DEFAULT_WORKERS = _DEFAULTS.workers
+DEFAULT_MAX_STEPS_PER_WORKER = _DEFAULTS.max_steps_per_worker
+DEFAULT_WORKER_NAVIGATION_RETRIES = _DEFAULTS.worker_navigation_retries
+DEFAULT_WORKER_QDRANT_INIT_RETRIES = _DEFAULTS.worker_qdrant_init_retries
+DEFAULT_WORKER_BOUNDARY_RECOVERY_RETRIES = _DEFAULTS.worker_boundary_recovery_retries
+DEFAULT_RETRY_BASE_DELAY_SECONDS = _DEFAULTS.retry_base_delay_seconds
+DEFAULT_STEP_TIMEOUT_SECONDS = _DEFAULTS.step_timeout_seconds
+DEFAULT_STUCK_STATE_THRESHOLD = _DEFAULTS.stuck_state_threshold
+DEFAULT_HEADLESS = _DEFAULTS.headless
+DEFAULT_WINDOW_SIZE = _DEFAULTS.browser_window_size
+DEFAULT_NO_VIEWPORT = _DEFAULTS.no_viewport
+DEFAULT_POSTGRES_DSN = _DEFAULTS.postgres_dsn
+DEFAULT_REDIS_URL = _DEFAULTS.redis_url
+DEFAULT_REDIS_PREFIX = _DEFAULTS.redis_prefix
+DEFAULT_REDIS_PATH_LOCK_TTL_SECONDS = _DEFAULTS.redis_path_lock_ttl_seconds
+DEFAULT_GOLDEN_BASELINE_MODE = _DEFAULTS.golden_baseline_mode
+DEFAULT_STRICT_PERSISTENCE = _DEFAULTS.strict_persistence
+DEFAULT_REDIS_STATE_TTL_SECONDS = _DEFAULTS.redis_state_ttl_seconds
+DEFAULT_QDRANT_URL = _DEFAULTS.qdrant_url
+DEFAULT_QDRANT_COLLECTION = _DEFAULTS.qdrant_collection
+DEFAULT_QDRANT_VECTOR_SIZE = _DEFAULTS.qdrant_vector_size
+DEFAULT_QDRANT_ENABLE_READS = _DEFAULTS.qdrant_enable_reads
+DEFAULT_QDRANT_ENABLE_WRITES = _DEFAULTS.qdrant_enable_writes
+DEFAULT_QDRANT_EMBEDDING_PROVIDER = _DEFAULTS.qdrant_embedding_provider
+DEFAULT_QDRANT_EMBEDDING_MODEL = _DEFAULTS.qdrant_embedding_model
+DEFAULT_QDRANT_EMBEDDING_LITELLM_BASE_URL = _DEFAULTS.qdrant_embedding_litellm_base_url
+DEFAULT_QDRANT_EMBEDDING_LITELLM_API_KEY = _DEFAULTS.qdrant_embedding_litellm_api_key
+DEFAULT_QDRANT_RERANK_ENABLED = _DEFAULTS.qdrant_rerank_enabled
+DEFAULT_QDRANT_RERANK_MODEL = _DEFAULTS.qdrant_rerank_model
+DEFAULT_QDRANT_CANDIDATE_LIMIT = _DEFAULTS.qdrant_candidate_limit
+DEFAULT_PDF_GENERATE = _DEFAULTS.pdf_generate
+DEFAULT_PDF_VISION_MODEL = _DEFAULTS.pdf_vision_model
+DEFAULT_VISION_MODEL = _DEFAULTS.vision_model
+DEFAULT_PDF_VISION_TIMEOUT_SECONDS = _DEFAULTS.pdf_vision_timeout_seconds
+DEFAULT_CV_ANALYSIS_ENABLED = _DEFAULTS.cv_analysis_enabled
+DEFAULT_CV_SSIM_THRESHOLD = _DEFAULTS.cv_ssim_threshold
+DEFAULT_CV_BLANK_SCREEN_STDDEV = _DEFAULTS.cv_blank_screen_stddev
+DEFAULT_CV_PHASH_DEDUP = _DEFAULTS.cv_phash_dedup
+DEFAULT_CV_TEMPLATE_VERIFY = _DEFAULTS.cv_template_verify
+DEFAULT_CV_TEMPLATE_MIN_SCORE = _DEFAULTS.cv_template_min_score
+DEFAULT_CV_TEMPLATE_SCALE = _DEFAULTS.cv_template_scale
+DEFAULT_CV_TEMPLATE_EVERY_N_STEPS = _DEFAULTS.cv_template_every_n_steps
+DEFAULT_OCR_ENABLED = _DEFAULTS.ocr_enabled
+DEFAULT_OCR_CONTRAST_ENABLED = _DEFAULTS.ocr_contrast_enabled
+DEFAULT_REPLAY_FROM = _DEFAULTS.replay_from
+
+# ── Code invariants (deliberately NOT configurable) ───────────────────────────
+#
+# These are policy, not configuration: they are excluded from the runtime
+# override whitelist in ``config/overrides.py`` so a stray ``.env`` entry or CLI
+# flag cannot widen what the agent is allowed to do.
 MAX_ALLOWED_RETRIES = 10
 MAX_ALLOWED_RETRY_BASE_DELAY_SECONDS = 10.0
-DEFAULT_HEADLESS = True
-DEFAULT_WINDOW_SIZE = "1920,1080"
-DEFAULT_NO_VIEWPORT = True
-DEFAULT_POSTGRES_DSN = "postgresql://postgres:postgres@latitude:5432/monkeylm"
-DEFAULT_REDIS_URL = "redis://:LatitudeRedis1407@latitude:6379/0"
-DEFAULT_REDIS_PREFIX = "monkey:"
-DEFAULT_REDIS_PATH_LOCK_TTL_SECONDS = 45
-DEFAULT_GOLDEN_BASELINE_MODE = "preexisting"
-DEFAULT_STRICT_PERSISTENCE = False
-DEFAULT_REDIS_STATE_TTL_SECONDS = 86400
-DEFAULT_QDRANT_URL = "http://127.0.0.1:6333"
-DEFAULT_QDRANT_COLLECTION = "monkeylm_semantic_memory"
-DEFAULT_QDRANT_VECTOR_SIZE = 256
-DEFAULT_QDRANT_ENABLE_READS = True
-DEFAULT_QDRANT_ENABLE_WRITES = True
-DEFAULT_QDRANT_EMBEDDING_PROVIDER = "hash"
-DEFAULT_QDRANT_EMBEDDING_MODEL = "nomic-embed-text"
-DEFAULT_QDRANT_EMBEDDING_LITELLM_BASE_URL = "http://localhost:11435"
-DEFAULT_QDRANT_EMBEDDING_LITELLM_API_KEY = ""
-DEFAULT_QDRANT_RERANK_ENABLED = False
-DEFAULT_QDRANT_RERANK_MODEL = "qwen2.5:3b"
-DEFAULT_QDRANT_CANDIDATE_LIMIT = 20
-
-DEFAULT_PDF_GENERATE = False
-DEFAULT_PDF_VISION_MODEL = "llama3.2-vision"
-DEFAULT_VISION_MODEL = "gemini-3-flash-preview"
-DEFAULT_PDF_VISION_TIMEOUT_SECONDS = 30.0
-
-DEFAULT_CV_ANALYSIS_ENABLED = True
-DEFAULT_CV_SSIM_THRESHOLD = 0.95
-DEFAULT_CV_BLANK_SCREEN_STDDEV = 8.0
-DEFAULT_CV_PHASH_DEDUP = True
-DEFAULT_CV_TEMPLATE_VERIFY = True
-DEFAULT_CV_TEMPLATE_MIN_SCORE = 0.75
-DEFAULT_CV_TEMPLATE_SCALE = 0.5
-DEFAULT_CV_TEMPLATE_EVERY_N_STEPS = 2
-DEFAULT_OCR_ENABLED = False
-DEFAULT_OCR_CONTRAST_ENABLED = False
-DEFAULT_REPLAY_FROM = ""
-
 AXE_CDN_URL = "https://cdnjs.cloudflare.com/ajax/libs/axe-core/4.9.1/axe.min.js"
 VISUAL_DIFF_THRESHOLD_RATIO = 0.01
 LAYOUT_SHIFT_THRESHOLD_PX = 50

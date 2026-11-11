@@ -482,7 +482,8 @@ def generate_pdf_report(
                 f"The vision LLM ({_xml_escape(str(checked_model))}) checked "
                 f"{vision_summary['attempted']} screenshot(s) this run, but no annotated "
                 f"plates could be produced: {vision_summary['timeouts']} timed out, "
-                f"{vision_summary['no_region_found']} reached the model without a drawable region, "
+                f"{vision_summary.get('token_ceiling_hits', 0)} were truncated by the model's "
+                f"token ceiling, {vision_summary['no_region_found']} reached the model without a drawable region, "
                 f"{vision_summary['skipped_no_step_budget']} were skipped on an exhausted step budget, "
                 f"{vision_summary['errors']} errored. Each attempt is recorded per step in "
                 f"results.json as annotation_source / annotation_error.",

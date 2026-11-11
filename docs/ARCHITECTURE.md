@@ -143,6 +143,47 @@ Current persistence sizing strategy in code:
 Tradeoff:
 - Higher worker counts improve exploration breadth, but can reduce per-worker determinism and increase service pressure.
 
+## Configuration Precedence and Defaults
+
+Resolution order, highest wins:
+
+| Layer | Source | Notes |
+|---|---|---|
+| 1 | CLI flag | `--redis-url`, `--max-steps`, … |
+| 2 | `.env` | The single source of truth for configuration |
+| 3 | Shell export | Supplies keys `.env` does not define (keeps CI usable) |
+| 4 | Built-in default | Required so `.env` can be absent (fresh clone, CI) |
+
+`MONKEYLM_ENV_PRECEDENCE=shell` restores the older shell-first order. When a
+shell export loses to `.env` for `REDIS_URL`, `POSTGRES_DSN`, or
+`OPENAI_API_KEY`, startup prints a warning naming both layers with credentials
+masked, and appends it to the run's `service_connectivity.log`.
+
+Single-source defaults:
+- `Settings` (`monkeylm/types.py`) owns the literal default values.
+- `monkeylm/config/defaults.py` derives every `DEFAULT_*` constant from
+  `Settings`, so a default exists in exactly one place. `Settings` is
+  dependency-free (stdlib + `defect_types`), so the import is acyclic.
+- `monkeylm/__init__.py` keeps its compatibility globals but sources them from
+  `defaults`; it no longer retypes values, in either the import path or the
+  `except` fallback.
+- Guards: `tests/test_config_defaults_single_source.py` fails the build on
+  drift, on a new constant/field without a decision, and on a "fix" that
+  restores a coincidentally equal literal.
+
+Deliberately not configurable (code invariants, absent from the runtime
+override whitelist): `ALLOWED_ACTIONS`, `AXE_CDN_URL`,
+`OLLAMA_DECISION_OPTIONS`, retry caps, and the visual-diff thresholds. Making
+`ALLOWED_ACTIONS` settable from `.env` would turn configuration into a
+security bypass.
+
+Credentials:
+- Live secrets live only in the gitignored `.env`. Code defaults are
+  credential-free (`redis://localhost:6379/0`).
+- `tests/test_no_committed_credentials.py` scans tracked `.py` files for
+  inline connection-string credentials; placeholders (e.g.
+  `:placeholder-pw@`) are allowed.
+
 ## Data Flow: Reporting Pipeline
 
 ```mermaid
@@ -196,6 +237,8 @@ flowchart TD
 
 1. Introduce `ActionRegistry` mapping action names to handler callables.
 2. Add typed response validation for LLM output.
-3. Promote constants to env/CLI config.
+3. Promote *policy* constants to env/CLI config, keeping security invariants
+   (`ALLOWED_ACTIONS`, retry caps) in code — see "Configuration Precedence and
+   Defaults".
 4. Add deterministic mode with seeded RNG and deterministic payload strategy.
 5. Add per-domain safety and rate-limit policy.

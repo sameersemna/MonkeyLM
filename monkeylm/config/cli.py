@@ -117,7 +117,7 @@ def parse_cli_args() -> argparse.Namespace:
     parser.add_argument(
         "--golden-baseline-mode",
         choices=["preexisting", "auto_upsert"],
-        help="Golden baseline strategy: compare only preexisting goldens or auto-seed when missing",
+        help="Golden baseline strategy (missing goldens are seeded on first visit in both modes; comparisons are never skipped)",
     )
     parser.add_argument("--qdrant-url", help="Qdrant base URL, for example http://127.0.0.1:6333")
     parser.add_argument("--qdrant-collection", help="Qdrant collection name for semantic memory logs")

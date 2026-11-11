@@ -49,6 +49,12 @@ def _step_vision_lines(log: Dict[str, Any]) -> str:
         return "\n".join(lines) + "\n"
     if annotation_error == "timeout":
         return f"- **Vision annotation:** attempted but timed out (see *Visual Inspection* budget notes)\n"
+    if annotation_error == "token_ceiling":
+        return (
+            "- **Vision annotation:** response was truncated by the model's "
+            "token ceiling before any JSON was produced — raise "
+            "`VISION_ANNOTATION_MAX_TOKENS` to fix \n"
+        )
     if annotation_error == "skipped_no_step_budget":
         return "- **Vision annotation:** skipped — step budget exhausted before the model could be called\n"
     if annotation_error:
@@ -73,9 +79,17 @@ def _render_vision_summary_md(vision_summary: Dict[str, Any], annotated_logs: Li
         f"| Annotated (red box + arrow) | {vision_summary.get('annotated', 0)} |\n"
         f"| Model reached, no drawable region | {vision_summary.get('no_region_found', 0)} |\n"
         f"| Timed out | {vision_summary.get('timeouts', 0)} |\n"
+        f"| Response truncated (token ceiling) | {vision_summary.get('token_ceiling_hits', 0)} |\n"
         f"| Skipped (step budget exhausted) | {vision_summary.get('skipped_no_step_budget', 0)} |\n"
         f"| Other errors | {vision_summary.get('errors', 0)} |\n\n"
     )
+    if vision_summary.get("token_ceiling_hits"):
+        md += (
+            "⚠️ The vision model's reply was truncated by the token ceiling "
+            f"{vision_summary.get('token_ceiling_hits')}x — reasoning models spend "
+            "hidden tokens before the JSON body, so raise `VISION_ANNOTATION_MAX_TOKENS` "
+            "(e.g. 2048 → 4096) to recover these annotations.\n"
+        )
     if annotated_logs:
         md += "Annotated screenshots show the region of interest, a pointer arrow, and a caption written by the vision model.\n"
     elif vision_summary.get("attempted"):
@@ -169,6 +183,7 @@ def generate_markdown_report(
 **Graceful Shutdown:** {"requested" if browser_launch_info.get('graceful_shutdown_requested') else "not requested"}  
 **Baseline Mode:** `{baseline_mode}` ({baseline_status})<br>
 **Golden Baselines:** DOM routes={baseline_dom}, visual routes={baseline_visual}<br>
+**Baselines Seeded This Run:** DOM={baseline_summary.get('baselines_seeded_dom', 0)}, visual={baseline_summary.get('baselines_seeded_visual', 0)} (missing goldens seeded on first visit; comparison armed after)<br>
 **Scenario Mode:** `{scenario_mode}`{f" ({scenario_artifact})" if scenario_artifact else ""}<br>
 **Output Folder:** `{settings.output_dir}`
 

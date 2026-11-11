@@ -80,6 +80,7 @@ Fuzzer payloads (`/etc/passwd`, SQLi strings, XSS tags) are intentional maliciou
 | Typed globals whitelist | `_RUNTIME_GLOBAL_SCHEMA` typed dict — only declared keys accepted; unknown keys rejected with log warning |
 | Safe mutation primitive | `_safe_set_global()` enforces type coercion, positive-numeric range validation |
 | Credential override warning | Writes to `POSTGRES_DSN` / `REDIS_URL` emit logging warnings |
+| Shadowed `.env` diagnostic | `.env` is authoritative; when a shell export of `REDIS_URL`, `POSTGRES_DSN`, or `OPENAI_API_KEY` is ignored because `.env` defines it, startup reports both layers with credentials masked (`redis://:***@host`) |
 | Seed validation | Input validated for integer type before use |
 | No subprocess exposure | Audit confirmed zero `subprocess`, `shell=True`, or `os.environ` usage — file is a compatibility shim |
 

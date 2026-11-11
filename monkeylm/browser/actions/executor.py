@@ -7,6 +7,7 @@ import contextlib
 import hashlib
 import json
 import os
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from playwright.async_api import Page
@@ -511,6 +512,7 @@ async def execute_action(
                             f"   └─ 📸 Annotating screenshot with {active_vision_model} "
                             f"(budget {timeout_seconds:.1f}s)..."
                         )
+                        annotation_started = time.monotonic()
                         annotation_task = asyncio.create_task(
                             annotate_relevant_screenshot(
                                 settings,
@@ -529,13 +531,41 @@ async def execute_action(
                             step_budget.start_stage("annotation")
                         try:
                             annotation_result = await asyncio.wait_for(annotation_task, timeout=timeout_seconds)
+                            annotation_elapsed = time.monotonic() - annotation_started
                             # Phase 2 (B5): 3-tuple now (path, description, verdict_dict)
                             if isinstance(annotation_result, tuple) and len(annotation_result) == 3:
                                 annotated_path, description, verdict_dict = annotation_result
                             else:
                                 annotated_path, description = annotation_result
                                 verdict_dict = {}
-                            if annotated_path != original_path:
+                            # A definitive model failure (token-ceiling truncation,
+                            # unparseable JSON) is classified from the verdict's
+                            # error marker so the reports can count it honestly
+                            # instead of reading as "model found nothing".
+                            verdict_error = ""
+                            if isinstance(verdict_dict, dict):
+                                verdict_error = str(verdict_dict.get("error") or "")
+                            if verdict_error:
+                                log_entry["annotation_error"] = verdict_error
+                                if isinstance(verdict_dict, dict) and verdict_dict.get("error_detail"):
+                                    log_entry["annotation_error_detail"] = str(verdict_dict["error_detail"])[:200]
+                            # An unwrapped copy of the raw screenshot (path changed
+                            # but no box drawn and nothing to show) must not flip
+                            # ``screenshot_annotated`` when the call DEFINITIVELY
+                            # failed (token-ceiling / unparseable marker present).
+                            # Legacy copy-fallback results (no error marker) keep
+                            # their historical behavior.
+                            unmarked_copy = (
+                                verdict_error
+                                and annotated_path != original_path
+                                and not description
+                                and not (
+                                    isinstance(verdict_dict, dict)
+                                    and verdict_dict.get("box_2d")
+                                    and verdict_dict["box_2d"] != [0.0, 0.0, 0.0, 0.0]
+                                )
+                            )
+                            if annotated_path != original_path and not unmarked_copy:
                                 log_entry["screenshot"] = os.path.basename(annotated_path)
                                 log_entry["screenshot_annotated"] = True
                                 # ``annotation_source == "vision"`` when a real
@@ -546,6 +576,10 @@ async def execute_action(
                                     "vision" if verdict_dict.get("box_2d")
                                     and verdict_dict["box_2d"] != [0.0, 0.0, 0.0, 0.0]
                                     else "none"
+                                )
+                                print(
+                                    f"   └─ ✅ Annotation drawn by {active_vision_model} "
+                                    f"in {annotation_elapsed:.1f}s"
                                 )
                             else:
                                 log_entry["annotation_source"] = "none"

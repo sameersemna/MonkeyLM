@@ -130,6 +130,12 @@ class PersistenceEngine:
         self.pg_write_semaphore = asyncio.Semaphore(max(2, self.max_workers * 2))
         self.redis_write_semaphore = asyncio.Semaphore(max(4, self.max_workers * 4))
         self._missing_baseline_routes: set = set()
+        # Routes whose golden baseline was seeded mid-run because it was
+        # missing (revert of the preexisting-mode skip, 2026-10-23):
+        # (domain, normalized_route, "dom"|"visual") — used to log the
+        # seeding once per route per capture type.
+        self._seeded_baseline_routes: set = set()
+        self._baselines_seeded_counts: Dict[str, int] = {"dom": 0, "visual": 0}
         self.baseline_summary: Dict[str, Any] = {}
 
     async def initialize(self) -> None:
@@ -298,7 +304,8 @@ class PersistenceEngine:
             if summary["mode"] == "preexisting" and not summary["preexisting_ready"]:
                 _local_service_log(
                     "Golden baseline mode is preexisting but no golden baselines are available; "
-                    "comparisons will be skipped.",
+                    "missing golden baselines will be seeded from the first visit of each route "
+                    "and compared on subsequent visits.",
                     self.settings.output_dir,
                 )
         except Exception as exc:
@@ -524,10 +531,11 @@ class PersistenceEngine:
 
         Detects *cross-run* visual drift (the route looks different from its
         golden baseline captured in a previous run) — complementary to the
-        within-run step-to-step pixelmatch/SSIM diffing. Honors
-        ``golden_baseline_mode``: in ``auto_upsert`` a missing golden baseline
-        is seeded from the current frame; in ``preexisting`` the comparison is
-        skipped when no baseline exists.
+        within-run step-to-step pixelmatch/SSIM diffing. A missing golden
+        baseline is seeded from the current frame in EVERY mode (2026-10-23
+        revert of the preexisting-mode skip), so a comparison is never
+        silently skipped: the first visit arms the baseline and subsequent
+        visits are diffed against it.
         """
         if self.pg_pool is None:
             return
@@ -547,9 +555,21 @@ class PersistenceEngine:
         await self._upsert_visual_baseline(domain, normalized_route, current_phash, screenshot_path, is_golden_standard=False)
         golden = await self._fetch_visual_baseline(domain, normalized_route)
         if golden is None:
-            if self.settings.golden_baseline_mode == "auto_upsert":
-                await self._upsert_visual_baseline(domain, normalized_route, current_phash, screenshot_path, is_golden_standard=True)
-                _local_service_log(f"Auto-seeded visual golden baseline for {domain}{normalized_route}.", self.settings.output_dir)
+            # Missing golden: seed from this frame in EVERY mode — comparisons
+            # must never be silently skipped (2026-10-23 revert of the
+            # preexisting-mode skip). The first visit arms the baseline;
+            # subsequent visits are diffed against it.
+            await self._upsert_visual_baseline(domain, normalized_route, current_phash, screenshot_path, is_golden_standard=True)
+            self._baselines_seeded_counts["visual"] += 1
+            self.baseline_summary["baselines_seeded_visual"] = self._baselines_seeded_counts["visual"]
+            if (domain, normalized_route, "visual") not in self._seeded_baseline_routes:
+                self._seeded_baseline_routes.add((domain, normalized_route, "visual"))
+                _local_service_log(
+                    f"Golden visual baseline missing for {domain}{normalized_route}; "
+                    f"seeded from the current frame (step {step_num}). "
+                    "Comparison armed for subsequent visits.",
+                    self.settings.output_dir,
+                )
             return
         distance = phash_hamming(current_phash, golden.get("visual_phash", ""))
         if distance < 0 or distance <= self._VISUAL_DRIFT_HAMMING_THRESHOLD:
@@ -578,6 +598,13 @@ class PersistenceEngine:
         )
 
     async def analyze_route_regression(self, page: Page, snapshot: Any, step_num: int) -> None:
+        """Diff the route's live component manifest against its golden baseline.
+
+        A missing golden baseline is seeded from the current frame in EVERY
+        mode (2026-10-23 revert of the preexisting-mode skip), so the DOM
+        comparison is never silently skipped: the first visit arms the
+        baseline and subsequent visits of the route are diffed against it.
+        """
         from monkeylm.browser import diff_component_manifests, extract_component_manifest
         domain, page_route = split_domain_and_route(snapshot.url)
         if not domain:
@@ -591,14 +618,21 @@ class PersistenceEngine:
         await self._upsert_baseline(domain=domain, page_route=normalized_route, dom_structure_hash=snapshot.structure_hash, component_manifest=component_manifest, is_golden_standard=False)
         golden = await self._fetch_golden_baseline(domain, normalized_route)
         if golden is None:
-            if self.settings.golden_baseline_mode == "auto_upsert":
-                await self._upsert_baseline(domain=domain, page_route=normalized_route, dom_structure_hash=snapshot.structure_hash, component_manifest=component_manifest, is_golden_standard=True)
-                _local_service_log(f"Auto-seeded golden baseline for {domain}{normalized_route}.", self.settings.output_dir)
-            else:
-                missing_key = (domain, normalized_route)
-                if missing_key not in self._missing_baseline_routes:
-                    self._missing_baseline_routes.add(missing_key)
-                    _local_service_log(f"Golden baseline missing for {domain}{page_route}; comparison skipped.", self.settings.output_dir)
+            # Missing golden: seed from this frame in EVERY mode — comparisons
+            # must never be silently skipped (2026-10-23 revert of the
+            # preexisting-mode skip). The first visit arms the baseline;
+            # subsequent visits are diffed against it.
+            await self._upsert_baseline(domain=domain, page_route=normalized_route, dom_structure_hash=snapshot.structure_hash, component_manifest=component_manifest, is_golden_standard=True)
+            self._baselines_seeded_counts["dom"] += 1
+            self.baseline_summary["baselines_seeded_dom"] = self._baselines_seeded_counts["dom"]
+            if (domain, normalized_route, "dom") not in self._seeded_baseline_routes:
+                self._seeded_baseline_routes.add((domain, normalized_route, "dom"))
+                _local_service_log(
+                    f"Golden baseline missing for {domain}{normalized_route}; "
+                    f"seeded from the current frame (step {step_num}). "
+                    "Comparison armed for subsequent visits.",
+                    self.settings.output_dir,
+                )
             return
         missing_components, broken_selectors = diff_component_manifests(golden_manifest=golden.get("component_manifest", []), current_manifest=component_manifest)
         if not missing_components:

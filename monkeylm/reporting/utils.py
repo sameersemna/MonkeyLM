@@ -40,6 +40,7 @@ def summarize_vision_annotation(
         "cv": 0,
         "no_region": 0,
         "timeout": 0,
+        "token_ceiling": 0,
         "error": 0,
         "skipped_no_step_budget": 0,
     }
@@ -53,6 +54,8 @@ def summarize_vision_annotation(
             counts["vision"] += 1
         elif annotation_error == "timeout":
             counts["timeout"] += 1
+        elif annotation_error == "token_ceiling":
+            counts["token_ceiling"] += 1
         elif annotation_error == "skipped_no_step_budget":
             counts["skipped_no_step_budget"] += 1
         elif annotation_error:
@@ -69,6 +72,7 @@ def summarize_vision_annotation(
         "annotated_by_cv": counts["cv"],
         "no_region_found": counts["no_region"],
         "timeouts": counts["timeout"],
+        "token_ceiling_hits": counts["token_ceiling"],
         "errors": counts["error"],
         "skipped_no_step_budget": counts["skipped_no_step_budget"],
         "vision_model": getattr(settings, "vision_model", "") or "",

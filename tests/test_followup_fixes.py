@@ -157,11 +157,29 @@ class BaselineAndObservabilityTests(unittest.IsolatedAsyncioTestCase):
             any("response preview" in str(call) for call in log.call_args_list)
         )
 
-    async def test_missing_baseline_logged_once_per_route(self) -> None:
-        engine = PersistenceEngine(Settings(golden_baseline_mode="preexisting"), DefectTracker())
+    async def test_missing_baseline_seeded_not_skipped(self) -> None:
+        """2026-10-23 revert: a missing golden baseline is seeded from the
+        current frame in every mode — the comparison is never skipped. The
+        first visit seeds (logged once); a later visit of the same route
+        diffs against the armed golden and can raise a finding."""
+        tracker = DefectTracker()
+        engine = PersistenceEngine(Settings(golden_baseline_mode="preexisting"), tracker)
         engine.pg_pool = object()
-        engine._fetch_golden_baseline = AsyncMock(return_value=None)
+        # Visit 1 finds no golden (-> seeded); visit 2 finds the armed golden
+        # and its manifest differs from the current (empty) one.
+        engine._fetch_golden_baseline = AsyncMock(
+            side_effect=[
+                None,
+                {
+                    "dom_structure_hash": "seeded-hash",
+                    "component_manifest": [
+                        {"kind": "button", "tag": "BUTTON", "text": "Save", "selector_hint": "#save"}
+                    ],
+                },
+            ]
+        )
         engine._upsert_baseline = AsyncMock()
+        engine._insert_regression_drift_log = AsyncMock()
         page = SimpleNamespace(url="https://quranml.samehash.com/")
         snapshot = SimpleNamespace(url="https://quranml.samehash.com/", structure_hash="hash")
 
@@ -170,8 +188,23 @@ class BaselineAndObservabilityTests(unittest.IsolatedAsyncioTestCase):
                 await engine.analyze_route_regression(page, snapshot, 1)
                 await engine.analyze_route_regression(page, snapshot, 2)
 
-        missing_calls = [call for call in log.call_args_list if "Golden baseline missing" in str(call)]
-        self.assertEqual(len(missing_calls), 1)
+        # Visit 1 seeded exactly one golden baseline; the seeding was logged
+        # once and nothing was skipped.
+        golden_upserts = [
+            call for call in engine._upsert_baseline.await_args_list
+            if call.kwargs.get("is_golden_standard")
+        ]
+        self.assertEqual(len(golden_upserts), 1)
+        seeded_logs = [c for c in log.call_args_list if "seeded from the current frame" in str(c)]
+        self.assertEqual(len(seeded_logs), 1)
+        skipped_logs = [c for c in log.call_args_list if "comparison skipped" in str(c)]
+        self.assertEqual(skipped_logs, [])
+        # Visit 2 compared against the armed golden and caught the regression.
+        self.assertEqual(len(tracker.regression_findings), 1)
+        self.assertEqual(tracker.regression_findings[0]["step"], 2)
+        # Run summary exposes the seeded counter.
+        self.assertEqual(engine.baseline_summary.get("baselines_seeded_dom"), 1)
+        self.assertEqual(engine._baselines_seeded_counts["dom"], 1)
 
 
 class DefectAndAnomalyFormattingTests(unittest.TestCase):

@@ -118,8 +118,10 @@ class Settings:
     strict_sandbox: bool = False
     allow_no_sandbox_fallback: bool = False
 
-    postgres_dsn: str = "postgresql://postgres:postgres@latitude:5432/monkeylm"
-    redis_url: str = "redis://:LatitudeRedis1407@latitude:6379/0"
+    # Connection strings come from the untracked .env; never bake a service
+    # credential into a default. These match README.md.
+    postgres_dsn: str = "postgresql://localhost:5432/monkeylm"
+    redis_url: str = "redis://localhost:6379/0"
     redis_prefix: str = "monkey:"
     redis_path_lock_ttl_seconds: int = 45
     redis_state_ttl_seconds: int = 86400

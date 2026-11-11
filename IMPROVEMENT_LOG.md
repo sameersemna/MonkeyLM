@@ -651,3 +651,73 @@ restored `error_step_70_annotated.png` (box + arrow + caption:
 within the click timeout."), repaired `results.json` metadata and
 regenerated the PDF. The synthetic-report harness verified the new
 markdown/PDF sections end-to-end.
+
+## Follow-up — Oct 23 run warnings triage (token-ceiling class added, 2026-10-23)
+
+**Context:** The budget fix held: Oct-23 runs grant the annotation its full
+120s (`budget 120.0s`, zero clamp warnings) and annotate silently on most
+defect steps. The pasted CLI log exposed two remaining loss classes:
+`finish_reason='length'` truncations (5 steps across two runs — reasoning
+models spend hidden tokens before the JSON body) and 2 timeouts where a
+truncated first attempt consumed half the budget and the retry was cut.
+
+**Changes:**
+- `.env`: `VISION_ANNOTATION_MAX_TOKENS` / `VISION_VERIFIER_MAX_TOKENS`
+  2048 → 4096 (measured: the reasoning prefix alone exhausted 2048).
+- `models/vision/_legacy.py`: a truncated reply now records
+  `verdict["error"] = "token_ceiling"` (+ `error_detail` with model and
+  token count) and, when there is neither box nor description, returns the
+  ORIGINAL path instead of copying it to a phantom `*_annotated.png` — an
+  unmarked copy previously flipped `screenshot_annotated: true`.
+- `browser/actions/executor.py`: maps the verdict error marker to
+  `log_entry["annotation_error"]` (+ `annotation_error_detail`), keeps
+  legacy copy-fallback behavior when no marker is present, and prints
+  `✅ Annotation drawn by <model> in Xs` on success so vision activity is
+  visible in the console like its failures always were.
+- `reporting/utils.py` / `markdown.py` / `pdf.py`: new `token_ceiling`
+  bucket + table row + remediation hint ("reasoning models spend hidden
+  tokens before the JSON; raise VISION_ANNOTATION_MAX_TOKENS").
+
+**Non-reproductions recorded (do not re-chase):** the
+`Future exception was never retrieved` Playwright warning appeared ONLY in
+the pre-fix Oct-22 18:18 process (clamp-era step teardowns); zero
+occurrences in either Oct-23 run. The locator path was already hardened
+(single `evaluate()` round-trip, explicit short action timeouts, caught
+per-attempt waits). `Golden baseline missing … comparison skipped` is
+expected under `GOLDEN_BASELINE_MODE=preexisting` for routes never
+seeded; network 5xx/failed-prefetch/atob anomalies are app-side findings
+being recorded, not tool warnings.
+
+**Tests/verification:** direct executor simulation of the truncation flow
+(PASS: `annotation_error=token_ceiling`, `screenshot_annotated` stays
+unset); summary counts extended + verified; full suite 233 OK (twice).
+
+## Revert — golden baseline comparison must never be skipped (2026-10-23)
+
+**Trigger:** User correction of the earlier triage that had accepted
+`Golden baseline missing for <route>; comparison skipped` as by-design in
+`GOLDEN_BASELINE_MODE=preexisting` runs (Oct-23 logs: `/practice`,
+`/opportunities`, `/product` skipped).
+
+**Change (revert of the preexisting-mode skip):**
+- `monkeylm/memory/postgres.py`: when a route's golden baseline is missing,
+  it is seeded from the current frame in EVERY mode — DOM golden
+  (`analyze_route_regression`) and visual golden (`analyze_route_visual_drift`)
+  alike. The per-route once-only warning is replaced by a positive seeding
+  line: "Golden baseline missing for X; seeded from the current frame
+  (step N). Comparison armed for subsequent visits." A route first seen
+  mid-run is therefore covered from its next visit on; `auto_upsert` and
+  `preexisting` no longer differ on missing goldens (mode kept for CLI
+  compatibility).
+- Run-level counters (`baselines_seeded_dom` / `baselines_seeded_visual`)
+  are merged into `baseline_summary` while the run is live and rendered in
+  the Markdown report next to the golden-route counts.
+- The startup warning for an empty preexisting store now says goldens will
+  be seeded on first visit instead of "comparisons will be skipped";
+  docstrings, `.env` comments and the `--golden-baseline-mode` help text
+  updated to match (the skipped-comparison claim is gone from code and docs).
+- Tests: `test_missing_baseline_seeded_not_skipped` (seed logged once, no
+  skip line, second visit diffs against the armed golden and catches a
+  planted regression, counters exposed) replaces the skip-asserting test;
+  the empty-store warning test now asserts the word "skipped" never returns.
+  Full suite: 233 OK.

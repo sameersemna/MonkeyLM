@@ -31,6 +31,13 @@ Environment variables are resolved in this precedence order:
 4. Built-in defaults (lowest)
 
 Notes:
+- `.env` is the single source of truth. A variable it defines wins over the
+  same variable exported in the shell, so a terminal that captured old values
+  (for example VS Code's `python.terminal.useEnvFile`) cannot silently win.
+  Startup warns when it ignores such an export.
+- Shell variables still supply keys `.env` does not define, which keeps CI
+  usable. Set `MONKEYLM_ENV_PRECEDENCE=shell` in the process environment to
+  restore the older shell-first order.
 - The current default model in code is `minimax-m3:cloud`. If you want local Ollama inference, switch to a local model (for example `llama3.2`) in configuration.
 - `requirements.txt` installs `Pillow` and `reportlab` for image annotation and PDF generation.
 - Test artifacts are written into a timestamped folder like `testrun_YYYYMMDD_HHMMSS/`.
@@ -110,8 +117,9 @@ The advanced runner now supports both environment-variable configuration and CLI
 
 All chat, vision, embedding, and reranking calls go through a single
 OpenAI-compatible client. Configuration is read from the project-root `.env`
-file (see `.env.example`); for `OPENAI_*` variables, process environment
-values take precedence over `.env` values.
+file (see `.env.example`); `.env` is authoritative, so an `OPENAI_*` value
+defined there wins over the same variable exported in the shell. CLI flags
+still override it.
 
 ```bash
 # Local Ollama (default; Ollama serves the OpenAI-compatible API on /v1)
@@ -212,7 +220,9 @@ python -m monkeylm
 | `--ocr` / `--no-ocr` | Toggle OCR error-text extraction on failed steps. |
 
 Precedence rule:
-- CLI flag value wins over environment variable value.
+- A CLI flag value wins over every other layer.
+- A value defined in `.env` wins over the same variable exported in the shell.
+- `MONKEYLM_ENV_PRECEDENCE=shell` restores the older shell-first order.
 
 ### Example Runs
 
@@ -479,6 +489,30 @@ Fix:
 
 ```bash
 REDIS_URL=redis://:your_password@latitude:6379/0
+```
+
+### Edited `.env` seems to have no effect
+
+Symptom:
+- You change `REDIS_URL` (or `POSTGRES_DSN`) in `.env`, but the run still
+  connects to another host.
+- Startup prints `REDIS_URL is exported in this shell but .env takes
+  precedence: using …, ignoring the shell value …`.
+
+Cause:
+- `.env` is authoritative, so the edit is in effect and the exported value is
+  being ignored. The remaining reasons a change appears inert are:
+  - `MONKEYLM_ENV_PRECEDENCE=shell` is set in the environment (CI rollback
+    switch), which restores `CLI > shell > .env > default`.
+  - The key is commented out or absent in `.env`, leaving the shell export as
+    the only source.
+  - A CLI flag (`--redis-url`, `--postgres-dsn`) overrides the file.
+
+Fix:
+- Check the startup notice, then run without the override:
+
+```bash
+env -u MONKEYLM_ENV_PRECEDENCE python -m monkeylm
 ```
 
 ### Ollama inference is slow or times out under concurrent workers

@@ -584,6 +584,15 @@ async def annotate_relevant_screenshot(
                         f"VISION_ANNOTATION_TIMEOUT_SECONDS pressure on the model.",
                         os.path.dirname(output_path) or ".",
                     )
+                    # Carry the cause out of this function: without it the
+                    # executor records 'reached, nothing found', which reads
+                    # as a clean negative result instead of the tool failure
+                    # this actually is (observed on the Oct 23, 2026 runs).
+                    verdict_dict["error"] = "token_ceiling"
+                    verdict_dict["error_detail"] = (
+                        f"finish_reason=length after {max_tokens} tokens, "
+                        f"model={active_model}"
+                    )
             except asyncio.TimeoutError:
                 config._local_service_log(
                     f"Vision model {active_model} timed out at {timeout_seconds}s for {image_path}",
@@ -676,6 +685,16 @@ async def annotate_relevant_screenshot(
         )
         if ok:
             return output_path, description, verdict_dict
+
+    # No drawable box: normally the "valid verdict, nothing to mark" path
+    # (or a B10 verifier rejection), which still yields the description.
+    # When the call DEFINITIVELY failed (token ceiling / unparseable JSON)
+    # there is no caption and no box — copying the raw capture to a
+    # ``*_annotated`` name previously flipped ``screenshot_annotated: true``
+    # on an image that contains no marks. Return the original instead so
+    # the executor records an honest, explainable negative result.
+    if verdict_dict.get("error") and not description:
+        return image_path, None, verdict_dict
 
     try:
         shutil.copy2(image_path, output_path)

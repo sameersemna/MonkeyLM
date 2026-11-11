@@ -12,7 +12,9 @@ Two defects let the runner launch a headful browser while ``HEADLESS`` was
    was nested inside ``if s.max_steps_per_worker > s.max_steps:``. Those flags
    were applied only when that unrelated clamp fired.
 
-The documented precedence is ``CLI > shell > .env > default``.
+The documented precedence is ``CLI > .env > shell > default``: ``.env`` is the
+configuration source of truth, and ``MONKEYLM_ENV_PRECEDENCE=shell`` restores
+the older shell-first order.
 """
 
 from __future__ import annotations
@@ -43,6 +45,7 @@ def _resolve_headless_in_subprocess(
     dotenv_value: str,
     shell_value: str | None,
     cli_value: bool | None,
+    extra_env: dict[str, str] | None = None,
 ) -> bool:
     """Resolve ``Settings.headless`` in a clean interpreter.
 
@@ -59,6 +62,10 @@ def _resolve_headless_in_subprocess(
     env_path.write_text(rewritten + ("\n" if original.endswith("\n") else ""), encoding="utf-8")
 
     child_env = {k: v for k, v in os.environ.items() if k != "HEADLESS"}
+    # The suite's own environment must not accidentally select a precedence mode.
+    child_env.pop("MONKEYLM_ENV_PRECEDENCE", None)
+    if extra_env:
+        child_env.update(extra_env)
     if shell_value is not None:
         child_env["HEADLESS"] = shell_value
 
@@ -78,7 +85,7 @@ def _resolve_headless_in_subprocess(
     return proc.stdout.strip().splitlines()[-1] == "True"
 
 
-# ── Precedence contract: CLI > shell > .env > default ─────────────────────────
+# ── Precedence contract: CLI > .env > shell > default ────────────────────────
 
 
 def test_env_true_and_no_flags_resolves_headless() -> None:
@@ -101,13 +108,28 @@ def test_cli_headed_overrides_env_true() -> None:
     ) is False
 
 
-def test_shell_overrides_env() -> None:
+def test_dotenv_overrides_shell_export() -> None:
+    """``.env`` is authoritative: an exported value must not beat the file.
+
+    A terminal that injected ``.env`` before an edit keeps the old value
+    exported; that staleness is what made a changed setting look inert.
+    """
     assert _resolve_headless_in_subprocess(
         dotenv_value="false", shell_value="true", cli_value=None
-    ) is True
+    ) is False
     assert _resolve_headless_in_subprocess(
         dotenv_value="true", shell_value="false", cli_value=None
-    ) is False
+    ) is True
+
+
+def test_shell_precedence_rollback_restores_shell_order() -> None:
+    """``MONKEYLM_ENV_PRECEDENCE=shell`` restores the previous order."""
+    assert _resolve_headless_in_subprocess(
+        dotenv_value="false",
+        shell_value="true",
+        cli_value=None,
+        extra_env={"MONKEYLM_ENV_PRECEDENCE": "shell"},
+    ) is True
 
 
 def test_env_false_without_flags_resolves_headful() -> None:

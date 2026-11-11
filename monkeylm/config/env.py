@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 import os
 import random
-from typing import Any, List, Optional
+import re
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 from monkeylm.types import Settings
@@ -16,6 +18,101 @@ from .defaults import (
     DEFAULT_WINDOW_SIZE,
     PROJECT_ROOT,
 )
+
+
+# Keys whose value changes connect-time behaviour and whose credentials must
+# never be printed verbatim.
+_SENSITIVE_PRECEDENCE_KEYS = ("REDIS_URL", "POSTGRES_DSN", "OPENAI_API_KEY")
+#: CLI attribute that overrides each sensitive key, so a precedence notice is
+#: suppressed when the flag already decided the value.
+_CLI_PRECEDENCE_ATTRS = {
+    "REDIS_URL": "redis_url",
+    "POSTGRES_DSN": "postgres_dsn",
+    "OPENAI_API_KEY": "openai_api_key",
+}
+_INLINE_PASSWORD_RE = re.compile(r"(://[^:/@]*:)([^@/]+)(@)")
+
+
+def _mask_secret_value(name: str, value: str) -> str:
+    """Return ``value`` with credentials masked so it is safe to log."""
+    if not value:
+        return "<empty>"
+    if name == "OPENAI_API_KEY":
+        return "***" if len(value) <= 8 else f"{value[:4]}***"
+    return _INLINE_PASSWORD_RE.sub(r"\1***\3", value)
+
+
+def _dotenv_precedence_active() -> bool:
+    """Whether ``.env`` is authoritative over exported shell variables."""
+    from monkeylm.config.defaults import _dotenv_overrides_shell
+
+    return _dotenv_overrides_shell()
+
+
+def _precedence_layer(name: str, env_vars: Dict[str, Any]) -> str:
+    """Name the layer that actually supplies ``name``.
+
+    Reported diagnostics must describe the layer that *won*, not merely which
+    layers were present; otherwise launch logs explain a value that was never
+    used.
+    """
+    from monkeylm.config.defaults import _pre_dotenv_env_keys
+
+    dotenv_value = str(env_vars.get(name) or "").strip()
+    if dotenv_value and _dotenv_precedence_active():
+        return "dotenv"
+    if name in _pre_dotenv_env_keys():
+        return "shell"
+    if dotenv_value:
+        return "dotenv"
+    return "default"
+
+
+def _precedence_notices(
+    env_vars: Dict[str, Any],
+    env_path: Path,
+    cli_overridden: Optional[set] = None,
+) -> List[str]:
+    """Explain sensitive keys where the shell and ``.env`` disagree.
+
+    Only a genuine shell export (captured before ``load_dotenv``) that differs
+    from a value ``.env`` defines is reported: that is the case where one layer
+    silently loses, which is what made a changed ``REDIS_URL`` look inert. The
+    message names the winning layer, so the operator does not have to reason
+    about precedence from the observed connection attempt. Keys a CLI flag
+    already overrode are skipped, because no environment layer decided them.
+    """
+    from monkeylm.config.defaults import _pre_dotenv_env_keys, _pre_dotenv_env_values
+
+    skip = cli_overridden or set()
+    shell_exported = _pre_dotenv_env_keys()
+    shell_values = _pre_dotenv_env_values()
+    notices: List[str] = []
+    for name in _SENSITIVE_PRECEDENCE_KEYS:
+        if name in skip or name not in shell_exported:
+            continue
+        raw_shell = shell_values.get(name)
+        if raw_shell is None:
+            raw_shell = os.getenv(name)
+        shell_value = (raw_shell or "").strip()
+        dotenv_value = str(env_vars.get(name) or "").strip()
+        if not dotenv_value or not shell_value or shell_value == dotenv_value:
+            continue
+        if _dotenv_precedence_active():
+            notices.append(
+                f"{name} is exported in this shell but {env_path.name} takes precedence: "
+                f"using {_mask_secret_value(name, dotenv_value)}, ignoring the shell "
+                f"value {_mask_secret_value(name, shell_value)}. {env_path.name} is the "
+                f"configuration source of truth; CLI flags still override it."
+            )
+        else:
+            notices.append(
+                f"{name} is exported in this shell and MONKEYLM_ENV_PRECEDENCE=shell makes "
+                f"it override {env_path.name}: using {_mask_secret_value(name, shell_value)}, "
+                f"ignoring {_mask_secret_value(name, dotenv_value)}. Drop "
+                f"MONKEYLM_ENV_PRECEDENCE or set it to `dotenv` to let {env_path.name} win."
+            )
+    return notices
 
 
 def _env_to_bool(value: Any, default: bool = False) -> bool:
@@ -45,13 +142,15 @@ def _env_to_float(value: Any, default: float) -> float:
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
-    """Resolve a boolean setting with the precedence shell > .env > default.
+    """Resolve a boolean setting with the precedence ``.env`` > shell > default.
 
     ``os.environ`` is consulted only when the key was a *real shell export*.
     ``monkeylm.config.defaults`` calls ``load_dotenv`` at import time, which
     copies every ``.env`` entry into ``os.environ``; treating those injected
     values as shell exports would let ``.env`` shadow an explicit CLI flag and
-    make ``default`` (already parsed from ``.env``) unreachable.
+    make ``default`` (already parsed from ``.env``) unreachable. When the shell
+    did export the key, ``load_dotenv(override=True)`` has already replaced
+    ``os.environ`` with the ``.env`` value, so ``os.getenv`` still wins here.
     """
     from monkeylm.config.defaults import _pre_dotenv_env_keys
 
@@ -141,6 +240,12 @@ def load_settings(cli_args: Optional[argparse.Namespace] = None) -> Settings:
     env_vars = {}
     if env_path.is_file():
         env_vars = dotenv_values(env_path)
+    cli_overridden = {
+        name
+        for name, attr in _CLI_PRECEDENCE_ATTRS.items()
+        if cli_args is not None and getattr(cli_args, attr, None)
+    }
+    precedence_notices = _precedence_notices(env_vars, env_path, cli_overridden)
 
     s = Settings()
 
@@ -199,13 +304,8 @@ def load_settings(cli_args: Optional[argparse.Namespace] = None) -> Settings:
     s.headless = _env_bool("HEADLESS", default=_env_to_bool(ev_headless, s.headless))
     # Record which layer supplied HEADLESS so launch-time diagnostics can
     # explain *why* headless is on/off instead of leaving operators to guess.
-    from monkeylm.config.defaults import _pre_dotenv_env_keys
-    if "HEADLESS" in _pre_dotenv_env_keys():
-        s._headless_source = "shell"
-    elif ev_headless is not None:
-        s._headless_source = "dotenv"
-    else:
-        s._headless_source = "default"
+    # The reported layer is the one that won, not merely one that was present.
+    s._headless_source = _precedence_layer("HEADLESS", env_vars)
     raw_bws = env_vars.get("BROWSER_WINDOW_SIZE") or os.getenv("BROWSER_WINDOW_SIZE") or s.browser_window_size
     s.browser_window_size = _normalize_window_size(raw_bws)
     ev_nv = env_vars.get("NO_VIEWPORT")
@@ -413,6 +513,14 @@ def load_settings(cli_args: Optional[argparse.Namespace] = None) -> Settings:
     os.makedirs(s.output_dir, exist_ok=True)
     os.makedirs(s.user_data_root, exist_ok=True)
     os.makedirs(s.run_user_data_dir, exist_ok=True)
+
+    if precedence_notices:
+        from .helpers import _local_service_log
+
+        for notice in precedence_notices:
+            # Printed and appended to the run's service_connectivity.log, i.e.
+            # beside the connectivity error this condition usually explains.
+            _local_service_log(notice, s.output_dir)
 
     return s
 

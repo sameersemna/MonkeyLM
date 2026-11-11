@@ -126,9 +126,14 @@ def test_headless_source_reports_dotenv_layer(monkeypatch) -> None:
     assert settings._headless_source == "dotenv"
 
 
-def test_headless_source_reports_shell_layer(monkeypatch) -> None:
+def test_headless_source_reports_shell_layer(monkeypatch, tmp_path) -> None:
+    """The shell layer wins only for keys ``.env`` does not define."""
     from monkeylm.config import defaults as defaults_mod
+    from monkeylm.config import env as env_mod
 
+    # Point resolution at a temporary .env that does not mention HEADLESS.
+    (tmp_path / ".env").write_text("TARGET_URL=https://example.com/\n", encoding="utf-8")
+    monkeypatch.setattr(env_mod, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(
         defaults_mod, "_pre_dotenv_env_keys", lambda: frozenset({"HEADLESS"})
     )

@@ -140,7 +140,11 @@ class BaselineStartupSummaryTests(unittest.IsolatedAsyncioTestCase):
             summary = await engine._load_baseline_summary()
 
         self.assertFalse(summary["preexisting_ready"])
-        self.assertTrue(any("no golden baselines" in str(call) for call in log.call_args_list))
+        calls = [str(call) for call in log.call_args_list]
+        self.assertTrue(any("no golden baselines" in call for call in calls))
+        # 2026-10-23 revert: the warning must NOT claim comparisons are
+        # skipped — missing goldens are seeded on first visit.
+        self.assertTrue(all("skipped" not in call for call in calls))
 
     async def test_summary_reports_unavailable_store(self) -> None:
         engine = PersistenceEngine(Settings(), DefectTracker())

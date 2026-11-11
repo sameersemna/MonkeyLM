@@ -240,17 +240,19 @@ class SummarizeVisionAnnotationTests(unittest.TestCase):
             {"annotation_source": "none"},
             {"annotation_source": "none", "annotation_error": "RuntimeError: boom"},
             {"annotation_source": ""},
+            {"annotation_source": "none", "annotation_error": "token_ceiling"},
         ]
         summary = summarize_vision_annotation(logs, self._settings())
-        self.assertEqual(summary["attempted"], 6)
+        self.assertEqual(summary["attempted"], 7)
         self.assertEqual(summary["annotated"], 2)
         self.assertEqual(summary["annotated_by_vision"], 1)
         self.assertEqual(summary["annotated_by_cv"], 1)
         self.assertEqual(summary["no_region_found"], 1)
         self.assertEqual(summary["timeouts"], 1)
+        self.assertEqual(summary["token_ceiling_hits"], 1)
         self.assertEqual(summary["skipped_no_step_budget"], 1)
         self.assertEqual(summary["errors"], 1)
-        self.assertEqual(summary["total_steps"], 7)
+        self.assertEqual(summary["total_steps"], 8)
         self.assertEqual(summary["budget_seconds"], 120.0)
         self.assertEqual(summary["max_attempts"], 2)
         self.assertEqual(summary["vision_model"], "free-failsafe-vision")
