@@ -52,7 +52,8 @@ def _inline_credentials(text: str) -> list[str]:
             continue  # user only, no password component
         _user, _, password = userinfo.partition(":")
         if not password or not password.strip():
-            continue  # ``redis://:pw@`` has a password; ``redis://:`` does not
+            # An empty password component is not a secret (e.g. "user:@host").
+            continue
         lowered = password.lower()
         if any(marker in lowered for marker in _PLACEHOLDER_MARKERS):
             continue

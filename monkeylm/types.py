@@ -122,7 +122,7 @@ class Settings:
     # credential into a default. These match README.md.
     postgres_dsn: str = "postgresql://localhost:5432/monkeylm"
     redis_url: str = "redis://localhost:6379/0"
-    redis_prefix: str = "monkey:"
+    redis_prefix: str = ""
     redis_path_lock_ttl_seconds: int = 45
     redis_state_ttl_seconds: int = 86400
     strict_persistence: bool = False

@@ -132,12 +132,15 @@ Runtime retry controls:
 Recommended scaling sequence:
 1. Increase `WORKERS` gradually.
 2. Observe browser launch time, action latency, and error rates.
-3. Confirm PostgreSQL and Redis stay below saturation.
+3. Confirm PostgreSQL and Redis stay below saturation (Redis is only in play
+   when `WORKERS >= 2`).
 4. Increase total step budget only after worker stability is confirmed.
 
 Current persistence sizing strategy in code:
 - PostgreSQL pool: `min_size = min(4, WORKERS)`, `max_size = max(4, WORKERS * 4)`.
-- Redis max connections: `max(16, WORKERS * 8)`.
+- Redis max connections: `max(16, WORKERS * 8)`, opened **only when `WORKERS >= 2`** — the
+  cache has no standalone read path; it carries shared revisit counts and action-path locks
+  between workers, so single-worker runs skip the connection entirely.
 - Write-path throttling: semaphore-protected PostgreSQL and Redis write sections.
 
 Tradeoff:

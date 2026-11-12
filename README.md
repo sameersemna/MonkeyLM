@@ -34,7 +34,12 @@ Notes:
 - `.env` is the single source of truth. A variable it defines wins over the
   same variable exported in the shell, so a terminal that captured old values
   (for example VS Code's `python.terminal.useEnvFile`) cannot silently win.
-  Startup warns when it ignores such an export.
+  Startup lists **every** key where that happens, with credentials masked.
+- **This includes inline prefixes.** `WORKERS=2 python -m monkeylm` is a shell
+  export, so a `WORKERS=1` in `.env` still wins and the run uses one worker.
+  Startup says so explicitly and names the escape hatch. To override the file,
+  use a CLI flag: `python -m monkeylm --workers 2`. Not every setting has a
+  flag; where none exists, edit `.env` or use `MONKEYLM_ENV_PRECEDENCE=shell`.
 - Shell variables still supply keys `.env` does not define, which keeps CI
   usable. Set `MONKEYLM_ENV_PRECEDENCE=shell` in the process environment to
   restore the older shell-first order.
@@ -95,8 +100,8 @@ The advanced runner now supports both environment-variable configuration and CLI
 | `BROWSER_WINDOW_SIZE` | `1920,1080` | Browser launch size (`width,height` or `widthxheight`). |
 | `NO_VIEWPORT` | `true` | Use window size directly instead of Playwright viewport emulation. |
 | `POSTGRES_DSN` | `postgresql://localhost:5432/monkeylm` | PostgreSQL connection string. |
-| `REDIS_URL` | `redis://localhost:6379/0` | Redis connection URL for visited-state tracking. |
-| `REDIS_PREFIX` | `""` | Optional prefix applied to all Redis keys (for example `monkey:`). |
+| `REDIS_URL` | `redis://localhost:6379/0` | Redis connection URL. Only used when `WORKERS >= 2` (cross-worker coordination); single-worker runs skip the connection. |
+| `REDIS_PREFIX` | `""` | Prefix for all Redis keys. Empty means no prefix. Keys become `{prefix}monkeylm:visited_states:<run>` and `{prefix}monkeylm:active_path:<hash>`; written only when `WORKERS > 1`. |
 | `REDIS_PATH_LOCK_TTL_SECONDS` | `45` | TTL for cross-worker action-path Redis locks. Must be 1–300 seconds. |
 | `STRICT_SANDBOX` | `false` | If `true`, Chromium must launch in sandbox mode or the run fails. |
 | `ALLOW_NO_SANDBOX_FALLBACK` | `false` | If `true`, fallback to `--no-sandbox` is allowed when sandbox launch fails. |
@@ -485,11 +490,78 @@ Symptom:
 - Startup log shows `Redis initialization failed: Authentication required`.
 
 Fix:
-- Include the password in `REDIS_URL`:
+- Include the password in `REDIS_URL`, naming the `default` user:
 
 ```bash
-REDIS_URL=redis://:your_password@latitude:6379/0
+REDIS_URL=redis://default:your_password@latitude:6379/0
 ```
+
+- Why `default:` and not `redis://:your_password@host`? Both work for the app
+  (`redis-py` treats an empty username as "default user"), but **`redis-cli`
+  does not**: with `redis-cli 7.x` the password-only form sends
+  `AUTH "" <password>` and fails with
+  `AUTH failed: WRONGPASS invalid username-password pair` or
+  `NOAUTH Authentication required`. Writing the username explicitly keeps the
+  same URL usable from the CLI.
+
+- Inspecting Redis from the shell without leaking the password into the
+  process list:
+
+```bash
+REDISCLI_AUTH='your_password' redis-cli -h latitude -p 6379 PING
+REDISCLI_AUTH='your_password' redis-cli -h latitude -p 6379 --scan --pattern 'monkey:*'
+```
+
+### No keys appear in Redis under `REDIS_PREFIX`
+
+Symptom:
+- Startup prints `Redis not used: WORKERS=1 …`, and `SCAN monkey:*` returns
+  nothing.
+
+Is Redis required?
+- **Only when `WORKERS >= 2`.** The cache has no read path of its own; it exists
+  purely to coordinate *between* workers:
+
+  | Write | Key | Purpose |
+  |---|---|---|
+  | `increment_visited_state` | `{REDIS_PREFIX}monkeylm:visited_states:<run timestamp>` | shares revisit counts so every worker sees total visits (drives loop-breaking) |
+  | `claim_action_path_lock` | `{REDIS_PREFIX}monkeylm:active_path:<hash>` | stops two workers performing the same action (TTL: `REDIS_PATH_LOCK_TTL_SECONDS`) |
+
+- With `WORKERS=1` there is nothing to coordinate, so the connection is skipped
+  entirely — no keys, no idle socket. `STRICT_PERSISTENCE=true` does **not**
+  demand Redis in that case. Both Redis primitives also fail open: if the
+  service is unreachable mid-run, the workers proceed without coordination.
+
+Checking by prefix is a complete test: both writers go through
+`build_redis_key()`, so no write can escape the namespace. The resulting key
+shapes are:
+
+```
+{REDIS_PREFIX}monkeylm:visited_states:<run timestamp>   hash, TTL REDIS_STATE_TTL_SECONDS
+{REDIS_PREFIX}monkeylm:active_path:<hash>               string, TTL REDIS_PATH_LOCK_TTL_SECONDS
+```
+
+With `REDIS_PREFIX=monkey:` that reads `monkey:monkeylm:visited_states:…`
+(the doubled `monkey` is expected: prefix + base namespace). Leaving
+`REDIS_PREFIX=` empty is honoured as "no prefix" and yields `monkeylm:…`.
+Timing matters when you look: locks expire in `REDIS_PATH_LOCK_TTL_SECONDS`
+(45s by default), and each run writes a **new** timestamped key, so older keys
+can linger until the 24h visited-state TTL.
+
+Fix:
+- Raise `WORKERS` above 1 if you want the cache populated, then re-check with a
+  password-safe scan (`REDISCLI_AUTH` keeps the secret out of `argv`):
+
+```bash
+REDISCLI_AUTH="$REDIS_PASSWORD" redis-cli -h latitude -p 6379 --scan --pattern 'monkey:*'
+```
+
+- Do **not** use `redis-cli -u "$REDIS_URL"` when `REDIS_URL` uses the
+  password-only form (`redis://:pw@host`): `redis-cli` sends an empty username
+  and authentication fails, even though the app connects fine. Either name the
+  `default` user in `REDIS_URL` or use the `-h/-p` form above.
+- Note the shared-instance caveat: on a Redis server also used by other
+  services, `DBSIZE` reflects *their* keys too — scan for your prefix instead.
 
 ### Edited `.env` seems to have no effect
 

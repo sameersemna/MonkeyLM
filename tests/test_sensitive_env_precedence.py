@@ -62,7 +62,8 @@ def test_dotenv_wins_and_the_shadowed_shell_value_is_reported(
     assert len(notices) == 1
     notice = notices[0]
     assert "REDIS_URL" in notice
-    assert "takes precedence" in notice
+    assert "from .env" in notice
+    assert "ignoring shell value" in notice
     # Both layers are identifiable by host, so the operator sees which one won.
     assert _ENV_HOST in notice
     assert _SHELL_HOST in notice
@@ -84,10 +85,86 @@ def test_rollback_mode_reports_the_shell_layer_as_winner(
     assert len(notices) == 1
     notice = notices[0]
     assert "MONKEYLM_ENV_PRECEDENCE=shell" in notice
+    assert "using shell value" in notice
     assert _SHELL_HOST in notice
     assert _ENV_HOST in notice
     assert _ENV_PW not in notice
     assert _SHELL_PW not in notice
+
+
+# ── The reported bug: a NON-sensitive key was silently discarded ────────────
+
+
+def test_non_sensitive_key_is_reported_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression: ``WORKERS=2 cmd`` was discarded by ``.env`` with no message.
+
+    The notice used to check an enumerated list of three sensitive keys, so the
+    operator saw a Redis warning and concluded precedence was being explained
+    while ``WORKERS`` said nothing. Candidates are now derived from the keys
+    ``.env`` defines, so no key can be a blind spot.
+    """
+    notices = _notices(
+        {"WORKERS": "1", "GOLDEN_BASELINE_MODE": "preexisting"},
+        monkeypatch,
+        {"WORKERS": "2", "GOLDEN_BASELINE_MODE": "auto_upsert"},
+    )
+
+    assert len(notices) == 1
+    notice = notices[0]
+    assert "WORKERS" in notice
+    assert "ignoring shell value 2" in notice
+    assert "using 1 from .env" in notice
+    assert "GOLDEN_BASELINE_MODE" in notice
+    assert "auto_upsert" in notice
+
+
+def test_notice_explains_the_cli_escape_hatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The message must say HOW to override, or it leaves the operator stuck."""
+    notices = _notices({"WORKERS": "1"}, monkeypatch, {"WORKERS": "2"})
+    assert "--workers 2" in notices[0]
+
+
+def test_an_unlisted_key_is_still_reported(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Structural completeness: a brand-new setting needs no code change."""
+    notices = _notices(
+        {"BRAND_NEW_SETTING_XYZ": "new"},
+        monkeypatch,
+        {"BRAND_NEW_SETTING_XYZ": "old"},
+    )
+    assert "BRAND_NEW_SETTING_XYZ" in notices[0]
+    assert "old" in notices[0]
+
+
+# ── Empty is a real value, not an absence ───────────────────────────────────
+
+
+def test_empty_dotenv_value_shadowing_a_shell_value_is_reported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``REDIS_PREFIX=`` means "no prefix", so it must not be treated as unset.
+
+    Skipping empty values left a silent-shadowing blind spot on the very key
+    whose empty form was fixed earlier.
+    """
+    notices = _notices({"REDIS_PREFIX": ""}, monkeypatch, {"REDIS_PREFIX": "monkey:"})
+
+    assert len(notices) == 1
+    assert "REDIS_PREFIX" in notices[0]
+    assert "<empty>" in notices[0]
+    assert "monkey:" in notices[0]
+
+
+def test_non_empty_dotenv_value_shadowing_an_empty_shell_value_is_reported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    notices = _notices({"REDIS_PREFIX": "monkey:"}, monkeypatch, {"REDIS_PREFIX": ""})
+
+    assert "REDIS_PREFIX" in notices[0]
+    assert "ignoring shell value <empty>" in notices[0]
+
+
+def test_both_empty_is_silent(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert _notices({"REDIS_PREFIX": ""}, monkeypatch, {"REDIS_PREFIX": ""}) == []
 
 
 def test_identical_layers_are_silent(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -167,7 +244,7 @@ def test_stale_shell_export_cannot_override_env_file(tmp_path: Path) -> None:
     # layers by host but must never print either password. Only the notice line
     # is inspected here: the harness's own RESOLVED echo intentionally carries
     # the full URL.
-    notice_lines = [line for line in proc.stdout.splitlines() if "takes precedence" in line]
+    notice_lines = [line for line in proc.stdout.splitlines() if "from .env, ignoring shell value" in line]
     assert notice_lines, proc.stdout
     notice = notice_lines[0]
     assert _SHELL_HOST in notice

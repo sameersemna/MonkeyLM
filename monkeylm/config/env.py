@@ -20,26 +20,36 @@ from .defaults import (
 )
 
 
-# Keys whose value changes connect-time behaviour and whose credentials must
-# never be printed verbatim.
-_SENSITIVE_PRECEDENCE_KEYS = ("REDIS_URL", "POSTGRES_DSN", "OPENAI_API_KEY")
-#: CLI attribute that overrides each sensitive key, so a precedence notice is
-#: suppressed when the flag already decided the value.
-_CLI_PRECEDENCE_ATTRS = {
-    "REDIS_URL": "redis_url",
-    "POSTGRES_DSN": "postgres_dsn",
-    "OPENAI_API_KEY": "openai_api_key",
-}
+# Secrets must never be printed verbatim. Detection is by VALUE SHAPE (inline
+# ``scheme://user:password@`` userinfo) and by NAME heuristic, never by an
+# enumerated list of keys: a list would silently expose the next secret added.
 _INLINE_PASSWORD_RE = re.compile(r"(://[^:/@]*:)([^@/]+)(@)")
+_SECRET_NAME_RE = re.compile(r"(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)", re.IGNORECASE)
 
 
-def _mask_secret_value(name: str, value: str) -> str:
+def _mask_value(name: str, value: str) -> str:
     """Return ``value`` with credentials masked so it is safe to log."""
     if not value:
         return "<empty>"
-    if name == "OPENAI_API_KEY":
+    masked = _INLINE_PASSWORD_RE.sub(r"\1***\3", value)
+    if masked != value:
+        return masked
+    if _SECRET_NAME_RE.search(name):
         return "***" if len(value) <= 8 else f"{value[:4]}***"
-    return _INLINE_PASSWORD_RE.sub(r"\1***\3", value)
+    return value
+
+
+def _mask_secret_value(name: str, value: str) -> str:
+    """Backwards-compatible alias for :func:`_mask_value`."""
+    return _mask_value(name, value)
+
+
+#: ``.env`` names whose CLI flag is not the mechanical ``name.lower()``.
+_CLI_ATTR_EXCEPTIONS = {"BROWSER_WINDOW_SIZE": "window_size"}
+
+
+def _cli_attr_for(name: str) -> str:
+    return _CLI_ATTR_EXCEPTIONS.get(name, name.lower())
 
 
 def _dotenv_precedence_active() -> bool:
@@ -68,51 +78,97 @@ def _precedence_layer(name: str, env_vars: Dict[str, Any]) -> str:
     return "default"
 
 
+def _cli_overridden_names(cli_args: Optional[argparse.Namespace], names: Any) -> set:
+    """Which of ``names`` a CLI flag already decided.
+
+    Derived rather than enumerated: for each candidate key, look up the
+    mechanical CLI attribute (``WORKERS`` -> ``workers``) so a newly added
+    setting cannot silently escape the check.
+    """
+    if cli_args is None:
+        return set()
+    overridden = set()
+    for name in names:
+        if getattr(cli_args, _cli_attr_for(name), None) is not None:
+            overridden.add(name)
+    return overridden
+
+
 def _precedence_notices(
     env_vars: Dict[str, Any],
     env_path: Path,
     cli_overridden: Optional[set] = None,
 ) -> List[str]:
-    """Explain sensitive keys where the shell and ``.env`` disagree.
+    """Report every key where one environment layer silently loses.
 
-    Only a genuine shell export (captured before ``load_dotenv``) that differs
-    from a value ``.env`` defines is reported: that is the case where one layer
-    silently loses, which is what made a changed ``REDIS_URL`` look inert. The
-    message names the winning layer, so the operator does not have to reason
-    about precedence from the observed connection attempt. Keys a CLI flag
-    already overrode are skipped, because no environment layer decided them.
+    The candidate set is **derived from the keys ``.env`` defines**, not from a
+    hand-maintained list. An enumerated list is a blind spot by construction:
+    the previous version checked ``REDIS_URL``/``POSTGRES_DSN``/``OPENAI_API_KEY``
+    only, so ``WORKERS=2`` in the shell was discarded by a ``WORKERS=1`` in
+    ``.env`` with no message at all — the operator saw a warning about Redis and
+    concluded precedence was being explained, when the key that mattered said
+    nothing.
+
+    Keys a CLI flag already decided are skipped: no environment layer decided
+    them, so describing an env-vs-env winner would be misleading.
     """
     from monkeylm.config.defaults import _pre_dotenv_env_keys, _pre_dotenv_env_values
 
     skip = cli_overridden or set()
     shell_exported = _pre_dotenv_env_keys()
     shell_values = _pre_dotenv_env_values()
-    notices: List[str] = []
-    for name in _SENSITIVE_PRECEDENCE_KEYS:
+    dotenv_wins = _dotenv_precedence_active()
+
+    shadowed: List[str] = []
+    for name in sorted(env_vars):
         if name in skip or name not in shell_exported:
             continue
+        # Presence, not truthiness: an explicitly empty value is a real setting
+        # (``REDIS_PREFIX=`` means "no prefix") and must be reported when it
+        # shadows a non-empty shell value.
+        dotenv_value = str(env_vars.get(name) or "").strip()
         raw_shell = shell_values.get(name)
         if raw_shell is None:
             raw_shell = os.getenv(name)
-        shell_value = (raw_shell or "").strip()
-        dotenv_value = str(env_vars.get(name) or "").strip()
-        if not dotenv_value or not shell_value or shell_value == dotenv_value:
+        if raw_shell is None:
             continue
-        if _dotenv_precedence_active():
-            notices.append(
-                f"{name} is exported in this shell but {env_path.name} takes precedence: "
-                f"using {_mask_secret_value(name, dotenv_value)}, ignoring the shell "
-                f"value {_mask_secret_value(name, shell_value)}. {env_path.name} is the "
-                f"configuration source of truth; CLI flags still override it."
+        shell_value = str(raw_shell).strip()
+        if shell_value == dotenv_value:
+            continue
+        if dotenv_wins:
+            shadowed.append(
+                f"{name}: using {_mask_value(name, dotenv_value)} from {env_path.name}, "
+                f"ignoring shell value {_mask_value(name, shell_value)}"
             )
         else:
-            notices.append(
-                f"{name} is exported in this shell and MONKEYLM_ENV_PRECEDENCE=shell makes "
-                f"it override {env_path.name}: using {_mask_secret_value(name, shell_value)}, "
-                f"ignoring {_mask_secret_value(name, dotenv_value)}. Drop "
-                f"MONKEYLM_ENV_PRECEDENCE or set it to `dotenv` to let {env_path.name} win."
+            shadowed.append(
+                f"{name}: using shell value {_mask_value(name, shell_value)} "
+                f"(MONKEYLM_ENV_PRECEDENCE=shell), ignoring {env_path.name} value "
+                f"{_mask_value(name, dotenv_value)}"
             )
-    return notices
+
+    if not shadowed:
+        return []
+
+    shown = shadowed[:10]
+    header = (
+        f"{len(shadowed)} setting(s) exported in this shell differ from {env_path.name}, "
+        f"which {(chr(39) + 'wins' + chr(39)) if dotenv_wins else 'loses'}:"
+    )
+    tail = [f"  {line}" for line in shown]
+    if len(shadowed) > len(shown):
+        tail.append(f"  … and {len(shadowed) - len(shown)} more")
+    if dotenv_wins:
+        tail.append(
+            "Shell values cannot override the file; pass a CLI flag instead "
+            "(for example `--workers 2`)."
+        )
+    else:
+        tail.append(
+            "Unset MONKEYLM_ENV_PRECEDENCE (or set it to `dotenv`) to let the file win."
+        )
+    return [header + "\n" + "\n".join(tail)]
+
 
 
 def _env_to_bool(value: Any, default: bool = False) -> bool:
@@ -180,6 +236,28 @@ def _env_str(name: str, default: str) -> str:
     return stripped if stripped else default
 
 
+def _env_str_present(name: str, env_vars: Dict[str, Any], default: str) -> str:
+    """Resolve a string where an explicitly empty value is meaningful.
+
+    ``REDIS_PREFIX=`` means "no prefix". :func:`_env_str` cannot express that:
+    an empty value is falsy, so it fell back to the default and clearing the
+    prefix silently kept ``monkey:``. Presence, not truthiness, decides which
+    layer supplied the value; which of two present layers wins is the same
+    question :func:`_precedence_layer` answers.
+    """
+    from monkeylm.config.defaults import _dotenv_overrides_shell, _pre_dotenv_env_keys
+
+    dotenv_has = name in env_vars
+    shell_has = name in _pre_dotenv_env_keys()
+    if dotenv_has and (_dotenv_overrides_shell() or not shell_has):
+        return str(env_vars.get(name) or "").strip()
+    if shell_has:
+        raw = os.getenv(name)
+        if raw is not None:
+            return raw.strip()
+    return default
+
+
 def _env_float(name: str, default: float) -> float:
     value = os.getenv(name)
     if value is None:
@@ -240,11 +318,9 @@ def load_settings(cli_args: Optional[argparse.Namespace] = None) -> Settings:
     env_vars = {}
     if env_path.is_file():
         env_vars = dotenv_values(env_path)
-    cli_overridden = {
-        name
-        for name, attr in _CLI_PRECEDENCE_ATTRS.items()
-        if cli_args is not None and getattr(cli_args, attr, None)
-    }
+    # Derived from the keys .env defines, so a new setting is covered without
+    # touching this code (see _precedence_notices).
+    cli_overridden = _cli_overridden_names(cli_args, env_vars)
     precedence_notices = _precedence_notices(env_vars, env_path, cli_overridden)
 
     s = Settings()
@@ -312,7 +388,8 @@ def load_settings(cli_args: Optional[argparse.Namespace] = None) -> Settings:
     s.no_viewport = _env_bool("NO_VIEWPORT", default=_env_to_bool(ev_nv, s.no_viewport))
     s.postgres_dsn = _env_str("POSTGRES_DSN", env_vars.get("POSTGRES_DSN") or s.postgres_dsn)
     s.redis_url = _env_str("REDIS_URL", env_vars.get("REDIS_URL") or s.redis_url)
-    s.redis_prefix = _env_str("REDIS_PREFIX", env_vars.get("REDIS_PREFIX") or s.redis_prefix)
+    # Empty is meaningful here ("no prefix"), so presence must decide.
+    s.redis_prefix = _env_str_present("REDIS_PREFIX", env_vars, s.redis_prefix)
     ev_rp = env_vars.get("REDIS_PATH_LOCK_TTL_SECONDS")
     s.redis_path_lock_ttl_seconds = max(1, int(ev_rp) if ev_rp is not None else s.redis_path_lock_ttl_seconds)
     s.golden_baseline_mode = _env_str("GOLDEN_BASELINE_MODE", env_vars.get("GOLDEN_BASELINE_MODE") or s.golden_baseline_mode).lower()

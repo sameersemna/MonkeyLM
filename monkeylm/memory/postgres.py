@@ -138,6 +138,19 @@ class PersistenceEngine:
         self._baselines_seeded_counts: Dict[str, int] = {"dom": 0, "visual": 0}
         self.baseline_summary: Dict[str, Any] = {}
 
+    @property
+    def coordination_enabled(self) -> bool:
+        """Whether cross-worker coordination (and therefore Redis) is needed.
+
+        Both Redis primitives exist only to coordinate *between* workers:
+        ``increment_visited_state`` shares revisit counts so one worker can see
+        another's visits, and ``claim_action_path_lock`` stops two workers
+        performing the same action. With a single worker there is nothing to
+        coordinate, so connecting would hold an idle connection to what is often
+        a shared Redis instance and write no keys.
+        """
+        return self.max_workers > 1
+
     async def initialize(self) -> None:
         await self._initialize_postgres()
         await self._initialize_redis()
@@ -145,7 +158,9 @@ class PersistenceEngine:
             missing: List[str] = []
             if self.pg_pool is None:
                 missing.append("PostgreSQL")
-            if self.redis_client is None:
+            # Redis is only load-bearing for cross-worker coordination, so a
+            # single-worker run must not fail strict mode for skipping it.
+            if self.redis_client is None and self.coordination_enabled:
                 missing.append("Redis")
             if missing:
                 raise RuntimeError("Persistence strict mode requires services to be reachable. Missing: " + ", ".join(missing))
@@ -233,6 +248,18 @@ class PersistenceEngine:
         if redis_asyncio is None:
             _local_service_log("redis package not installed; Redis state cache disabled.", self.settings.output_dir)
             return
+        if not self.coordination_enabled:
+            # Skip the connection entirely rather than connecting and writing
+            # nothing. The earlier behaviour reported "ready" for a client that
+            # could never write a key, which read as a broken integration.
+            if self.settings.redis_url:
+                print(
+                    f"ℹ️  Redis not used: WORKERS={self.max_workers}. The state cache "
+                    "coordinates between workers only (revisit counts and action-path "
+                    "locks), so a single-worker run writes no keys. Set WORKERS>=2 to "
+                    "enable it."
+                )
+            return
         try:
             from redis.backoff import ExponentialBackoff
             from redis.exceptions import ConnectionError as RedisConnectionError
@@ -255,7 +282,12 @@ class PersistenceEngine:
             )
             assert self.redis_client is not None
             await self.redis_client.ping()
-            print("✅ Redis state cache is ready.")
+            # Reaching here means coordination is enabled (single-worker runs
+            # return above), so the "ready" claim is now accurate.
+            print(
+                f"✅ Redis state cache is ready (cross-worker coordination, "
+                f"WORKERS={self.max_workers})."
+            )
         except Exception as exc:
             _local_service_log(f"Redis initialization failed: {exc}", self.settings.output_dir)
             self.redis_client = None
