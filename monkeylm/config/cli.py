@@ -53,6 +53,56 @@ def parse_cli_args() -> argparse.Namespace:
         default=None,
         help="Hard timeout for each Ollama inference call in seconds (default: 15)",
     )
+    v1m_shadow_group = parser.add_mutually_exclusive_group()
+    v1m_shadow_group.add_argument(
+        "--v1m-shadow",
+        dest="v1m_shadow_enabled",
+        action="store_true",
+        help="Enable V1M System One shadow decisions",
+    )
+    v1m_shadow_group.add_argument(
+        "--no-v1m-shadow",
+        dest="v1m_shadow_enabled",
+        action="store_false",
+        help="Disable V1M System One shadow decisions",
+    )
+    parser.set_defaults(v1m_shadow_enabled=None)
+
+    v1m_rerank_group = parser.add_mutually_exclusive_group()
+    v1m_rerank_group.add_argument(
+        "--v1m-rerank",
+        dest="v1m_rerank_enabled",
+        action="store_true",
+        help="Enable confidence-gated V1M reranking",
+    )
+    v1m_rerank_group.add_argument(
+        "--no-v1m-rerank",
+        dest="v1m_rerank_enabled",
+        action="store_false",
+        help="Disable V1M reranking",
+    )
+    parser.set_defaults(v1m_rerank_enabled=None)
+
+    v1m_loop_group = parser.add_mutually_exclusive_group()
+    v1m_loop_group.add_argument(
+        "--v1m-loop-rerank-only",
+        dest="v1m_loop_rerank_only",
+        action="store_true",
+        help="Apply V1M reranking only to repeated or revisited states",
+    )
+    v1m_loop_group.add_argument(
+        "--no-v1m-loop-rerank-only",
+        dest="v1m_loop_rerank_only",
+        action="store_false",
+        help="Allow V1M reranking outside loop states",
+    )
+    parser.set_defaults(v1m_loop_rerank_only=None)
+    parser.add_argument("--v1m-base-url", help="V1M API origin, for example https://v1m.ir")
+    parser.add_argument("--v1m-model", help="V1M System One model name")
+    parser.add_argument("--v1m-timeout-seconds", type=float, help="Hard timeout for each V1M decision")
+    parser.add_argument("--v1m-confidence-threshold", type=float, help="Minimum V1M confidence for reranking")
+    parser.add_argument("--v1m-probability-margin", type=float, help="Minimum probability advantage over the primary choice")
+    parser.add_argument("--v1m-max-candidates", type=int, help="Maximum finite V1M action candidates")
     parser.add_argument("--max-steps", type=int, help="Maximum monkey steps to execute")
     parser.add_argument(
         "--workers", type=int, default=None, help="Maximum concurrent worker contexts (default: 1)"

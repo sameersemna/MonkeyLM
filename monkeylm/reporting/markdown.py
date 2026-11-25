@@ -8,7 +8,10 @@ from typing import Any, Dict, List
 
 from monkeylm.memory import _secure_atomic_write
 from monkeylm.reporting.utils import redact_sensitive_content, summarize_vision_annotation
-from monkeylm.reporting.telemetry import summarize_semantic_memory_telemetry
+from monkeylm.reporting.telemetry import (
+    summarize_semantic_memory_telemetry,
+    summarize_v1m_shadow_telemetry,
+)
 from monkeylm.reporting.accountability import summarize_vibe_coding_accountability, _derive_severity
 from monkeylm.reporting.accessibility import _compile_accessibility_violations
 from monkeylm.reporting.defects import _compile_defect_tickets
@@ -48,7 +51,7 @@ def _step_vision_lines(log: Dict[str, Any]) -> str:
             lines.append(verdict_line)
         return "\n".join(lines) + "\n"
     if annotation_error == "timeout":
-        return f"- **Vision annotation:** attempted but timed out (see *Visual Inspection* budget notes)\n"
+        return "- **Vision annotation:** attempted but timed out (see *Visual Inspection* budget notes)\n"
     if annotation_error == "token_ceiling":
         return (
             "- **Vision annotation:** response was truncated by the model's "
@@ -165,6 +168,14 @@ def generate_markdown_report(
     scenario_artifact = browser_launch_info.get("scenario_artifact", "")
     fallback_models = getattr(settings, "ollama_fallback_models", []) or []
     fallback_display = ", ".join(f"`{model}`" for model in fallback_models) or "`none`"
+    v1m_telemetry = summarize_v1m_shadow_telemetry(test_logs)
+    v1m_mode = (
+        "rerank"
+        if getattr(settings, "v1m_rerank_enabled", False)
+        else "shadow"
+        if getattr(settings, "v1m_shadow_enabled", False)
+        else "disabled"
+    )
 
     md_content = f"""# Deep Inspection Monkey Test Report
 
@@ -195,6 +206,23 @@ def generate_markdown_report(
 | **Fallback Models** | {fallback_display} |
 | **Vision Model** | `{settings.vision_model}` |
 | **PDF Vision Model** | `{settings.pdf_vision_model}` |
+
+## V1M System One
+
+| Setting | Value |
+|---------|-------|
+| **Mode** | `{v1m_mode}` |
+| **Model** | `{getattr(settings, 'v1m_model', 'rev-latest')}` |
+| **Timeout** | `{float(getattr(settings, 'v1m_timeout_seconds', 3.0)):.2f}s` |
+| **Confidence Threshold** | `{float(getattr(settings, 'v1m_confidence_threshold', 0.75)):.2f}` |
+| **Probability Margin** | `{float(getattr(settings, 'v1m_probability_margin', 0.15)):.2f}` |
+| **Loop-Only Rerank** | `{"enabled" if getattr(settings, 'v1m_loop_rerank_only', True) else "disabled"}` |
+| **Calls** | `{v1m_telemetry.get('events', 0)}` |
+| **Evaluated** | `{v1m_telemetry.get('evaluated', 0)}` |
+| **Fallback** | `{v1m_telemetry.get('fallback', 0)}` |
+| **Rerank Applied** | `{v1m_telemetry.get('rerank_applied', 0)}` |
+| **Rerank Blocked** | `{v1m_telemetry.get('rerank_blocked', 0)}` |
+| **Average Latency** | `{float(v1m_telemetry.get('avg_latency_ms', 0.0)):.3f}ms` |
 
 ## Summary
 The agent performed {total_steps} actions using **{settings.ollama_model}**.

@@ -34,6 +34,7 @@ from monkeylm.models.v1m import (
     evaluate_v1m_shadow_decision,
     normalize_v1m_base_url,
     parse_v1m_choice,
+    v1m_candidate_to_action_plan,
 )
 
 __all__ = [
@@ -64,4 +65,6 @@ __all__ = [
     "evaluate_v1m_shadow_decision",
     "normalize_v1m_base_url",
     "parse_v1m_choice",
+    "v1m_candidate_to_action_plan",
+    "v1m_candidate_to_action_plan",
 ]

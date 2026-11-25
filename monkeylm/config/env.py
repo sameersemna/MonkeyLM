@@ -384,6 +384,21 @@ def load_settings(cli_args: Optional[argparse.Namespace] = None) -> Settings:
         8,
         max(2, int(ev_v1m_candidates) if ev_v1m_candidates is not None else s.v1m_max_candidates),
     )
+    ev_v1m_rerank = env_vars.get("V1M_RERANK_ENABLED")
+    s.v1m_rerank_enabled = _env_bool(
+        "V1M_RERANK_ENABLED",
+        default=_env_to_bool(ev_v1m_rerank, s.v1m_rerank_enabled),
+    )
+    ev_v1m_loop_only = env_vars.get("V1M_LOOP_RERANK_ONLY")
+    s.v1m_loop_rerank_only = _env_bool(
+        "V1M_LOOP_RERANK_ONLY",
+        default=_env_to_bool(ev_v1m_loop_only, s.v1m_loop_rerank_only),
+    )
+    ev_v1m_margin = env_vars.get("V1M_PROBABILITY_MARGIN")
+    s.v1m_probability_margin = min(
+        1.0,
+        max(0.0, _env_to_float(ev_v1m_margin, s.v1m_probability_margin)),
+    )
 
     raw_max_steps = env_vars.get("MAX_STEPS")
     s.max_steps = max(1, int(raw_max_steps) if raw_max_steps is not None else s.max_steps)
@@ -521,6 +536,24 @@ def load_settings(cli_args: Optional[argparse.Namespace] = None) -> Settings:
             s.vision_model = cli_args.vision_model.strip()
         if getattr(cli_args, "ollama_timeout_seconds", None) is not None:
             s.ollama_timeout_seconds = max(1.0, float(cli_args.ollama_timeout_seconds))
+        if getattr(cli_args, "v1m_shadow_enabled", None) is not None:
+            s.v1m_shadow_enabled = bool(cli_args.v1m_shadow_enabled)
+        if getattr(cli_args, "v1m_rerank_enabled", None) is not None:
+            s.v1m_rerank_enabled = bool(cli_args.v1m_rerank_enabled)
+        if getattr(cli_args, "v1m_loop_rerank_only", None) is not None:
+            s.v1m_loop_rerank_only = bool(cli_args.v1m_loop_rerank_only)
+        if getattr(cli_args, "v1m_base_url", None):
+            s.v1m_base_url = cli_args.v1m_base_url.strip().rstrip("/")
+        if getattr(cli_args, "v1m_model", None):
+            s.v1m_model = cli_args.v1m_model.strip()
+        if getattr(cli_args, "v1m_timeout_seconds", None) is not None:
+            s.v1m_timeout_seconds = min(30.0, max(0.1, float(cli_args.v1m_timeout_seconds)))
+        if getattr(cli_args, "v1m_confidence_threshold", None) is not None:
+            s.v1m_confidence_threshold = min(1.0, max(0.0, float(cli_args.v1m_confidence_threshold)))
+        if getattr(cli_args, "v1m_probability_margin", None) is not None:
+            s.v1m_probability_margin = min(1.0, max(0.0, float(cli_args.v1m_probability_margin)))
+        if getattr(cli_args, "v1m_max_candidates", None) is not None:
+            s.v1m_max_candidates = min(8, max(2, int(cli_args.v1m_max_candidates)))
         if getattr(cli_args, "max_steps", None) is not None:
             s.max_steps = max(1, cli_args.max_steps)
         if getattr(cli_args, "workers", None) is not None:

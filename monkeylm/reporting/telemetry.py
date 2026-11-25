@@ -28,6 +28,14 @@ def summarize_v1m_shadow_telemetry(test_logs: List[Dict[str, Any]]) -> Dict[str,
         "events": len(events),
         "evaluated": len(evaluated),
         "fallback": len(fallback),
+        "rerank_applied": len([
+            event for event in events
+            if event.get("rerank_applied") is True
+        ]),
+        "rerank_blocked": len([
+            event for event in events
+            if event.get("rerank_blocked_reason")
+        ]),
         "outcomes": outcomes,
         "avg_latency_ms": round(
             sum(latencies) / len(latencies),

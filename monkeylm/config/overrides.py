@@ -19,6 +19,15 @@ _RUNTIME_GLOBAL_SCHEMA: Dict[str, Any] = {
     "OLLAMA_TIMEOUT_SECONDS": (int, float),
     "OPENAI_BASE_URL": str,
     "OPENAI_API_KEY": str,
+    "V1M_SHADOW_ENABLED": bool,
+    "V1M_RERANK_ENABLED": bool,
+    "V1M_LOOP_RERANK_ONLY": bool,
+    "V1M_BASE_URL": str,
+    "V1M_MODEL": str,
+    "V1M_TIMEOUT_SECONDS": (int, float),
+    "V1M_CONFIDENCE_THRESHOLD": (int, float),
+    "V1M_PROBABILITY_MARGIN": (int, float),
+    "V1M_MAX_CANDIDATES": int,
     "VISION_MODEL": str,
     "MAX_STEPS": int,
     "MAX_STEPS_PER_WORKER": int,
@@ -50,14 +59,23 @@ _RUNTIME_GLOBAL_SCHEMA: Dict[str, Any] = {
     "QDRANT_ENABLE_WRITES": bool,
 }
 
-_SENSITIVE_CONFIG_KEYS: frozenset = frozenset(["POSTGRES_DSN", "REDIS_URL", "OPENAI_API_KEY"])
+_SENSITIVE_CONFIG_KEYS: frozenset = frozenset([
+    "POSTGRES_DSN",
+    "REDIS_URL",
+    "OPENAI_API_KEY",
+    "V1M_API_KEY",
+])
 _POS_INT_KEYS: frozenset = frozenset([
     "MAX_STEPS", "MAX_STEPS_PER_WORKER", "WORKERS",
     "WORKER_NAVIGATION_RETRIES", "WORKER_QDRANT_INIT_RETRIES",
     "WORKER_BOUNDARY_RECOVERY_RETRIES", "REDIS_PATH_LOCK_TTL_SECONDS",
-    "QDRANT_CANDIDATE_LIMIT",
+    "QDRANT_CANDIDATE_LIMIT", "V1M_MAX_CANDIDATES",
 ])
-_POS_FLOAT_KEYS: frozenset = frozenset(["OLLAMA_TIMEOUT_SECONDS", "RETRY_BASE_DELAY_SECONDS"])
+_POS_FLOAT_KEYS: frozenset = frozenset([
+    "OLLAMA_TIMEOUT_SECONDS",
+    "RETRY_BASE_DELAY_SECONDS",
+    "V1M_TIMEOUT_SECONDS",
+])
 _QDRANT_ADMIN_ACTIONS_ALLOWED: frozenset = frozenset(["", "inspect", "clear"])
 
 
@@ -117,6 +135,15 @@ def apply_runtime_overrides(args: argparse.Namespace) -> None:
         ("target_password", "TARGET_PASSWORD"),
         ("ollama_model", "OLLAMA_MODEL"),
         ("ollama_timeout_seconds", "OLLAMA_TIMEOUT_SECONDS"),
+        ("v1m_shadow_enabled", "V1M_SHADOW_ENABLED"),
+        ("v1m_rerank_enabled", "V1M_RERANK_ENABLED"),
+        ("v1m_loop_rerank_only", "V1M_LOOP_RERANK_ONLY"),
+        ("v1m_base_url", "V1M_BASE_URL"),
+        ("v1m_model", "V1M_MODEL"),
+        ("v1m_timeout_seconds", "V1M_TIMEOUT_SECONDS"),
+        ("v1m_confidence_threshold", "V1M_CONFIDENCE_THRESHOLD"),
+        ("v1m_probability_margin", "V1M_PROBABILITY_MARGIN"),
+        ("v1m_max_candidates", "V1M_MAX_CANDIDATES"),
         ("vision_model", "VISION_MODEL"),
         ("max_steps", "MAX_STEPS"),
         ("max_steps_per_worker", "MAX_STEPS_PER_WORKER"),

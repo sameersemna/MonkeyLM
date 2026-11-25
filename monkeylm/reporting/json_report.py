@@ -52,6 +52,23 @@ def generate_json_summary(
         "max_steps_per_worker": settings.max_steps_per_worker,
         "configured_max_steps": settings.max_steps,
         "ollama_timeout_seconds": settings.ollama_timeout_seconds,
+        "v1m_config": {
+            "mode": (
+                "rerank"
+                if getattr(settings, "v1m_rerank_enabled", False)
+                else "shadow"
+                if getattr(settings, "v1m_shadow_enabled", False)
+                else "disabled"
+            ),
+            "shadow_enabled": getattr(settings, "v1m_shadow_enabled", False),
+            "rerank_enabled": getattr(settings, "v1m_rerank_enabled", False),
+            "loop_rerank_only": getattr(settings, "v1m_loop_rerank_only", True),
+            "model": getattr(settings, "v1m_model", "rev-latest"),
+            "timeout_seconds": getattr(settings, "v1m_timeout_seconds", 3.0),
+            "confidence_threshold": getattr(settings, "v1m_confidence_threshold", 0.75),
+            "probability_margin": getattr(settings, "v1m_probability_margin", 0.15),
+            "max_candidates": getattr(settings, "v1m_max_candidates", 6),
+        },
         "redis_path_lock_ttl_seconds": settings.redis_path_lock_ttl_seconds,
         "graceful_shutdown_requested": graceful_shutdown_requested,
         "qdrant_config": {

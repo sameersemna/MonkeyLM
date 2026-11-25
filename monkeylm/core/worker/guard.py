@@ -31,3 +31,11 @@ class FailedPlanGuard:
 
     def clear(self) -> None:
         self._failed.clear()
+
+    def failed_targets(self, url: str, dom_hash: str) -> set:
+        targets = set()
+        for failed_url, failed_dom_hash, _action, target in self._failed:
+            if failed_url == (url or "") and failed_dom_hash == (dom_hash or ""):
+                if target:
+                    targets.add(target)
+        return targets

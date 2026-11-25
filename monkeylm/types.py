@@ -69,9 +69,12 @@ class Settings:
     v1m_api_key: str = ""
     v1m_base_url: str = "https://v1m.ir"
     v1m_model: str = "rev-latest"
-    v1m_timeout_seconds: float = 2.0
+    v1m_timeout_seconds: float = 3.0
     v1m_confidence_threshold: float = 0.75
     v1m_max_candidates: int = 6
+    v1m_rerank_enabled: bool = False
+    v1m_loop_rerank_only: bool = True
+    v1m_probability_margin: float = 0.15
     vision_model: str = "gemini-3-flash-preview"
     pdf_vision_model: str = "llama3.2-vision"
     pdf_vision_timeout_seconds: float = 30.0

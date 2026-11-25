@@ -12,7 +12,9 @@ from monkeylm.models.v1m import (
     evaluate_v1m_shadow_decision,
     normalize_v1m_base_url,
     parse_v1m_choice,
+    v1m_candidate_to_action_plan,
 )
+from monkeylm.reporting.telemetry import summarize_v1m_shadow_telemetry
 from monkeylm.types import Settings
 
 
@@ -259,3 +261,205 @@ def test_shadow_api_error_is_safe_fallback() -> None:
         assert result["status"] == "fallback"
 
     asyncio.run(_run())
+
+
+def test_loop_context_filters_seen_blacklisted_failed_and_write_candidates() -> None:
+    snapshot = SimpleNamespace(
+        elements=[
+            "[id=6] <BUTTON text=\"Repeated\" />",
+            "[id=7] <BUTTON text=\"Alternative\" />",
+        ],
+        form_controls=[
+            SimpleNamespace(
+                control_id=8,
+                visible=True,
+                disabled=False,
+                readonly=False,
+                tag_name="input",
+            ),
+        ],
+        forms=[
+            SimpleNamespace(form_id="form_0", submit_candidate_id=9),
+        ],
+        modal_count=0,
+    )
+
+    candidates = build_v1m_candidates(
+        {"action": "click", "target": "[id=6]", "value": ""},
+        snapshot,
+        max_candidates=6,
+        loop_context=True,
+        seen_click_targets={"[id=6]", "[id=7]"},
+        blacklisted_targets={"[id=6]"},
+        failed_targets={"[id=7]"},
+        repeat_count=3,
+    )
+
+    candidate_ids = {candidate["id"] for candidate in candidates}
+    assert "click:[id=6]" in candidate_ids
+    assert "click:[id=7]" not in candidate_ids
+    assert "type:[id=8]" not in candidate_ids
+    assert "submit_form:[id=9]" not in candidate_ids
+
+
+def test_probability_margin_blocks_weak_rerank() -> None:
+    async def _run():
+        snapshot = SimpleNamespace(
+            elements=[
+                "[id=6] <BUTTON text=\"Repeated\" />",
+                "[id=7] <BUTTON text=\"Alternative\" />",
+            ],
+            form_controls=[],
+            forms=[],
+            modal_count=0,
+        )
+        payload = {
+            "answers": {
+                "next_action": {
+                    "choice": "click:[id=7]",
+                    "confidence": 0.82,
+                    "probabilities": {
+                        "click:[id=6]": 0.48,
+                        "click:[id=7]": 0.52,
+                    },
+                }
+            }
+        }
+        with patch(
+            "monkeylm.models.v1m.decide_v1m",
+            return_value=payload,
+        ):
+            result = await evaluate_v1m_shadow_decision(
+                Settings(
+                    v1m_rerank_enabled=True,
+                    v1m_api_key="test-key",
+                    v1m_probability_margin=0.15,
+                ),
+                page_state="page",
+                snapshot=snapshot,
+                primary_plan={"action": "click", "target": "[id=6]", "value": ""},
+                loop_context=True,
+                seen_click_targets={"[id=6]"},
+                repeat_count=3,
+            )
+
+        assert result["outcome"] == "weak_rerank"
+        assert result["rerank_blocked_reason"] == "probability_margin"
+
+    asyncio.run(_run())
+
+
+def test_probability_margin_allows_clear_rerank() -> None:
+    async def _run():
+        snapshot = SimpleNamespace(
+            elements=[
+                "[id=6] <BUTTON text=\"Repeated\" />",
+                "[id=7] <BUTTON text=\"Alternative\" />",
+            ],
+            form_controls=[],
+            forms=[],
+            modal_count=0,
+        )
+        payload = {
+            "answers": {
+                "next_action": {
+                    "choice": "click:[id=7]",
+                    "confidence": 0.90,
+                    "probabilities": {
+                        "click:[id=6]": 0.20,
+                        "click:[id=7]": 0.80,
+                    },
+                }
+            }
+        }
+        with patch(
+            "monkeylm.models.v1m.decide_v1m",
+            return_value=payload,
+        ):
+            result = await evaluate_v1m_shadow_decision(
+                Settings(
+                    v1m_rerank_enabled=True,
+                    v1m_api_key="test-key",
+                    v1m_probability_margin=0.15,
+                ),
+                page_state="page",
+                snapshot=snapshot,
+                primary_plan={"action": "click", "target": "[id=6]", "value": ""},
+                loop_context=True,
+                seen_click_targets={"[id=6]"},
+                repeat_count=3,
+            )
+
+        assert result["outcome"] == "would_rerank"
+
+    asyncio.run(_run())
+
+
+def test_v1m_candidate_mapping_rejects_seen_failed_and_form_actions() -> None:
+    snapshot = SimpleNamespace(
+        elements=[
+            "[id=7] <BUTTON text=\"Alternative\" />",
+            "[id=16] <BUTTON type=\"submit\" text=\"Submit\" />",
+        ],
+        form_controls=[],
+        forms=[],
+        modal_count=0,
+    )
+    candidates = [
+        {"id": "click:[id=7]", "action": "click", "target": "[id=7]"},
+        {"id": "submit_form:[id=16]", "action": "submit_form", "target": "[id=16]"},
+    ]
+
+    assert v1m_candidate_to_action_plan(
+        "click:[id=7]",
+        candidates,
+        snapshot,
+        seen_click_targets={"[id=7]"},
+    ) is None
+    assert v1m_candidate_to_action_plan(
+        "click:[id=7]",
+        candidates,
+        snapshot,
+        failed_targets={"[id=7]"},
+    ) is None
+    assert v1m_candidate_to_action_plan(
+        "submit_form:[id=16]",
+        candidates,
+        snapshot,
+    ) is None
+
+
+def test_v1m_candidate_mapping_returns_guarded_click() -> None:
+    snapshot = SimpleNamespace(
+        elements=["[id=7] <BUTTON text=\"Alternative\" />"],
+        form_controls=[],
+        forms=[],
+        modal_count=0,
+    )
+    candidates = [
+        {"id": "click:[id=7]", "action": "click", "target": "[id=7]"},
+    ]
+
+    plan = v1m_candidate_to_action_plan("click:[id=7]", candidates, snapshot)
+
+    assert plan is not None
+    assert plan["action"] == "click"
+    assert plan["target"] == "[id=7]"
+
+
+def test_v1m_telemetry_counts_rerank_applied_and_blocked() -> None:
+    telemetry = summarize_v1m_shadow_telemetry([
+        {"v1m_shadow": {"status": "evaluated", "outcome": "would_rerank", "rerank_applied": True, "rerank_blocked_reason": ""}},
+        {"v1m_shadow": {"status": "evaluated", "outcome": "weak_rerank", "rerank_applied": False, "rerank_blocked_reason": "probability_margin"}},
+        {"v1m_shadow": {"status": "fallback", "outcome": "timeout", "rerank_applied": False, "rerank_blocked_reason": ""}},
+    ])
+
+    assert telemetry["rerank_applied"] == 1
+    assert telemetry["rerank_blocked"] == 1
+    assert telemetry["outcomes"]["would_rerank"] == 1
+    assert telemetry["outcomes"]["weak_rerank"] == 1
+    assert telemetry["outcomes"]["timeout"] == 1
+
+
+def test_v1m_timeout_default_is_three_seconds() -> None:
+    assert Settings().v1m_timeout_seconds == 3.0

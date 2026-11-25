@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Tuple
 
 from monkeylm.config import (
     ACTION_COOLDOWN_SECONDS,
+    STATE_LOOP_THRESHOLD,
     Settings,
     _local_service_log,
     is_in_scope,
@@ -174,7 +175,14 @@ async def run_worker(
         execute_action,
         attempt_login_with_target_credentials,
     )
-    from monkeylm.models import decide_next_action, apply_state_aware_policy, _break_action_loop, run_application_discovery, evaluate_v1m_shadow_decision
+    from monkeylm.models import (
+        decide_next_action,
+        apply_state_aware_policy,
+        _break_action_loop,
+        run_application_discovery,
+        evaluate_v1m_shadow_decision,
+        v1m_candidate_to_action_plan,
+    )
     from monkeylm.models.prompts.discovery import refresh_testing_strategy
     from monkeylm.memory import QdrantMemoryStore
 
@@ -187,7 +195,10 @@ async def run_worker(
         f"(api_key={'configured' if v1m_key_configured else 'missing'}, "
         f"endpoint={getattr(settings, 'v1m_base_url', 'https://v1m.ir').rstrip('/')}/v1/systemone, "
         f"model={getattr(settings, 'v1m_model', 'rev-latest')}, "
-        f"threshold={float(getattr(settings, 'v1m_confidence_threshold', 0.75)):.2f})"
+        f"threshold={float(getattr(settings, 'v1m_confidence_threshold', 0.75)):.2f}, "
+        f"margin={float(getattr(settings, 'v1m_probability_margin', 0.15)):.2f}, "
+        f"rerank={'enabled' if getattr(settings, 'v1m_rerank_enabled', False) else 'disabled'}, "
+        f"loop_only={'true' if getattr(settings, 'v1m_loop_rerank_only', True) else 'false'})"
     )
     os.makedirs(settings.output_dir, exist_ok=True)
     worker_defects = DefectTracker()
@@ -353,30 +364,143 @@ async def run_worker(
                 "latency_ms": 0.0,
                 "candidates": [],
                 "usage": {},
+                "rerank_applied": False,
+                "rerank_plan": None,
+                "rerank_blocked_reason": "",
+                "baseline_plan": None,
+                "executed_plan": None,
             }
+            rerank_applied = False
+            baseline_plan: Dict[str, Any] | None = None
             if cached_plan is not None:
                 plan = dict(cached_plan)
                 plan["replayed"] = True
                 print("   └─ 🔁 Replaying cached decision for this state")
             else:
                 plan = await decide_next_action(settings, state, memory_store=worker_memory, snapshot=snapshot, testing_strategy=testing_strategy)
-                v1m_shadow = await evaluate_v1m_shadow_decision(
-                    settings,
-                    page_state=state,
-                    snapshot=snapshot,
-                    primary_plan=plan,
+                baseline_plan = dict(plan)
+                primary_signature = (plan.get("action", "scroll"), plan.get("target", ""))
+                repeat_count = sum(
+                    1
+                    for recent_signature in recent_model_plans[-3:]
+                    if recent_signature == primary_signature
                 )
-                decision_cache[state_key] = {
-                    "action": plan.get("action", ""),
-                    "target": plan.get("target", ""),
-                    "value": plan.get("value", ""),
-                    "v1m_shadow": v1m_shadow,
-                }
+                revisit_count = visited_states.get(state_key, 0)
+                loop_triggered = (
+                    repeat_count >= 2
+                    or revisit_count > STATE_LOOP_THRESHOLD
+                    or visual_revisit_count > STATE_LOOP_THRESHOLD
+                    or bool(loop_detection_state["blacklist"])
+                )
+                rerank_enabled = bool(getattr(settings, "v1m_rerank_enabled", False))
+                loop_rerank_only = bool(getattr(settings, "v1m_loop_rerank_only", True))
+                should_evaluate = (
+                    bool(getattr(settings, "v1m_shadow_enabled", False))
+                    or rerank_enabled
+                ) and (
+                    not rerank_enabled
+                    or not loop_rerank_only
+                    or loop_triggered
+                )
+
+                if not should_evaluate:
+                    v1m_shadow = {
+                        "mode": "rerank" if rerank_enabled else "shadow",
+                        "status": "skipped",
+                        "outcome": "not_loop_context",
+                        "primary_choice": "",
+                        "v1m_choice": "",
+                        "confidence": None,
+                        "probabilities": {},
+                        "latency_ms": 0.0,
+                        "candidates": [],
+                        "usage": {},
+                        "rerank_applied": False,
+                        "rerank_plan": None,
+                        "rerank_blocked_reason": "not_loop_context",
+                    }
+                else:
+                    blacklisted_targets = set()
+                    for blacklisted_key in loop_detection_state["blacklist"]:
+                        _action, separator, target = str(blacklisted_key).partition(":")
+                        if separator and target:
+                            blacklisted_targets.add(target)
+                    failed_targets = failed_plan_guard.failed_targets(snapshot.url, snapshot.dom_hash)
+                    loop_context = rerank_enabled and loop_rerank_only and loop_triggered
+
+                    v1m_shadow = await evaluate_v1m_shadow_decision(
+                        settings,
+                        page_state=state,
+                        snapshot=snapshot,
+                        primary_plan=plan,
+                        loop_context=loop_context,
+                        seen_click_targets=seen_click_targets if loop_context else None,
+                        blacklisted_targets=blacklisted_targets if loop_context else None,
+                        failed_targets=failed_targets if loop_context else None,
+                        repeat_count=repeat_count if loop_context else 0,
+                    )
+
+                    if (
+                        rerank_enabled
+                        and (not loop_rerank_only or loop_triggered)
+                        and v1m_shadow.get("outcome") == "would_rerank"
+                    ):
+                        rerank_plan = v1m_candidate_to_action_plan(
+                            str(v1m_shadow.get("v1m_choice", "")),
+                            v1m_shadow.get("candidates", []),
+                            snapshot,
+                            seen_click_targets=seen_click_targets,
+                            blacklisted_targets=blacklisted_targets,
+                            failed_targets=failed_targets,
+                        )
+                        if rerank_plan is None:
+                            v1m_shadow["rerank_blocked_reason"] = "unsafe_or_unavailable_candidate"
+                            print("   └─ 🧭 V1M rerank blocked: candidate is unsafe or unavailable")
+                        else:
+                            rerank_signature = build_plan_signature(
+                                snapshot.url,
+                                snapshot.dom_hash,
+                                rerank_plan,
+                            )
+                            rerank_blacklist_key = (
+                                f"{rerank_plan.get('action', '')}:"
+                                f"{rerank_plan.get('target', '')}"
+                            )
+                            rerank_blacklisted = (
+                                loop_detection_state["blacklist"].get(rerank_blacklist_key, 0)
+                                > step
+                            )
+                            rerank_failed = failed_plan_guard.should_skip(rerank_signature)
+                            if rerank_blacklisted:
+                                v1m_shadow["rerank_blocked_reason"] = "blacklisted_target"
+                                print("   └─ 🧭 V1M rerank blocked: target is blacklisted")
+                            elif rerank_failed:
+                                v1m_shadow["rerank_blocked_reason"] = "failed_plan_guard"
+                                print("   └─ 🧭 V1M rerank blocked: target failed previously")
+                            else:
+                                rerank_applied = True
+                                v1m_shadow["rerank_applied"] = True
+                                v1m_shadow["rerank_plan"] = rerank_plan
+                                plan = rerank_plan
+                                print(
+                                    f"   └─ 🧭 V1M rerank applied "
+                                    f"{v1m_shadow.get('primary_choice')} -> "
+                                    f"{rerank_plan.get('action')}:{rerank_plan.get('target', '')} "
+                                    f"(confidence={float(v1m_shadow.get('confidence') or 0.0):.3f})"
+                                )
+                    elif v1m_shadow.get("outcome") == "would_rerank":
+                        v1m_shadow["rerank_blocked_reason"] = (
+                            "rerank_disabled"
+                            if not rerank_enabled
+                            else "not_loop_context"
+                        )
             retrieval_telemetry = worker_memory.consume_last_search_telemetry()
 
             plan_signature = (plan.get("action", "scroll"), plan.get("target", ""))
             loop_break_applied = False
-            if len(recent_model_plans) >= 3 and all(p == plan_signature for p in recent_model_plans[-3:]):
+            if rerank_applied:
+                loop_break_applied = True
+            elif len(recent_model_plans) >= 3 and all(p == plan_signature for p in recent_model_plans[-3:]):
                 print(f"\U0001f504 Loop detected for {worker_label}; forcing path exploration variance.")
                 recent_model_plans.clear()
                 print(f"   \u251c\u2500 \u26d4 Cleared short-term action history for {worker_label}")
@@ -405,6 +529,20 @@ async def run_worker(
                 print(f"   -> \u26d4 Skipping previously failed target {plan.get('action')}:{plan.get('target')} for this DOM state")
                 plan = {"action": "scroll", "target": "", "value": "", "action_strategy": "", "input_payloads": []}
                 execution_signature = build_plan_signature(snapshot.url, snapshot.dom_hash, plan)
+
+            if cached_plan is None:
+                v1m_shadow["baseline_plan"] = baseline_plan
+                v1m_shadow["executed_plan"] = {
+                    "action": plan.get("action", ""),
+                    "target": plan.get("target", ""),
+                    "value": plan.get("value", ""),
+                }
+                decision_cache[state_key] = {
+                    "action": plan.get("action", ""),
+                    "target": plan.get("target", ""),
+                    "value": plan.get("value", ""),
+                    "v1m_shadow": v1m_shadow,
+                }
 
             if plan.get("action") == "click" and plan.get("target"):
                 seen_click_targets.add(plan.get("target"))

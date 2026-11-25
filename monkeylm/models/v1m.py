@@ -72,49 +72,59 @@ def decide_v1m(
         "Accept": "application/json",
     }
 
-    try:
-        response = http.post(
-            url,
-            json=payload,
-            headers=headers,
-            timeout=max(0.1, float(settings.v1m_timeout_seconds)),
-        )
-    except Exception as exc:
-        name = type(exc).__name__.lower()
-        text = str(exc).lower()
-        if "timeout" in name or "timeout" in text:
+    for attempt in range(2):
+        try:
+            response = http.post(
+                url,
+                json=payload,
+                headers=headers,
+                timeout=max(0.1, float(settings.v1m_timeout_seconds)),
+            )
+        except Exception as exc:
+            name = type(exc).__name__.lower()
+            text = str(exc).lower()
+            if "timeout" in name or "timeout" in text:
+                raise V1MDecisionError(
+                    "V1M decision request timed out",
+                    kind="timeout",
+                ) from exc
             raise V1MDecisionError(
-                "V1M decision request timed out",
-                kind="timeout",
+                "V1M decision transport failed",
+                kind="transport_error",
             ) from exc
-        raise V1MDecisionError(
-            "V1M decision transport failed",
-            kind="transport_error",
-        ) from exc
 
-    status_code = int(getattr(response, "status_code", 0) or 0)
-    if status_code < 200 or status_code >= 300:
+        status_code = int(getattr(response, "status_code", 0) or 0)
+        if 200 <= status_code < 300:
+            try:
+                decoded = response.json()
+            except Exception as exc:
+                raise V1MDecisionError(
+                    "V1M decision endpoint returned invalid JSON",
+                    status_code=status_code,
+                    kind="malformed_response",
+                ) from exc
+            if not isinstance(decoded, dict):
+                raise V1MDecisionError(
+                    "V1M decision endpoint returned an unexpected payload",
+                    status_code=status_code,
+                    kind="malformed_response",
+                )
+            return decoded
+
+        if status_code in {429, 503, 529} and attempt == 0:
+            time.sleep(0.25)
+            continue
+
         raise V1MDecisionError(
             f"V1M decision endpoint returned HTTP {status_code}",
             status_code=status_code,
             kind="http_error",
         )
 
-    try:
-        decoded = response.json()
-    except Exception as exc:
-        raise V1MDecisionError(
-            "V1M decision endpoint returned invalid JSON",
-            status_code=status_code,
-            kind="malformed_response",
-        ) from exc
-    if not isinstance(decoded, dict):
-        raise V1MDecisionError(
-            "V1M decision endpoint returned an unexpected payload",
-            status_code=status_code,
-            kind="malformed_response",
-        )
-    return decoded
+    raise V1MDecisionError(
+        "V1M decision endpoint failed after retry",
+        kind="http_error",
+    )
 
 
 def parse_v1m_choice(
@@ -238,14 +248,46 @@ def build_v1m_candidates(
     primary_plan: Dict[str, Any],
     snapshot: Any,
     max_candidates: int,
+    *,
+    loop_context: bool = False,
+    seen_click_targets: Optional[Iterable[str]] = None,
+    blacklisted_targets: Optional[Iterable[str]] = None,
+    failed_targets: Optional[Iterable[str]] = None,
+    repeat_count: int = 0,
 ) -> List[Dict[str, str]]:
     """Build a bounded finite action space from the current visible DOM."""
     limit = min(8, max(2, int(max_candidates)))
     candidate_list: List[Dict[str, str]] = []
     seen = set()
+    seen_targets = {
+        str(target).strip()
+        for target in (seen_click_targets or [])
+        if str(target).strip()
+    }
+    blacklisted_target_set = {
+        str(target).strip()
+        for target in (blacklisted_targets or [])
+        if str(target).strip()
+    }
+    failed_target_set = {
+        str(target).strip()
+        for target in (failed_targets or [])
+        if str(target).strip()
+    }
 
     def add(candidate: Dict[str, str]) -> None:
         candidate_id = candidate["id"]
+        candidate_target = str(candidate.get("target", "")).strip()
+        candidate_action = str(candidate.get("action", "")).strip().lower()
+        if loop_context:
+            if candidate_action in {"type", "submit_form", "press_key", "random_jump", "restart_target"}:
+                return
+            if candidate_target and candidate_target not in seen_targets | blacklisted_target_set | failed_target_set:
+                pass
+            elif candidate_target:
+                primary_target = str(primary_plan.get("target", "")).strip()
+                if candidate_target != primary_target:
+                    return
         if candidate_id not in seen and len(candidate_list) < limit:
             seen.add(candidate_id)
             candidate_list.append(candidate)
@@ -386,7 +428,63 @@ def primary_v1m_candidate(
     candidate_ids = {candidate["id"] for candidate in candidates}
     if candidate_id in candidate_ids:
         return candidate_id
-    return "scroll" if "scroll" in candidate_ids else next(iter(candidate_ids), "")
+    return candidate_id
+
+
+def v1m_candidate_to_action_plan(
+    choice: str,
+    candidates: Iterable[Dict[str, str]],
+    snapshot: Any,
+    *,
+    seen_click_targets: Optional[Iterable[str]] = None,
+    blacklisted_targets: Optional[Iterable[str]] = None,
+    failed_targets: Optional[Iterable[str]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Translate an approved V1M choice into a DOM-validated action plan."""
+    selected = next(
+        (candidate for candidate in candidates if candidate.get("id") == choice),
+        None,
+    )
+    if selected is None:
+        return None
+
+    action = str(selected.get("action", "")).strip().lower()
+    target = str(selected.get("target", "")).strip()
+    if action == "click":
+        target_id = _extract_target_id(target)
+        if target_id is None or target_id not in _snapshot_target_ids(snapshot):
+            return None
+        seen = {str(value).strip() for value in (seen_click_targets or []) if str(value).strip()}
+        blacklisted = {str(value).strip() for value in (blacklisted_targets or []) if str(value).strip()}
+        failed = {str(value).strip() for value in (failed_targets or []) if str(value).strip()}
+        if target in seen or target in blacklisted or target in failed:
+            return None
+        return {
+            "action": "click",
+            "target": target,
+            "value": "",
+            "action_strategy": "",
+            "input_payloads": [],
+        }
+    if action == "handle_modal":
+        if int(getattr(snapshot, "modal_count", 0) or 0) <= 0:
+            return None
+        return {
+            "action": "handle_modal",
+            "target": "",
+            "value": "",
+            "action_strategy": "",
+            "input_payloads": [],
+        }
+    if action in {"scroll", "back"}:
+        return {
+            "action": action,
+            "target": "",
+            "value": "",
+            "action_strategy": "",
+            "input_payloads": [],
+        }
+    return None
 
 
 async def evaluate_v1m_shadow_decision(
@@ -395,6 +493,11 @@ async def evaluate_v1m_shadow_decision(
     page_state: str,
     snapshot: Any,
     primary_plan: Dict[str, Any],
+    loop_context: bool = False,
+    seen_click_targets: Optional[Iterable[str]] = None,
+    blacklisted_targets: Optional[Iterable[str]] = None,
+    failed_targets: Optional[Iterable[str]] = None,
+    repeat_count: int = 0,
 ) -> Dict[str, Any]:
     """Evaluate V1M alongside the primary plan without changing execution."""
     telemetry: Dict[str, Any] = {
@@ -408,9 +511,12 @@ async def evaluate_v1m_shadow_decision(
         "latency_ms": 0.0,
         "candidates": [],
         "usage": {},
+        "rerank_applied": False,
+        "rerank_plan": None,
+        "rerank_blocked_reason": "",
     }
 
-    if not getattr(settings, "v1m_shadow_enabled", False):
+    if not getattr(settings, "v1m_shadow_enabled", False) and not getattr(settings, "v1m_rerank_enabled", False):
         return telemetry
 
     api_key = str(getattr(settings, "v1m_api_key", "") or "").strip()
@@ -422,6 +528,11 @@ async def evaluate_v1m_shadow_decision(
         primary_plan,
         snapshot,
         getattr(settings, "v1m_max_candidates", 6),
+        loop_context=loop_context,
+        seen_click_targets=seen_click_targets,
+        blacklisted_targets=blacklisted_targets,
+        failed_targets=failed_targets,
+        repeat_count=repeat_count,
     )
     telemetry["candidates"] = [
         {"id": candidate["id"], "action": candidate["action"], "target": candidate["target"]}
@@ -437,12 +548,33 @@ async def evaluate_v1m_shadow_decision(
         candidate["id"]: candidate["description"]
         for candidate in candidates
     }
+    loop_context_payload = {
+        "loop_context": bool(loop_context),
+        "repeat_count": int(repeat_count),
+        "seen_click_targets": sorted({
+            str(target).strip()
+            for target in (seen_click_targets or [])
+            if str(target).strip()
+        }),
+        "blacklisted_targets": sorted({
+            str(target).strip()
+            for target in (blacklisted_targets or [])
+            if str(target).strip()
+        }),
+        "failed_targets": sorted({
+            str(target).strip()
+            for target in (failed_targets or [])
+            if str(target).strip()
+        }),
+    }
     state_payload = (
         "MonkeyLM bounded browser-testing decision state:\n"
         f"{_sanitize_shadow_state(page_state)}\n"
         "Existing primary plan:\n"
         f"{_sanitize_shadow_state(primary_plan)}\n"
-        "Candidate set is finite and only the primary plan is executed."
+        "Loop context:\n"
+        f"{_sanitize_shadow_state(loop_context_payload)}\n"
+        "Candidate set is finite. Do not select seen, blacklisted, failed, or write-form targets."
     )
     questions = {
         "next_action": {
@@ -579,6 +711,35 @@ async def evaluate_v1m_shadow_decision(
             f"latency={telemetry['latency_ms']}ms"
         )
         return telemetry
+
+    primary_probability = parsed["probabilities"].get(primary_choice)
+    chosen_probability = parsed["probabilities"].get(parsed["choice"])
+    probability_margin = float(getattr(settings, "v1m_probability_margin", 0.15))
+    if primary_probability is None or chosen_probability is None:
+        telemetry["outcome"] = "weak_rerank"
+        telemetry["rerank_blocked_reason"] = "missing_probability"
+        print(
+            f"   └─ 🧭 V1M shadow choice={parsed['choice']} "
+            f"confidence={parsed['confidence']:.3f} probability=unknown "
+            f"outcome=weak_rerank "
+            f"latency={telemetry['latency_ms']}ms"
+        )
+        return telemetry
+
+    advantage = float(chosen_probability) - float(primary_probability)
+    if advantage < probability_margin:
+        telemetry["outcome"] = "weak_rerank"
+        telemetry["rerank_blocked_reason"] = "probability_margin"
+        print(
+            f"   └─ 🧭 V1M shadow choice={parsed['choice']} "
+            f"confidence={parsed['confidence']:.3f} "
+            f"probability={chosen_probability:.3f} "
+            f"primary_probability={primary_probability:.3f} "
+            f"advantage={advantage:.3f} outcome=weak_rerank "
+            f"latency={telemetry['latency_ms']}ms"
+        )
+        return telemetry
+
     telemetry["outcome"] = "would_rerank"
     probability = parsed["probabilities"].get(parsed["choice"])
     probability_text = (

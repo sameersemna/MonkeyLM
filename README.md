@@ -91,9 +91,15 @@ The advanced runner now supports both environment-variable configuration and CLI
 | `V1M_API_KEY` | unset | Bearer token for the native V1M `/v1/systemone` endpoint. Keep it only in `.env`. |
 | `V1M_BASE_URL` | `https://v1m.ir` | V1M API origin. The native `/v1/systemone` endpoint is appended automatically. |
 | `V1M_MODEL` | `rev-latest` | V1M System One model name for shadow decisions. |
-| `V1M_TIMEOUT_SECONDS` | `2.0` | Hard timeout for each V1M shadow decision. |
-| `V1M_CONFIDENCE_THRESHOLD` | `0.75` | Confidence at or above which the shadow result is classified as eligible to adopt in a future non-shadow mode. |
+| `V1M_TIMEOUT_SECONDS` | `3.0` | Hard timeout for each V1M shadow or rerank decision. |
+| `V1M_CONFIDENCE_THRESHOLD` | `0.75` | Minimum confidence required before a rerank can replace the guarded primary plan. |
 | `V1M_MAX_CANDIDATES` | `6` | Maximum finite action candidates sent to V1M; bounded from 2 to 8. |
+| `V1M_RERANK_ENABLED` | `false` | Permit confidence-gated V1M reranking to influence loop recovery. |
+| `V1M_LOOP_RERANK_ONLY` | `true` | Apply reranking only for repeated/revisited/blacklisted states. |
+| `V1M_PROBABILITY_MARGIN` | `0.15` | Minimum probability advantage over the primary choice for rerank adoption. |
+| `V1M_RERANK_ENABLED` | `false` | Allow confidence-gated V1M reranking to replace a guarded primary plan. |
+| `V1M_LOOP_RERANK_ONLY` | `true` | Limit reranking to repeated/revisited/blacklisted states. |
+| `V1M_PROBABILITY_MARGIN` | `0.15` | Minimum probability advantage V1M's alternative must have over the primary choice. |
 | `MAX_STEPS` | `100` | Number of monkey actions to execute. |
 | `WORKERS` | `1` | Maximum number of concurrent worker browser contexts. |
 | `MAX_STEPS_PER_WORKER` | `100` | Per-worker step cap. Must be less than or equal to `MAX_STEPS`. |
@@ -182,6 +188,37 @@ The CLI prints the V1M endpoint and model at worker startup, then each step
 prints the primary choice, finite candidates, V1M choice/probability,
 confidence, outcome, and latency. Shadow mode never executes V1M's alternative
 plan.
+
+For a 20-step guarded rerank run:
+
+```bash
+source .venv/bin/activate
+V1M_SHADOW_ENABLED=true \
+V1M_RERANK_ENABLED=true \
+V1M_LOOP_RERANK_ONLY=true \
+V1M_PROBABILITY_MARGIN=0.15 \
+python -m monkeylm --seed 20261125 --max-steps 20
+```
+
+The CLI can set the same controls directly:
+
+```bash
+python -m monkeylm \
+  --seed 20261125 \
+  --max-steps 20 \
+  --v1m-shadow \
+  --v1m-rerank \
+  --v1m-loop-rerank-only \
+  --v1m-confidence-threshold 0.75 \
+  --v1m-probability-margin 0.15
+```
+
+Rerank adoption is conservative:
+- V1M must clear the confidence and probability-margin gates.
+- The choice must be a currently visible click or a safe navigation/modal action.
+- Seen, blacklisted, and previously failed targets are rejected.
+- Form payload generation and submission remain with the existing primary planner.
+- A rerank is applied only in repeated/revisited/blacklisted states when loop-only mode is enabled.
 
 ### Selective Vision Audit & Executive PDF
 

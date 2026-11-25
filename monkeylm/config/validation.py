@@ -110,6 +110,26 @@ def validate_runtime_configuration(settings: Settings) -> None:
             "REDIS_PATH_LOCK_TTL_SECONDS must be between 1 and 300 seconds "
             f"(got {settings.redis_path_lock_ttl_seconds})."
         )
+    if settings.v1m_timeout_seconds < 0.1 or settings.v1m_timeout_seconds > 30.0:
+        raise ValueError(
+            "V1M_TIMEOUT_SECONDS must be between 0.1 and 30 seconds "
+            f"(got {settings.v1m_timeout_seconds})."
+        )
+    if settings.v1m_confidence_threshold < 0.0 or settings.v1m_confidence_threshold > 1.0:
+        raise ValueError(
+            "V1M_CONFIDENCE_THRESHOLD must be between 0.0 and 1.0 "
+            f"(got {settings.v1m_confidence_threshold})."
+        )
+    if settings.v1m_probability_margin < 0.0 or settings.v1m_probability_margin > 1.0:
+        raise ValueError(
+            "V1M_PROBABILITY_MARGIN must be between 0.0 and 1.0 "
+            f"(got {settings.v1m_probability_margin})."
+        )
+    if settings.v1m_max_candidates < 2 or settings.v1m_max_candidates > 8:
+        raise ValueError(
+            "V1M_MAX_CANDIDATES must be between 2 and 8 "
+            f"(got {settings.v1m_max_candidates})."
+        )
 
 
 __all__ = ["inspect_optional_runtime_dependencies", "validate_runtime_configuration"]
