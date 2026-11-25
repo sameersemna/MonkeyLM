@@ -87,6 +87,13 @@ The advanced runner now supports both environment-variable configuration and CLI
 | `OPENAI_BASE_URL` | `http://localhost:11434` | Base URL of an OpenAI-compatible API. Ollama's port 11434 gets `/v1` appended automatically; include the full path for other providers. |
 | `OPENAI_API_KEY` | unset | Optional bearer token sent to the configured endpoint. |
 | `OLLAMA_TIMEOUT_SECONDS` | `15` | Hard timeout in seconds for each LLM inference call. |
+| `V1M_SHADOW_ENABLED` | `false` | Enable the V1M native System One shadow reranker. It records comparisons but never changes the executed plan. |
+| `V1M_API_KEY` | unset | Bearer token for the native V1M `/v1/systemone` endpoint. Keep it only in `.env`. |
+| `V1M_BASE_URL` | `https://v1m.ir` | V1M API origin. The native `/v1/systemone` endpoint is appended automatically. |
+| `V1M_MODEL` | `rev-latest` | V1M System One model name for shadow decisions. |
+| `V1M_TIMEOUT_SECONDS` | `2.0` | Hard timeout for each V1M shadow decision. |
+| `V1M_CONFIDENCE_THRESHOLD` | `0.75` | Confidence at or above which the shadow result is classified as eligible to adopt in a future non-shadow mode. |
+| `V1M_MAX_CANDIDATES` | `6` | Maximum finite action candidates sent to V1M; bounded from 2 to 8. |
 | `MAX_STEPS` | `100` | Number of monkey actions to execute. |
 | `WORKERS` | `1` | Maximum number of concurrent worker browser contexts. |
 | `MAX_STEPS_PER_WORKER` | `100` | Per-worker step cap. Must be less than or equal to `MAX_STEPS`. |
@@ -152,6 +159,17 @@ model failures and falls back to the heuristic discovery strategy. Use
 `--ollama-model <name>` to override the planning model for a single run, or
 `OLLAMA_FALLBACK_MODELS=model-a,model-b` / `--ollama-fallback-models model-a,model-b`
 to try stable alternatives after the primary model fails.
+
+### V1M System One Shadow Decisions
+
+Set `V1M_SHADOW_ENABLED=true` and `V1M_API_KEY` in `.env` to run V1M beside the
+existing action planner. Shadow mode sends only a bounded finite action set
+and records the V1M choice, probabilities, confidence, latency, and fallback
+outcome. It never replaces or executes the existing primary plan.
+
+The native V1M endpoint is `POST https://v1m.ir/v1/systemone`. V1M is optional;
+missing credentials, malformed responses, low confidence, invalid choices,
+timeouts, and API errors preserve the current planner and heuristics.
 
 ### Selective Vision Audit & Executive PDF
 

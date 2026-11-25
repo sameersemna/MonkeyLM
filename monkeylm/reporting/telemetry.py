@@ -4,6 +4,38 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 
+def summarize_v1m_shadow_telemetry(test_logs: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Aggregate native V1M shadow outcomes without changing execution policy."""
+    events = [
+        log.get("v1m_shadow")
+        for log in test_logs
+        if isinstance(log.get("v1m_shadow"), dict)
+        and log.get("v1m_shadow", {}).get("status") != "skipped"
+    ]
+    evaluated = [event for event in events if event.get("status") == "evaluated"]
+    fallback = [event for event in events if event.get("status") == "fallback"]
+    latencies = [
+        float(event.get("latency_ms", 0.0))
+        for event in events
+        if isinstance(event.get("latency_ms"), (int, float))
+    ]
+    outcomes: Dict[str, int] = {}
+    for event in events:
+        outcome = str(event.get("outcome", "unknown"))
+        outcomes[outcome] = outcomes.get(outcome, 0) + 1
+
+    return {
+        "events": len(events),
+        "evaluated": len(evaluated),
+        "fallback": len(fallback),
+        "outcomes": outcomes,
+        "avg_latency_ms": round(
+            sum(latencies) / len(latencies),
+            3,
+        ) if latencies else 0.0,
+    }
+
+
 def summarize_semantic_memory_telemetry(test_logs: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Aggregate Qdrant retrieval/write telemetry from test logs."""
 

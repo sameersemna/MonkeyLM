@@ -8,7 +8,10 @@ from typing import Any, Dict, List
 
 from monkeylm.memory import _secure_atomic_write
 from monkeylm.reporting.utils import redact_sensitive_content, summarize_vision_annotation
-from monkeylm.reporting.telemetry import summarize_semantic_memory_telemetry
+from monkeylm.reporting.telemetry import (
+    summarize_semantic_memory_telemetry,
+    summarize_v1m_shadow_telemetry,
+)
 from monkeylm.reporting.accountability import summarize_vibe_coding_accountability
 from monkeylm.reporting.accessibility import _compile_accessibility_violations
 from monkeylm.reporting.defects import _compile_defect_tickets
@@ -36,6 +39,7 @@ def generate_json_summary(
 ) -> None:
     """Write results.json with full run data."""
     semantic_memory_telemetry = summarize_semantic_memory_telemetry(test_logs)
+    v1m_shadow_telemetry = summarize_v1m_shadow_telemetry(test_logs)
     accountability = summarize_vibe_coding_accountability(defects)
 
     summary = {
@@ -120,6 +124,7 @@ def generate_json_summary(
         } if discovery_strategy is not None else None,
         "network_injections": network_injections,
         "semantic_memory_telemetry": semantic_memory_telemetry,
+        "v1m_shadow_telemetry": v1m_shadow_telemetry,
         "vibe_coding_accountability": accountability,
         "logs": test_logs,
         "failure_context_samples": [

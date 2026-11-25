@@ -27,6 +27,14 @@ from monkeylm.models.prompts import (
     _extract_all_target_ids,
     _extract_target_id,
 )
+from monkeylm.models.v1m import (
+    V1MDecisionError,
+    build_v1m_candidates,
+    decide_v1m,
+    evaluate_v1m_shadow_decision,
+    normalize_v1m_base_url,
+    parse_v1m_choice,
+)
 
 __all__ = [
     "_ollama_chat_with_retry",
@@ -50,4 +58,10 @@ __all__ = [
     "_break_action_loop",
     "_extract_all_target_ids",
     "_extract_target_id",
+    "V1MDecisionError",
+    "build_v1m_candidates",
+    "decide_v1m",
+    "evaluate_v1m_shadow_decision",
+    "normalize_v1m_base_url",
+    "parse_v1m_choice",
 ]

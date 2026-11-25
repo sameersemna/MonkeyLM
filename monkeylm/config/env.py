@@ -352,6 +352,39 @@ def load_settings(cli_args: Optional[argparse.Namespace] = None) -> Settings:
         env_vars.get("OPENAI_API_KEY") or ollama_api_key or s.openai_api_key,
     )
 
+    ev_v1m_shadow = env_vars.get("V1M_SHADOW_ENABLED")
+    s.v1m_shadow_enabled = _env_bool(
+        "V1M_SHADOW_ENABLED",
+        default=_env_to_bool(ev_v1m_shadow, s.v1m_shadow_enabled),
+    )
+    s.v1m_api_key = _env_str(
+        "V1M_API_KEY",
+        env_vars.get("V1M_API_KEY") or os.getenv("V1M_API_KEY") or s.v1m_api_key,
+    )
+    s.v1m_base_url = _env_str(
+        "V1M_BASE_URL",
+        env_vars.get("V1M_BASE_URL") or os.getenv("V1M_BASE_URL") or s.v1m_base_url,
+    ).rstrip("/")
+    s.v1m_model = _env_str(
+        "V1M_MODEL",
+        env_vars.get("V1M_MODEL") or os.getenv("V1M_MODEL") or s.v1m_model,
+    )
+    ev_v1m_timeout = env_vars.get("V1M_TIMEOUT_SECONDS")
+    s.v1m_timeout_seconds = max(
+        0.1,
+        _env_to_float(ev_v1m_timeout, s.v1m_timeout_seconds),
+    )
+    ev_v1m_threshold = env_vars.get("V1M_CONFIDENCE_THRESHOLD")
+    s.v1m_confidence_threshold = min(
+        1.0,
+        max(0.0, _env_to_float(ev_v1m_threshold, s.v1m_confidence_threshold)),
+    )
+    ev_v1m_candidates = env_vars.get("V1M_MAX_CANDIDATES")
+    s.v1m_max_candidates = min(
+        8,
+        max(2, int(ev_v1m_candidates) if ev_v1m_candidates is not None else s.v1m_max_candidates),
+    )
+
     raw_max_steps = env_vars.get("MAX_STEPS")
     s.max_steps = max(1, int(raw_max_steps) if raw_max_steps is not None else s.max_steps)
 

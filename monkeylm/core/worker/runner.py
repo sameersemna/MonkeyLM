@@ -174,7 +174,7 @@ async def run_worker(
         execute_action,
         attempt_login_with_target_credentials,
     )
-    from monkeylm.models import decide_next_action, apply_state_aware_policy, _break_action_loop, run_application_discovery
+    from monkeylm.models import decide_next_action, apply_state_aware_policy, _break_action_loop, run_application_discovery, evaluate_v1m_shadow_decision
     from monkeylm.models.prompts.discovery import refresh_testing_strategy
     from monkeylm.memory import QdrantMemoryStore
 
@@ -332,13 +332,36 @@ async def run_worker(
 
             testing_strategy = refresh_testing_strategy(testing_strategy, state)
             cached_plan = replay_cache.get(state_key)
+            v1m_shadow = {
+                "mode": "shadow",
+                "status": "skipped",
+                "outcome": "replay" if cached_plan is not None else "disabled",
+                "primary_choice": "",
+                "v1m_choice": "",
+                "confidence": None,
+                "probabilities": {},
+                "latency_ms": 0.0,
+                "candidates": [],
+                "usage": {},
+            }
             if cached_plan is not None:
                 plan = dict(cached_plan)
                 plan["replayed"] = True
                 print("   └─ 🔁 Replaying cached decision for this state")
             else:
                 plan = await decide_next_action(settings, state, memory_store=worker_memory, snapshot=snapshot, testing_strategy=testing_strategy)
-                decision_cache[state_key] = {"action": plan.get("action", ""), "target": plan.get("target", ""), "value": plan.get("value", "")}
+                v1m_shadow = await evaluate_v1m_shadow_decision(
+                    settings,
+                    page_state=state,
+                    snapshot=snapshot,
+                    primary_plan=plan,
+                )
+                decision_cache[state_key] = {
+                    "action": plan.get("action", ""),
+                    "target": plan.get("target", ""),
+                    "value": plan.get("value", ""),
+                    "v1m_shadow": v1m_shadow,
+                }
             retrieval_telemetry = worker_memory.consume_last_search_telemetry()
 
             plan_signature = (plan.get("action", "scroll"), plan.get("target", ""))
@@ -561,6 +584,7 @@ async def run_worker(
 
             log_entry["worker_id"] = worker_id
             log_entry["memory_retrieval"] = retrieval_telemetry
+            log_entry["v1m_shadow"] = v1m_shadow
             if log_entry.get("status") in {"FAILED", "RECOVERED_MISSING_TARGET", "MODEL_PLAN_REJECTED"} or log_entry.get("plan_repaired_from"):
                 failed_plan_guard.record_failure(execution_signature)
 
