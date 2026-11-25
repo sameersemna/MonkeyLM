@@ -179,6 +179,16 @@ async def run_worker(
     from monkeylm.memory import QdrantMemoryStore
 
     worker_label = f"worker-{worker_id:02d}"
+    v1m_shadow_enabled = bool(getattr(settings, "v1m_shadow_enabled", False))
+    v1m_key_configured = bool(str(getattr(settings, "v1m_api_key", "") or "").strip())
+    print(
+        f"   └─ 🧭 V1M shadow "
+        f"{'enabled' if v1m_shadow_enabled else 'disabled'} "
+        f"(api_key={'configured' if v1m_key_configured else 'missing'}, "
+        f"endpoint={getattr(settings, 'v1m_base_url', 'https://v1m.ir').rstrip('/')}/v1/systemone, "
+        f"model={getattr(settings, 'v1m_model', 'rev-latest')}, "
+        f"threshold={float(getattr(settings, 'v1m_confidence_threshold', 0.75)):.2f})"
+    )
     os.makedirs(settings.output_dir, exist_ok=True)
     worker_defects = DefectTracker()
 

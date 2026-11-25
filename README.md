@@ -171,6 +171,18 @@ The native V1M endpoint is `POST https://v1m.ir/v1/systemone`. V1M is optional;
 missing credentials, malformed responses, low confidence, invalid choices,
 timeouts, and API errors preserve the current planner and heuristics.
 
+For a visible 20-step CLI run:
+
+```bash
+source .venv/bin/activate
+V1M_SHADOW_ENABLED=true python -m monkeylm --max-steps 20
+```
+
+The CLI prints the V1M endpoint and model at worker startup, then each step
+prints the primary choice, finite candidates, V1M choice/probability,
+confidence, outcome, and latency. Shadow mode never executes V1M's alternative
+plan.
+
 ### Selective Vision Audit & Executive PDF
 
 When `PDF_GENERATE=true`, the runner selectively sends only the most relevant

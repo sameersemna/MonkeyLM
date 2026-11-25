@@ -456,6 +456,11 @@ async def evaluate_v1m_shadow_decision(
         }
     }
 
+    print(
+        f"   └─ 🧭 V1M shadow calling {normalize_v1m_base_url(settings.v1m_base_url)} "
+        f"primary={primary_choice} candidates={len(candidates)} "
+        f"[{', '.join(candidate['id'] for candidate in candidates)}]"
+    )
     started = time.perf_counter()
     try:
         payload = await asyncio.wait_for(
@@ -475,6 +480,10 @@ async def evaluate_v1m_shadow_decision(
         )
         telemetry["outcome"] = "timeout"
         telemetry["status"] = "fallback"
+        print(
+            f"   └─ 🧭 V1M shadow fallback=timeout "
+            f"latency={telemetry['latency_ms']}ms"
+        )
         _local_service_log(
             "V1M shadow decision timed out; continuing with the primary planner",
             settings.output_dir,
@@ -487,6 +496,10 @@ async def evaluate_v1m_shadow_decision(
         )
         telemetry["outcome"] = exc.kind
         telemetry["status"] = "fallback"
+        print(
+            f"   └─ 🧭 V1M shadow fallback={exc.kind} "
+            f"latency={telemetry['latency_ms']}ms"
+        )
         _local_service_log(
             f"V1M shadow decision unavailable ({exc.kind}); continuing with the primary planner",
             settings.output_dir,
@@ -499,6 +512,10 @@ async def evaluate_v1m_shadow_decision(
         )
         telemetry["outcome"] = "unexpected_error"
         telemetry["status"] = "fallback"
+        print(
+            f"   └─ 🧭 V1M shadow fallback=unexpected_error "
+            f"latency={telemetry['latency_ms']}ms"
+        )
         _local_service_log(
             f"V1M shadow decision failed ({type(exc).__name__}); continuing with the primary planner",
             settings.output_dir,
@@ -519,12 +536,60 @@ async def evaluate_v1m_shadow_decision(
     if parsed["choice"] not in criteria_ids:
         telemetry["outcome"] = "invalid_choice"
         telemetry["status"] = "fallback"
+        probability = parsed["probabilities"].get(parsed["choice"])
+        probability_text = (
+            f"probability={probability:.3f} "
+            if probability is not None
+            else "probability=unknown "
+        )
+        print(
+            f"   └─ 🧭 V1M shadow choice={parsed['choice']} "
+            f"confidence={parsed['confidence']:.3f} {probability_text}"
+            f"outcome=invalid_choice "
+            f"latency={telemetry['latency_ms']}ms"
+        )
         return telemetry
     if parsed["confidence"] < float(settings.v1m_confidence_threshold):
         telemetry["outcome"] = "low_confidence"
+        probability = parsed["probabilities"].get(parsed["choice"])
+        probability_text = (
+            f"probability={probability:.3f} "
+            if probability is not None
+            else "probability=unknown "
+        )
+        print(
+            f"   └─ 🧭 V1M shadow choice={parsed['choice']} "
+            f"confidence={parsed['confidence']:.3f} {probability_text}"
+            f"outcome=low_confidence "
+            f"latency={telemetry['latency_ms']}ms"
+        )
         return telemetry
     if parsed["choice"] == primary_choice:
         telemetry["outcome"] = "agrees"
+        probability = parsed["probabilities"].get(parsed["choice"])
+        probability_text = (
+            f"probability={probability:.3f} "
+            if probability is not None
+            else "probability=unknown "
+        )
+        print(
+            f"   └─ 🧭 V1M shadow choice={parsed['choice']} "
+            f"confidence={parsed['confidence']:.3f} {probability_text}"
+            f"outcome=agrees "
+            f"latency={telemetry['latency_ms']}ms"
+        )
         return telemetry
     telemetry["outcome"] = "would_rerank"
+    probability = parsed["probabilities"].get(parsed["choice"])
+    probability_text = (
+        f"probability={probability:.3f} "
+        if probability is not None
+        else "probability=unknown "
+    )
+    print(
+        f"   └─ 🧭 V1M shadow choice={parsed['choice']} "
+        f"confidence={parsed['confidence']:.3f} {probability_text}"
+        f"outcome=would_rerank "
+        f"latency={telemetry['latency_ms']}ms"
+    )
     return telemetry
