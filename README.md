@@ -90,13 +90,23 @@ The advanced runner now supports both environment-variable configuration and CLI
 | `V1M_SHADOW_ENABLED` | `false` | Enable the V1M native System One shadow reranker. It records comparisons but never changes the executed plan. |
 | `V1M_API_KEY` | unset | Bearer token for the native V1M `/v1/systemone` endpoint. Keep it only in `.env`. |
 | `V1M_BASE_URL` | `https://v1m.ir` | V1M API origin. The native `/v1/systemone` endpoint is appended automatically. |
-| `V1M_MODEL` | `rev-latest` | V1M System One model name for shadow decisions. |
+| `V1M_MODEL` | `v1m-decision-engine` | Exact model ID; aliases should be rejected by default and recalibrate after a model-ID change. |
 | `V1M_TIMEOUT_SECONDS` | `3.0` | Hard timeout for each V1M shadow or rerank decision. |
-| `V1M_CONFIDENCE_THRESHOLD` | `0.75` | Minimum confidence required before a rerank can replace the guarded primary plan. |
+| `V1M_MAX_ATTEMPTS` | `3` | Maximum HTTP attempts (1-4), including bounded retries for 429/503/529. |
+| `V1M_RETRY_BASE_SECONDS` | `0.25` | Full-jitter exponential retry base. |
+| `V1M_RETRY_MAX_SECONDS` | `2.0` | Maximum retry delay. |
+| `V1M_CIRCUIT_BREAKER_THRESHOLD` | `3` | Consecutive failures before short-circuiting V1M calls. |
+| `V1M_CIRCUIT_BREAKER_COOLDOWN_SECONDS` | `60.0` | Circuit-breaker cooldown before V1M is retried. |
+| `V1M_MODEL_PIN_REQUIRED` | `true` | Require response-model consistency; alias/changed models are logged and blocked from reranking. |
+| `V1M_CONFIDENCE_THRESHOLD` | `0.75` | Shadow diagnostic threshold; reranking is gated by chosen probability and probability/margin, not raw confidence. |
 | `V1M_MAX_CANDIDATES` | `6` | Maximum finite action candidates sent to V1M; bounded from 2 to 8. |
 | `V1M_RERANK_ENABLED` | `false` | Permit confidence-gated V1M reranking to influence loop recovery. |
 | `V1M_LOOP_RERANK_ONLY` | `true` | Apply reranking only for repeated/revisited/blacklisted states. |
 | `V1M_PROBABILITY_MARGIN` | `0.15` | Minimum probability advantage over the primary choice for rerank adoption. |
+| `V1M_READ_PROBABILITY_THRESHOLD` | `0.50` | Minimum chosen probability for read/navigation reranks. |
+| `V1M_WRITE_PROBABILITY_THRESHOLD` | `0.60` | Minimum chosen probability for write/type reranks. |
+| `V1M_DESTRUCTIVE_PROBABILITY_THRESHOLD` | `0.80` | Minimum chosen probability for destructive-looking reranks. |
+| `V1M_PERMUTATION_CHECK_ENABLED` | `false` | Reverse candidate order once to detect an order-sensitive rerank. |
 | `V1M_RERANK_ENABLED` | `false` | Allow confidence-gated V1M reranking to replace a guarded primary plan. |
 | `V1M_LOOP_RERANK_ONLY` | `true` | Limit reranking to repeated/revisited/blacklisted states. |
 | `V1M_PROBABILITY_MARGIN` | `0.15` | Minimum probability advantage V1M's alternative must have over the primary choice. |
@@ -214,7 +224,9 @@ python -m monkeylm \
 ```
 
 Rerank adoption is conservative:
-- V1M must clear the confidence and probability-margin gates.
+- V1M must clear the chosen-probability and probability-margin gates.
+- Raw V1M `confidence` is diagnostic only and is not treated as P(correct).
+- Exact model IDs are preferred; alias or response-model drift blocks reranking.
 - The choice must be a currently visible click or a safe navigation/modal action.
 - Seen, blacklisted, and previously failed targets are rejected.
 - Form payload generation and submission remain with the existing primary planner.

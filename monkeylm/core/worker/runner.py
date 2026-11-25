@@ -195,10 +195,19 @@ async def run_worker(
         f"(api_key={'configured' if v1m_key_configured else 'missing'}, "
         f"endpoint={getattr(settings, 'v1m_base_url', 'https://v1m.ir').rstrip('/')}/v1/systemone, "
         f"model={getattr(settings, 'v1m_model', 'rev-latest')}, "
-        f"threshold={float(getattr(settings, 'v1m_confidence_threshold', 0.75)):.2f}, "
+        f"model_pin={'required' if getattr(settings, 'v1m_model_pin_required', True) else 'disabled'}, "
+        f"attempts={int(getattr(settings, 'v1m_max_attempts', 3))}, "
+        f"retry={float(getattr(settings, 'v1m_retry_base_seconds', 0.25)):.2f}-"
+        f"{float(getattr(settings, 'v1m_retry_max_seconds', 2.0)):.2f}s, "
+        f"risk_thresholds=read:"
+        f"{float(getattr(settings, 'v1m_read_probability_threshold', 0.50)):.2f}/"
+        f"write:{float(getattr(settings, 'v1m_write_probability_threshold', 0.60)):.2f}/"
+        f"destructive:{float(getattr(settings, 'v1m_destructive_probability_threshold', 0.80)):.2f}, "
+        f"raw_confidence={float(getattr(settings, 'v1m_confidence_threshold', 0.75)):.2f}, "
         f"margin={float(getattr(settings, 'v1m_probability_margin', 0.15)):.2f}, "
         f"rerank={'enabled' if getattr(settings, 'v1m_rerank_enabled', False) else 'disabled'}, "
-        f"loop_only={'true' if getattr(settings, 'v1m_loop_rerank_only', True) else 'false'})"
+        f"loop_only={'true' if getattr(settings, 'v1m_loop_rerank_only', True) else 'false'}, "
+        f"permutation={'enabled' if getattr(settings, 'v1m_permutation_check_enabled', False) else 'disabled'})"
     )
     os.makedirs(settings.output_dir, exist_ok=True)
     worker_defects = DefectTracker()

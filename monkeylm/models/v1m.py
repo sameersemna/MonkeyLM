@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import random
 import re
+import threading
 import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Dict, Iterable, List, Optional
 
 from monkeylm.config import Settings, _local_service_log, httpx
@@ -23,6 +27,15 @@ class V1MDecisionError(RuntimeError):
         super().__init__(message)
         self.status_code = status_code
         self.kind = kind
+        self.retry_count = 0
+        self.attempt_count = 0
+        self.http_status = status_code
+        self.retry_delays_ms: List[float] = []
+        self.requested_model = ""
+        self.response_model = ""
+        self.model_changed = False
+        self.model_gate = ""
+        self.circuit_state = "closed"
 
 
 def normalize_v1m_base_url(base_url: Optional[str]) -> str:
@@ -46,6 +59,130 @@ def _require_httpx() -> Any:
             kind="dependency_error",
         )
     return httpx
+
+
+_CIRCUIT_BREAKER_LOCK = threading.Lock()
+_CIRCUIT_BREAKER_STATE: Dict[str, Dict[str, Any]] = {}
+
+
+def reset_v1m_circuit_breaker() -> None:
+    """Reset process-local V1M circuit-breaker state (for tests and manual recovery)."""
+    with _CIRCUIT_BREAKER_LOCK:
+        _CIRCUIT_BREAKER_STATE.clear()
+
+
+def _circuit_allows(url: str, threshold: int, cooldown_seconds: float) -> tuple:
+    now = time.monotonic()
+    with _CIRCUIT_BREAKER_LOCK:
+        state = _CIRCUIT_BREAKER_STATE.setdefault(
+            url,
+            {"failure_count": 0, "open_until": 0.0, "state": "closed"},
+        )
+        open_until = float(state.get("open_until", 0.0) or 0.0)
+        if open_until > now:
+            return False, "open", state
+        if open_until and open_until <= now:
+            state["failure_count"] = 0
+            state["open_until"] = 0.0
+            state["state"] = "closed"
+        state["state"] = "closed"
+        return True, "closed", state
+
+
+def _circuit_record_success(url: str) -> None:
+    with _CIRCUIT_BREAKER_LOCK:
+        state = _CIRCUIT_BREAKER_STATE.setdefault(
+            url,
+            {"failure_count": 0, "open_until": 0.0, "state": "closed"},
+        )
+        state["failure_count"] = 0
+        state["open_until"] = 0.0
+        state["state"] = "closed"
+
+
+def _circuit_record_failure(url: str, threshold: int, cooldown_seconds: float) -> str:
+    with _CIRCUIT_BREAKER_LOCK:
+        state = _CIRCUIT_BREAKER_STATE.setdefault(
+            url,
+            {"failure_count": 0, "open_until": 0.0, "state": "closed"},
+        )
+        state["failure_count"] = int(state.get("failure_count", 0) or 0) + 1
+        if state["failure_count"] >= max(1, int(threshold)):
+            state["open_until"] = time.monotonic() + max(1.0, float(cooldown_seconds))
+            state["state"] = "open"
+        else:
+            state["state"] = "closed"
+        return str(state["state"])
+
+
+def _response_header(response: Any, name: str) -> str:
+    headers = getattr(response, "headers", None)
+    if headers is not None:
+        try:
+            value = headers.get(name)
+            if value:
+                return str(value)
+        except Exception:
+            pass
+    return ""
+
+
+def _parse_retry_after(response: Any) -> float:
+    value = _response_header(response, "retry-after").strip()
+    if not value:
+        return 0.0
+    try:
+        seconds = float(value)
+        if seconds >= 0:
+            return seconds
+    except ValueError:
+        pass
+    try:
+        retry_at = parsedate_to_datetime(value)
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=timezone.utc)
+        return max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
+    except Exception:
+        return 0.0
+
+
+def _x_should_retry(response: Any) -> Optional[bool]:
+    value = _response_header(response, "x-should-retry").strip().lower()
+    if value in {"false", "0", "no"}:
+        return False
+    if value in {"true", "1", "yes"}:
+        return True
+    return None
+
+
+def _is_quota_or_spend_error(status_code: int, response: Any) -> bool:
+    if status_code != 429:
+        return False
+    text = str(getattr(response, "text", "") or "").lower()
+    markers = (
+        "quota",
+        "billing",
+        "payment",
+        "credit",
+        "insufficient",
+        "spend",
+        "plan limit",
+    )
+    return any(marker in text for marker in markers)
+
+
+def _full_jitter_delay(attempt: int, base_seconds: float, max_seconds: float) -> float:
+    ceiling = min(max_seconds, base_seconds * (2 ** max(0, attempt)))
+    return random.uniform(0.0, max(0.0, ceiling))
+
+
+def _is_model_alias(model_id: str) -> bool:
+    value = str(model_id or "").strip().lower()
+    return (
+        value in {"latest", "rev-latest", "default"}
+        or value.endswith("-latest")
+        or value.endswith(":latest")
+    )
 
 
 def decide_v1m(
@@ -72,7 +209,34 @@ def decide_v1m(
         "Accept": "application/json",
     }
 
-    for attempt in range(2):
+    max_attempts = min(4, max(1, int(getattr(settings, "v1m_max_attempts", 3))))
+    retry_base = min(5.0, max(0.0, float(getattr(settings, "v1m_retry_base_seconds", 0.25))))
+    retry_max = min(30.0, max(0.1, float(getattr(settings, "v1m_retry_max_seconds", 2.0))))
+    breaker_threshold = min(20, max(1, int(getattr(settings, "v1m_circuit_breaker_threshold", 3))))
+    breaker_cooldown = min(3600.0, max(1.0, float(getattr(settings, "v1m_circuit_breaker_cooldown_seconds", 60.0))))
+
+    allowed, circuit_state, _state = _circuit_allows(
+        url,
+        breaker_threshold,
+        breaker_cooldown,
+    )
+    if not allowed:
+        error = V1MDecisionError(
+            "V1M circuit breaker is open",
+            status_code=None,
+            kind="circuit_open",
+        )
+        error.circuit_state = circuit_state
+        error.requested_model = str(settings.v1m_model)
+        raise error
+
+    retry_count = 0
+    retry_delays_ms: List[float] = []
+    http_status_history: List[int] = []
+    attempt_count = 0
+
+    for attempt in range(max_attempts):
+        attempt_count = attempt + 1
         try:
             response = http.post(
                 url,
@@ -83,43 +247,135 @@ def decide_v1m(
         except Exception as exc:
             name = type(exc).__name__.lower()
             text = str(exc).lower()
-            if "timeout" in name or "timeout" in text:
-                raise V1MDecisionError(
-                    "V1M decision request timed out",
-                    kind="timeout",
-                ) from exc
-            raise V1MDecisionError(
-                "V1M decision transport failed",
-                kind="transport_error",
-            ) from exc
+            kind = "timeout" if "timeout" in name or "timeout" in text else "transport_error"
+            if attempt < max_attempts - 1:
+                retry_count += 1
+                delay = _full_jitter_delay(attempt, retry_base, retry_max)
+                retry_delays_ms.append(round(delay * 1000.0, 3))
+                time.sleep(delay)
+                continue
+            circuit_state = _circuit_record_failure(
+                url,
+                breaker_threshold,
+                breaker_cooldown,
+            )
+            error = V1MDecisionError(
+                "V1M decision request timed out" if kind == "timeout" else "V1M decision transport failed",
+                kind=kind,
+            )
+            error.retry_count = retry_count
+            error.attempt_count = attempt_count
+            error.retry_delays_ms = retry_delays_ms
+            error.requested_model = str(settings.v1m_model)
+            error.circuit_state = circuit_state
+            raise error
 
         status_code = int(getattr(response, "status_code", 0) or 0)
+        http_status_history.append(status_code)
         if 200 <= status_code < 300:
             try:
                 decoded = response.json()
             except Exception as exc:
-                raise V1MDecisionError(
+                circuit_state = _circuit_record_failure(
+                    url,
+                    breaker_threshold,
+                    breaker_cooldown,
+                )
+                error = V1MDecisionError(
                     "V1M decision endpoint returned invalid JSON",
                     status_code=status_code,
                     kind="malformed_response",
-                ) from exc
+                )
+                error.requested_model = str(settings.v1m_model)
+                error.http_status = status_code
+                error.attempt_count = attempt_count
+                error.retry_count = retry_count
+                error.retry_delays_ms = retry_delays_ms
+                error.circuit_state = circuit_state
+                raise error from exc
             if not isinstance(decoded, dict):
-                raise V1MDecisionError(
+                circuit_state = _circuit_record_failure(
+                    url,
+                    breaker_threshold,
+                    breaker_cooldown,
+                )
+                error = V1MDecisionError(
                     "V1M decision endpoint returned an unexpected payload",
                     status_code=status_code,
                     kind="malformed_response",
                 )
+                error.requested_model = str(settings.v1m_model)
+                error.http_status = status_code
+                error.attempt_count = attempt_count
+                error.retry_count = retry_count
+                error.retry_delays_ms = retry_delays_ms
+                error.circuit_state = circuit_state
+                raise error
+            response_model = str(decoded.get("model") or "")
+            model_changed = bool(response_model and response_model != str(settings.v1m_model))
+            model_alias = _is_model_alias(str(settings.v1m_model))
+            model_gate = "ok"
+            if not response_model:
+                model_gate = "missing_response_model"
+            elif model_alias:
+                model_gate = "requested_alias"
+            elif model_changed:
+                model_gate = "response_mismatch"
+            decoded["_v1m_transport"] = {
+                "attempt_count": attempt_count,
+                "retry_count": retry_count,
+                "retry_delays_ms": retry_delays_ms,
+                "http_status_history": http_status_history,
+                "http_status": status_code,
+                "requested_model": str(settings.v1m_model),
+                "response_model": response_model,
+                "model_changed": model_changed,
+                "model_alias": model_alias,
+                "model_gate": model_gate,
+                "circuit_state": "closed",
+            }
+            _circuit_record_success(url)
             return decoded
 
-        if status_code in {429, 503, 529} and attempt == 0:
-            time.sleep(0.25)
+        should_retry_header = _x_should_retry(response)
+        quota_or_spend = _is_quota_or_spend_error(status_code, response)
+        retryable_status = status_code in {429, 503, 529}
+        should_retry = (
+            retryable_status
+            and should_retry_header is not False
+            and not quota_or_spend
+            and attempt < max_attempts - 1
+        )
+        if should_retry:
+            retry_count += 1
+            retry_after = _parse_retry_after(response)
+            delay = retry_after if retry_after > 0 else _full_jitter_delay(
+                attempt,
+                retry_base,
+                retry_max,
+            )
+            delay = min(retry_max, delay)
+            retry_delays_ms.append(round(delay * 1000.0, 3))
+            time.sleep(delay)
             continue
 
-        raise V1MDecisionError(
+        circuit_state = _circuit_record_failure(
+            url,
+            breaker_threshold,
+            breaker_cooldown,
+        )
+        error = V1MDecisionError(
             f"V1M decision endpoint returned HTTP {status_code}",
             status_code=status_code,
             kind="http_error",
         )
+        error.retry_count = retry_count
+        error.attempt_count = attempt_count
+        error.http_status = status_code
+        error.retry_delays_ms = retry_delays_ms
+        error.requested_model = str(settings.v1m_model)
+        error.circuit_state = circuit_state
+        raise error
 
     raise V1MDecisionError(
         "V1M decision endpoint failed after retry",
@@ -131,6 +387,8 @@ def parse_v1m_choice(
     payload: Dict[str, Any],
     *,
     question_name: str = "next_action",
+    requested_model: Optional[str] = None,
+    pin_required: bool = False,
 ) -> Dict[str, Any]:
     """Parse and validate the native next_action choice answer."""
     answers = payload.get("answers")
@@ -179,10 +437,33 @@ def parse_v1m_choice(
     if not isinstance(usage, dict):
         usage = {}
 
+    transport = payload.get("_v1m_transport")
+    if not isinstance(transport, dict):
+        transport = {}
+    response_model = str(payload.get("model") or transport.get("response_model") or "")
+    requested = str(requested_model or transport.get("requested_model") or "")
+    model_changed = bool(requested and response_model and requested != response_model)
+    model_alias = _is_model_alias(requested)
+    model_gate = "ok"
+    if pin_required:
+        if not response_model:
+            model_gate = "missing_response_model"
+        elif model_alias:
+            model_gate = "requested_alias"
+        elif model_changed:
+            model_gate = "response_mismatch"
+
     return {
         "choice": choice.strip(),
         "confidence": confidence,
         "probabilities": probabilities,
+        "requested_model": requested,
+        "response_model": response_model,
+        "model_changed": model_changed,
+        "model_alias": model_alias,
+        "model_pin_required": bool(pin_required),
+        "model_gate": model_gate,
+        "transport": transport,
         "usage": {
             "input_tokens": usage.get("input_tokens"),
             "output_tokens": usage.get("output_tokens"),
@@ -487,6 +768,67 @@ def v1m_candidate_to_action_plan(
     return None
 
 
+def get_v1m_action_risk(
+    choice: str,
+    candidates: Iterable[Dict[str, str]],
+) -> str:
+    """Classify a bounded V1M choice as read, write, or destructive."""
+    selected = next(
+        (candidate for candidate in candidates if candidate.get("id") == choice),
+        None,
+    )
+    if selected is None:
+        return "write"
+
+    action = str(selected.get("action", "")).strip().lower()
+    description = str(selected.get("description", "")).lower()
+    destructive_markers = (
+        "delete",
+        "remove",
+        "purge",
+        "destroy",
+        "logout",
+        "sign out",
+        "pay",
+        "checkout",
+        "purchase",
+        "transfer",
+        "confirm",
+        "submit",
+    )
+    write_markers = (
+        "type",
+        "submit",
+        "save",
+        "create",
+        "register",
+        "update",
+        "edit",
+        "upload",
+        "send",
+        "post",
+        "approve",
+        "accept",
+    )
+    if action in {"submit_form"} or any(marker in description for marker in destructive_markers):
+        return "destructive"
+    if action in {"type"} or any(marker in description for marker in write_markers):
+        return "write"
+    return "read"
+
+
+def get_v1m_probability_threshold(
+    settings: Settings,
+    risk: str,
+) -> float:
+    """Return the starting probability gate for a risk class."""
+    if risk == "destructive":
+        return min(1.0, max(0.0, float(getattr(settings, "v1m_destructive_probability_threshold", 0.80))))
+    if risk == "write":
+        return min(1.0, max(0.0, float(getattr(settings, "v1m_write_probability_threshold", 0.60))))
+    return min(1.0, max(0.0, float(getattr(settings, "v1m_read_probability_threshold", 0.50))))
+
+
 async def evaluate_v1m_shadow_decision(
     settings: Settings,
     *,
@@ -501,7 +843,7 @@ async def evaluate_v1m_shadow_decision(
 ) -> Dict[str, Any]:
     """Evaluate V1M alongside the primary plan without changing execution."""
     telemetry: Dict[str, Any] = {
-        "mode": "shadow",
+        "mode": "rerank" if getattr(settings, "v1m_rerank_enabled", False) else "shadow",
         "status": "skipped",
         "outcome": "disabled",
         "primary_choice": "",
@@ -514,6 +856,23 @@ async def evaluate_v1m_shadow_decision(
         "rerank_applied": False,
         "rerank_plan": None,
         "rerank_blocked_reason": "",
+        "action_risk": None,
+        "probability_threshold": None,
+        "chosen_probability": None,
+        "primary_probability": None,
+        "probability_margin": float(getattr(settings, "v1m_probability_margin", 0.15)),
+        "probability_advantage": None,
+        "model_requested": str(getattr(settings, "v1m_model", "")),
+        "model_response": "",
+        "model_changed": False,
+        "model_alias": _is_model_alias(str(getattr(settings, "v1m_model", ""))),
+        "model_gate": "",
+        "transport": {},
+        "permutation_check": None,
+        "loop_context": bool(loop_context),
+        "repeat_count": int(repeat_count),
+        "baseline_plan": None,
+        "executed_plan": None,
     }
 
     if not getattr(settings, "v1m_shadow_enabled", False) and not getattr(settings, "v1m_rerank_enabled", False):
@@ -604,7 +963,11 @@ async def evaluate_v1m_shadow_decision(
             ),
             timeout=max(0.1, float(settings.v1m_timeout_seconds) + 0.5),
         )
-        parsed = parse_v1m_choice(payload)
+        parsed = parse_v1m_choice(
+            payload,
+            requested_model=str(settings.v1m_model),
+            pin_required=bool(getattr(settings, "v1m_model_pin_required", True)),
+        )
     except asyncio.TimeoutError:
         telemetry["latency_ms"] = round(
             (time.perf_counter() - started) * 1000.0,
@@ -612,6 +975,13 @@ async def evaluate_v1m_shadow_decision(
         )
         telemetry["outcome"] = "timeout"
         telemetry["status"] = "fallback"
+        telemetry["transport"] = {
+            "kind": "timeout",
+            "attempt_count": 0,
+            "retry_count": 0,
+            "http_status": None,
+            "circuit_state": "unknown",
+        }
         print(
             f"   └─ 🧭 V1M shadow fallback=timeout "
             f"latency={telemetry['latency_ms']}ms"
@@ -628,6 +998,18 @@ async def evaluate_v1m_shadow_decision(
         )
         telemetry["outcome"] = exc.kind
         telemetry["status"] = "fallback"
+        telemetry["transport"] = {
+            "kind": exc.kind,
+            "attempt_count": exc.attempt_count,
+            "retry_count": exc.retry_count,
+            "retry_delays_ms": exc.retry_delays_ms,
+            "http_status": exc.http_status,
+            "requested_model": exc.requested_model,
+            "response_model": exc.response_model,
+            "model_changed": exc.model_changed,
+            "model_gate": exc.model_gate,
+            "circuit_state": exc.circuit_state,
+        }
         print(
             f"   └─ 🧭 V1M shadow fallback={exc.kind} "
             f"latency={telemetry['latency_ms']}ms"
@@ -644,6 +1026,13 @@ async def evaluate_v1m_shadow_decision(
         )
         telemetry["outcome"] = "unexpected_error"
         telemetry["status"] = "fallback"
+        telemetry["transport"] = {
+            "kind": "unexpected_error",
+            "attempt_count": 0,
+            "retry_count": 0,
+            "http_status": None,
+            "circuit_state": "unknown",
+        }
         print(
             f"   └─ 🧭 V1M shadow fallback=unexpected_error "
             f"latency={telemetry['latency_ms']}ms"
@@ -663,6 +1052,27 @@ async def evaluate_v1m_shadow_decision(
     telemetry["confidence"] = parsed["confidence"]
     telemetry["probabilities"] = parsed["probabilities"]
     telemetry["usage"] = parsed["usage"]
+    telemetry["model_requested"] = parsed["requested_model"]
+    telemetry["model_response"] = parsed["response_model"]
+    telemetry["model_changed"] = parsed["model_changed"]
+    telemetry["model_alias"] = parsed["model_alias"]
+    telemetry["model_gate"] = parsed["model_gate"]
+    telemetry["transport"] = parsed["transport"]
+
+    if (
+        getattr(settings, "v1m_rerank_enabled", False)
+        and getattr(settings, "v1m_model_pin_required", True)
+        and parsed["model_gate"] != "ok"
+    ):
+        telemetry["outcome"] = "model_drift"
+        telemetry["status"] = "fallback"
+        telemetry["rerank_blocked_reason"] = "model_drift"
+        print(
+            f"   └─ 🧭 V1M rerank blocked: model gate={parsed['model_gate']} "
+            f"requested={parsed['requested_model'] or 'unknown'} "
+            f"response={parsed['response_model'] or 'unknown'}"
+        )
+        return telemetry
 
     criteria_ids = {candidate["id"] for candidate in candidates}
     if parsed["choice"] not in criteria_ids:
@@ -681,7 +1091,11 @@ async def evaluate_v1m_shadow_decision(
             f"latency={telemetry['latency_ms']}ms"
         )
         return telemetry
-    if parsed["confidence"] < float(settings.v1m_confidence_threshold):
+    rerank_enabled = bool(getattr(settings, "v1m_rerank_enabled", False))
+    if (
+        parsed["confidence"] < float(settings.v1m_confidence_threshold)
+        and not rerank_enabled
+    ):
         telemetry["outcome"] = "low_confidence"
         probability = parsed["probabilities"].get(parsed["choice"])
         probability_text = (
@@ -696,6 +1110,11 @@ async def evaluate_v1m_shadow_decision(
             f"latency={telemetry['latency_ms']}ms"
         )
         return telemetry
+    if (
+        parsed["confidence"] < float(settings.v1m_confidence_threshold)
+        and rerank_enabled
+    ):
+        telemetry["raw_confidence_below_threshold"] = True
     if parsed["choice"] == primary_choice:
         telemetry["outcome"] = "agrees"
         probability = parsed["probabilities"].get(parsed["choice"])
@@ -739,6 +1158,94 @@ async def evaluate_v1m_shadow_decision(
             f"latency={telemetry['latency_ms']}ms"
         )
         return telemetry
+
+    action_risk = get_v1m_action_risk(parsed["choice"], candidates)
+    probability_threshold = get_v1m_probability_threshold(settings, action_risk)
+    telemetry["action_risk"] = action_risk
+    telemetry["probability_threshold"] = probability_threshold
+    telemetry["chosen_probability"] = chosen_probability
+    telemetry["primary_probability"] = primary_probability
+    telemetry["probability_advantage"] = advantage
+    if float(chosen_probability) < probability_threshold:
+        telemetry["outcome"] = "weak_rerank"
+        telemetry["rerank_blocked_reason"] = "risk_probability_threshold"
+        print(
+            f"   └─ 🧭 V1M shadow choice={parsed['choice']} "
+            f"risk={action_risk} probability={chosen_probability:.3f} "
+            f"threshold={probability_threshold:.3f} outcome=weak_rerank "
+            f"latency={telemetry['latency_ms']}ms"
+        )
+        return telemetry
+
+    if (
+        rerank_enabled
+        and loop_context
+        and bool(getattr(settings, "v1m_permutation_check_enabled", False))
+    ):
+        reversed_items = list(reversed(list(criteria.items())))
+        reversed_questions = {
+            "next_action": {
+                "type": "choice",
+                "instructions": "Choose the one bounded next action, consistently across candidate order.",
+                "criteria": dict(reversed_items),
+            }
+        }
+        try:
+            reversed_payload = await asyncio.wait_for(
+                asyncio.to_thread(
+                    decide_v1m,
+                    settings,
+                    state=state_payload,
+                    questions=reversed_questions,
+                ),
+                timeout=max(0.1, float(settings.v1m_timeout_seconds) + 0.5),
+            )
+            reversed_parsed = parse_v1m_choice(
+                reversed_payload,
+                requested_model=str(settings.v1m_model),
+                pin_required=bool(getattr(settings, "v1m_model_pin_required", True)),
+            )
+            if reversed_parsed["model_gate"] != "ok":
+                telemetry["permutation_check"] = {
+                    "checked": False,
+                    "original_choice": parsed["choice"],
+                    "reversed_choice": "",
+                    "flip": True,
+                    "error": "permutation_model_drift",
+                }
+                telemetry["outcome"] = "weak_rerank"
+                telemetry["rerank_blocked_reason"] = "permutation_model_drift"
+                print("   └─ 🧭 V1M permutation model drift; rerank blocked")
+                return telemetry
+            reversed_choice = str(reversed_parsed["choice"] or "")
+            permutation_flip = reversed_choice != parsed["choice"]
+            telemetry["permutation_check"] = {
+                "checked": True,
+                "original_choice": parsed["choice"],
+                "reversed_choice": reversed_choice,
+                "flip": permutation_flip,
+            }
+            if permutation_flip:
+                telemetry["outcome"] = "weak_rerank"
+                telemetry["rerank_blocked_reason"] = "candidate_order_flip"
+                print(
+                    f"   └─ 🧭 V1M candidate-order flip "
+                    f"original={parsed['choice']} reversed={reversed_choice} "
+                    f"outcome=weak_rerank"
+                )
+                return telemetry
+        except Exception:
+            telemetry["permutation_check"] = {
+                "checked": False,
+                "original_choice": parsed["choice"],
+                "reversed_choice": "",
+                "flip": True,
+                "error": "permutation_check_failed",
+            }
+            telemetry["outcome"] = "weak_rerank"
+            telemetry["rerank_blocked_reason"] = "permutation_check_failed"
+            print("   └─ 🧭 V1M permutation check failed; rerank blocked")
+            return telemetry
 
     telemetry["outcome"] = "would_rerank"
     probability = parsed["probabilities"].get(parsed["choice"])

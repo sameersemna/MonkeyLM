@@ -35,6 +35,9 @@ from monkeylm.models.v1m import (
     normalize_v1m_base_url,
     parse_v1m_choice,
     v1m_candidate_to_action_plan,
+    get_v1m_action_risk,
+    get_v1m_probability_threshold,
+    reset_v1m_circuit_breaker,
 )
 
 __all__ = [
@@ -66,5 +69,7 @@ __all__ = [
     "normalize_v1m_base_url",
     "parse_v1m_choice",
     "v1m_candidate_to_action_plan",
-    "v1m_candidate_to_action_plan",
+    "get_v1m_action_risk",
+    "get_v1m_probability_threshold",
+    "reset_v1m_circuit_breaker",
 ]

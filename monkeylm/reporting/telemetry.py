@@ -24,6 +24,40 @@ def summarize_v1m_shadow_telemetry(test_logs: List[Dict[str, Any]]) -> Dict[str,
         outcome = str(event.get("outcome", "unknown"))
         outcomes[outcome] = outcomes.get(outcome, 0) + 1
 
+    model_changed_count = len([
+        event for event in events
+        if event.get("model_changed") is True
+    ])
+    permutation_checks = [
+        event.get("permutation_check")
+        for event in events
+        if isinstance(event.get("permutation_check"), dict)
+        and event["permutation_check"].get("checked") is True
+    ]
+    permutation_flips = len([
+        check for check in permutation_checks
+        if check.get("flip") is True
+    ])
+    baseline_executed_changes = len([
+        event for event in events
+        if isinstance(event.get("baseline_plan"), dict)
+        and isinstance(event.get("executed_plan"), dict)
+        and event["baseline_plan"] != event["executed_plan"]
+    ])
+    loop_context_count = len([
+        event for event in events
+        if event.get("loop_context") is True
+        or (
+            isinstance(event.get("permutation_check"), dict)
+            and event["permutation_check"].get("checked") is not None
+        )
+    ])
+    risk_counts: Dict[str, int] = {}
+    for event in events:
+        risk = str(event.get("action_risk") or "")
+        if risk:
+            risk_counts[risk] = risk_counts.get(risk, 0) + 1
+
     return {
         "events": len(events),
         "evaluated": len(evaluated),
@@ -36,6 +70,12 @@ def summarize_v1m_shadow_telemetry(test_logs: List[Dict[str, Any]]) -> Dict[str,
             event for event in events
             if event.get("rerank_blocked_reason")
         ]),
+        "model_changed": model_changed_count,
+        "permutation_checked": len(permutation_checks),
+        "permutation_flips": permutation_flips,
+        "baseline_executed_changes": baseline_executed_changes,
+        "loop_context_events": loop_context_count,
+        "risk_counts": risk_counts,
         "outcomes": outcomes,
         "avg_latency_ms": round(
             sum(latencies) / len(latencies),

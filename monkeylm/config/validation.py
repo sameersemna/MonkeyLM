@@ -111,6 +111,32 @@ def validate_runtime_configuration(settings: Settings) -> None:
             f"(got {settings.redis_path_lock_ttl_seconds})."
         )
     if settings.v1m_timeout_seconds < 0.1 or settings.v1m_timeout_seconds > 30.0:
+        raise ValueError("V1M_TIMEOUT_SECONDS must be between 0.1 and 30 seconds.")
+    if settings.v1m_max_attempts < 1 or settings.v1m_max_attempts > 4:
+        raise ValueError("V1M_MAX_ATTEMPTS must be between 1 and 4.")
+    if settings.v1m_retry_base_seconds < 0.0 or settings.v1m_retry_base_seconds > 5.0:
+        raise ValueError("V1M_RETRY_BASE_SECONDS must be between 0.0 and 5.0.")
+    if settings.v1m_retry_max_seconds < 0.1 or settings.v1m_retry_max_seconds > 30.0:
+        raise ValueError("V1M_RETRY_MAX_SECONDS must be between 0.1 and 30.0.")
+    if settings.v1m_circuit_breaker_threshold < 1 or settings.v1m_circuit_breaker_threshold > 20:
+        raise ValueError("V1M_CIRCUIT_BREAKER_THRESHOLD must be between 1 and 20.")
+    if settings.v1m_circuit_breaker_cooldown_seconds < 1.0 or settings.v1m_circuit_breaker_cooldown_seconds > 3600.0:
+        raise ValueError("V1M_CIRCUIT_BREAKER_COOLDOWN_SECONDS must be between 1.0 and 3600.0.")
+    if settings.v1m_confidence_threshold < 0.0 or settings.v1m_confidence_threshold > 1.0:
+        raise ValueError("V1M_CONFIDENCE_THRESHOLD must be between 0.0 and 1.0.")
+    if settings.v1m_probability_margin < 0.0 or settings.v1m_probability_margin > 1.0:
+        raise ValueError("V1M_PROBABILITY_MARGIN must be between 0.0 and 1.0.")
+    for threshold_name in (
+        "v1m_read_probability_threshold",
+        "v1m_write_probability_threshold",
+        "v1m_destructive_probability_threshold",
+    ):
+        threshold = float(getattr(settings, threshold_name))
+        if threshold < 0.0 or threshold > 1.0:
+            raise ValueError(f"{threshold_name} must be between 0.0 and 1.0.")
+    if settings.v1m_max_candidates < 2 or settings.v1m_max_candidates > 8:
+        raise ValueError("V1M_MAX_CANDIDATES must be between 2 and 8.")
+    if settings.v1m_timeout_seconds < 0.1 or settings.v1m_timeout_seconds > 30.0:
         raise ValueError(
             "V1M_TIMEOUT_SECONDS must be between 0.1 and 30 seconds "
             f"(got {settings.v1m_timeout_seconds})."

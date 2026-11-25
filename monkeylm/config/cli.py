@@ -97,11 +97,50 @@ def parse_cli_args() -> argparse.Namespace:
         help="Allow V1M reranking outside loop states",
     )
     parser.set_defaults(v1m_loop_rerank_only=None)
-    parser.add_argument("--v1m-base-url", help="V1M API origin, for example https://v1m.ir")
-    parser.add_argument("--v1m-model", help="V1M System One model name")
+
+    v1m_pin_group = parser.add_mutually_exclusive_group()
+    v1m_pin_group.add_argument(
+        "--v1m-model-pin-required",
+        dest="v1m_model_pin_required",
+        action="store_true",
+        help="Require V1M model-ID pinning and response-model consistency",
+    )
+    v1m_pin_group.add_argument(
+        "--no-v1m-model-pin-required",
+        dest="v1m_model_pin_required",
+        action="store_false",
+        help="Allow V1M model aliases and response-model drift",
+    )
+    parser.set_defaults(v1m_model_pin_required=None)
+
+    v1m_permutation_group = parser.add_mutually_exclusive_group()
+    v1m_permutation_group.add_argument(
+        "--v1m-permutation-check",
+        dest="v1m_permutation_check_enabled",
+        action="store_true",
+        help="Check V1M candidate-order stability with a reversed candidate order",
+    )
+    v1m_permutation_group.add_argument(
+        "--no-v1m-permutation-check",
+        dest="v1m_permutation_check_enabled",
+        action="store_false",
+        help="Disable V1M candidate-order stability checks",
+    )
+    parser.set_defaults(v1m_permutation_check_enabled=None)
+
+    parser.add_argument("--v1m-base-url", help="V1M API origin")
+    parser.add_argument("--v1m-model", help="Exact V1M System One model ID")
     parser.add_argument("--v1m-timeout-seconds", type=float, help="Hard timeout for each V1M decision")
-    parser.add_argument("--v1m-confidence-threshold", type=float, help="Minimum V1M confidence for reranking")
+    parser.add_argument("--v1m-max-attempts", type=int, help="Maximum V1M HTTP attempts (1-4)")
+    parser.add_argument("--v1m-retry-base-seconds", type=float, help="V1M retry backoff base")
+    parser.add_argument("--v1m-retry-max-seconds", type=float, help="Maximum V1M retry delay")
+    parser.add_argument("--v1m-circuit-breaker-threshold", type=int, help="V1M consecutive-failure circuit threshold")
+    parser.add_argument("--v1m-circuit-breaker-cooldown-seconds", type=float, help="V1M circuit-breaker cooldown")
+    parser.add_argument("--v1m-confidence-threshold", type=float, help="Minimum raw V1M confidence for shadow agreement")
     parser.add_argument("--v1m-probability-margin", type=float, help="Minimum probability advantage over the primary choice")
+    parser.add_argument("--v1m-read-probability-threshold", type=float, help="Read-action chosen-probability threshold")
+    parser.add_argument("--v1m-write-probability-threshold", type=float, help="Write-action chosen-probability threshold")
+    parser.add_argument("--v1m-destructive-probability-threshold", type=float, help="Destructive-action chosen-probability threshold")
     parser.add_argument("--v1m-max-candidates", type=int, help="Maximum finite V1M action candidates")
     parser.add_argument("--max-steps", type=int, help="Maximum monkey steps to execute")
     parser.add_argument(

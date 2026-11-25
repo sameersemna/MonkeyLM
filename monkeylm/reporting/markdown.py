@@ -212,16 +212,24 @@ def generate_markdown_report(
 | Setting | Value |
 |---------|-------|
 | **Mode** | `{v1m_mode}` |
-| **Model** | `{getattr(settings, 'v1m_model', 'rev-latest')}` |
+| **Model** | `{getattr(settings, 'v1m_model', 'v1m-decision-engine')}` |
+| **Model Pin Required** | `{"enabled" if getattr(settings, 'v1m_model_pin_required', True) else "disabled"}` |
 | **Timeout** | `{float(getattr(settings, 'v1m_timeout_seconds', 3.0)):.2f}s` |
+| **Retry Policy** | `{int(getattr(settings, 'v1m_max_attempts', 3))} attempts, `{float(getattr(settings, 'v1m_retry_base_seconds', 0.25)):.2f}s base, `{float(getattr(settings, 'v1m_retry_max_seconds', 2.0)):.2f}s max` |
+| **Circuit Breaker** | `{int(getattr(settings, 'v1m_circuit_breaker_threshold', 3))} failures / `{float(getattr(settings, 'v1m_circuit_breaker_cooldown_seconds', 60.0)):.2f}s cooldown` |
 | **Confidence Threshold** | `{float(getattr(settings, 'v1m_confidence_threshold', 0.75)):.2f}` |
 | **Probability Margin** | `{float(getattr(settings, 'v1m_probability_margin', 0.15)):.2f}` |
+| **Risk Probabilities** | read `{float(getattr(settings, 'v1m_read_probability_threshold', 0.50)):.2f}`, write `{float(getattr(settings, 'v1m_write_probability_threshold', 0.60)):.2f}`, destructive `{float(getattr(settings, 'v1m_destructive_probability_threshold', 0.80)):.2f}` |
 | **Loop-Only Rerank** | `{"enabled" if getattr(settings, 'v1m_loop_rerank_only', True) else "disabled"}` |
+| **Permutation Check** | `{"enabled" if getattr(settings, 'v1m_permutation_check_enabled', False) else "disabled"}` |
 | **Calls** | `{v1m_telemetry.get('events', 0)}` |
 | **Evaluated** | `{v1m_telemetry.get('evaluated', 0)}` |
 | **Fallback** | `{v1m_telemetry.get('fallback', 0)}` |
 | **Rerank Applied** | `{v1m_telemetry.get('rerank_applied', 0)}` |
 | **Rerank Blocked** | `{v1m_telemetry.get('rerank_blocked', 0)}` |
+| **Model-ID Changed** | `{v1m_telemetry.get('model_changed', 0)}` |
+| **Permutation Checks/Flips** | `{v1m_telemetry.get('permutation_checked', 0)} / {v1m_telemetry.get('permutation_flips', 0)}` |
+| **Baseline/Executed Plan Changes** | `{v1m_telemetry.get('baseline_executed_changes', 0)}` |
 | **Average Latency** | `{float(v1m_telemetry.get('avg_latency_ms', 0.0)):.3f}ms` |
 
 ## Summary

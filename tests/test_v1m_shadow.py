@@ -9,20 +9,25 @@ import pytest
 from monkeylm.models.v1m import (
     V1MDecisionError,
     build_v1m_candidates,
+    decide_v1m,
     evaluate_v1m_shadow_decision,
+    get_v1m_action_risk,
+    get_v1m_probability_threshold,
     normalize_v1m_base_url,
     parse_v1m_choice,
     v1m_candidate_to_action_plan,
+    reset_v1m_circuit_breaker,
 )
 from monkeylm.reporting.telemetry import summarize_v1m_shadow_telemetry
 from monkeylm.types import Settings
 
 
 class _FakeResponse:
-    def __init__(self, payload=None, status_code=200) -> None:
+    def __init__(self, payload=None, status_code=200, headers=None, text=None) -> None:
         self._payload = payload
         self.status_code = status_code
-        self.text = str(payload)
+        self.headers = dict(headers or {})
+        self.text = str(payload) if text is None else text
 
     def json(self):
         if isinstance(self._payload, Exception):
@@ -314,6 +319,7 @@ def test_probability_margin_blocks_weak_rerank() -> None:
             modal_count=0,
         )
         payload = {
+            "model": "v1m-decision-engine",
             "answers": {
                 "next_action": {
                     "choice": "click:[id=7]",
@@ -361,6 +367,7 @@ def test_probability_margin_allows_clear_rerank() -> None:
             modal_count=0,
         )
         payload = {
+            "model": "v1m-decision-engine",
             "answers": {
                 "next_action": {
                     "choice": "click:[id=7]",
@@ -463,3 +470,282 @@ def test_v1m_telemetry_counts_rerank_applied_and_blocked() -> None:
 
 def test_v1m_timeout_default_is_three_seconds() -> None:
     assert Settings().v1m_timeout_seconds == 3.0
+
+
+def test_parse_v1m_choice_tracks_model_pin_and_alias() -> None:
+    payload = {
+        "model": "v1m-decision-engine",
+        "answers": {
+            "next_action": {
+                "choice": "scroll",
+                "confidence": 0.9,
+                "probabilities": {"scroll": 0.9, "back": 0.1},
+            }
+        },
+    }
+
+    parsed = parse_v1m_choice(
+        payload,
+        requested_model="v1m-decision-engine",
+        pin_required=True,
+    )
+    assert parsed["model_gate"] == "ok"
+    assert parsed["model_changed"] is False
+
+    alias_payload = dict(payload)
+    alias_payload["model"] = "rev-latest"
+    alias = parse_v1m_choice(
+        alias_payload,
+        requested_model="rev-latest",
+        pin_required=True,
+    )
+    assert alias["model_alias"] is True
+    assert alias["model_gate"] == "requested_alias"
+
+
+def test_action_risk_and_probability_thresholds() -> None:
+    settings = Settings()
+    candidates = [
+        {"id": "scroll", "action": "scroll", "target": "", "description": "Scroll"},
+        {"id": "submit_form:[id=9]", "action": "submit_form", "target": "[id=9]", "description": "Submit form"},
+        {"id": "type:[id=3]", "action": "type", "target": "[id=3]", "description": "Enter value"},
+    ]
+
+    assert get_v1m_action_risk("scroll", candidates) == "read"
+    assert get_v1m_action_risk("type:[id=3]", candidates) == "write"
+    assert get_v1m_action_risk("submit_form:[id=9]", candidates) == "destructive"
+    assert get_v1m_probability_threshold(settings, "read") == 0.50
+    assert get_v1m_probability_threshold(settings, "write") == 0.60
+    assert get_v1m_probability_threshold(settings, "destructive") == 0.80
+
+
+def test_decide_v1m_retries_503_and_records_transport_metadata() -> None:
+    import monkeylm.models.v1m as v1m_module
+
+    reset_v1m_circuit_breaker()
+    calls = []
+
+    class _Client:
+        def post(self, url, **kwargs):
+            calls.append({"url": url, "kwargs": kwargs})
+            if len(calls) == 1:
+                return _FakeResponse(
+                    payload={"detail": "temporarily unavailable"},
+                    status_code=503,
+                    headers={"retry-after": "0"},
+                    text="temporarily unavailable",
+                )
+            return _FakeResponse(
+                payload={
+                    "model": "v1m-decision-engine",
+                    "answers": {
+                        "next_action": {
+                            "choice": "scroll",
+                            "confidence": 0.9,
+                            "probabilities": {"scroll": 0.9, "back": 0.1},
+                        }
+                    },
+                },
+                status_code=200,
+            )
+
+    settings = Settings(
+        v1m_api_key="test-key",
+        v1m_model="v1m-decision-engine",
+        v1m_max_attempts=2,
+        v1m_retry_base_seconds=0.0,
+        v1m_retry_max_seconds=0.1,
+    )
+    with patch.object(v1m_module, "httpx", SimpleNamespace(post=_Client().post)):
+        with patch.object(v1m_module.time, "sleep", return_value=None):
+            payload = decide_v1m(
+                settings,
+                state={"url": "https://example.test"},
+                questions={"next_action": {"type": "choice", "instructions": "Choose"}},
+            )
+
+    assert len(calls) == 2
+    transport = payload["_v1m_transport"]
+    assert transport["attempt_count"] == 2
+    assert transport["retry_count"] == 1
+    assert transport["http_status_history"] == [503, 200]
+    assert transport["model_gate"] == "ok"
+
+
+def test_decide_v1m_does_not_retry_quota_429() -> None:
+    import monkeylm.models.v1m as v1m_module
+
+    reset_v1m_circuit_breaker()
+
+    class _Client:
+        def post(self, url, **kwargs):
+            return _FakeResponse(
+                payload={"detail": "quota exceeded"},
+                status_code=429,
+                text="quota exceeded",
+            )
+
+    settings = Settings(
+        v1m_api_key="test-key",
+        v1m_model="v1m-decision-engine",
+        v1m_max_attempts=3,
+    )
+    with patch.object(v1m_module, "httpx", SimpleNamespace(post=_Client().post)):
+        with pytest.raises(V1MDecisionError) as exc:
+            decide_v1m(
+                settings,
+                state={"url": "https://example.test"},
+                questions={"next_action": {"type": "choice", "instructions": "Choose"}},
+            )
+
+    assert exc.value.status_code == 429
+    assert exc.value.retry_count == 0
+    assert exc.value.attempt_count == 1
+
+
+def test_decide_v1m_circuit_breaker_opens_after_threshold() -> None:
+    import monkeylm.models.v1m as v1m_module
+
+    reset_v1m_circuit_breaker()
+    calls = []
+
+    class _Client:
+        def post(self, url, **kwargs):
+            calls.append(url)
+            return _FakeResponse(
+                payload={"detail": "unavailable"},
+                status_code=503,
+                headers={"x-should-retry": "false"},
+                text="unavailable",
+            )
+
+    settings = Settings(
+        v1m_api_key="test-key",
+        v1m_model="v1m-decision-engine",
+        v1m_max_attempts=1,
+        v1m_circuit_breaker_threshold=2,
+        v1m_circuit_breaker_cooldown_seconds=60.0,
+    )
+    with patch.object(v1m_module, "httpx", SimpleNamespace(post=_Client().post)):
+        with pytest.raises(V1MDecisionError):
+            decide_v1m(
+                settings,
+                state={"url": "https://example.test"},
+                questions={"next_action": {"type": "choice", "instructions": "Choose"}},
+            )
+        with pytest.raises(V1MDecisionError):
+            decide_v1m(
+                settings,
+                state={"url": "https://example.test"},
+                questions={"next_action": {"type": "choice", "instructions": "Choose"}},
+            )
+        with pytest.raises(V1MDecisionError) as opened:
+            decide_v1m(
+                settings,
+                state={"url": "https://example.test"},
+                questions={"next_action": {"type": "choice", "instructions": "Choose"}},
+            )
+
+    assert opened.value.kind == "circuit_open"
+    assert len(calls) == 2
+
+
+def test_v1m_model_drift_blocks_rerank() -> None:
+    async def _run():
+        snapshot = SimpleNamespace(
+            elements=["[id=7] <BUTTON text=\"Alternative\" />"],
+            form_controls=[],
+            forms=[],
+            modal_count=0,
+        )
+        payload = {
+            "model": "rev-latest",
+            "answers": {
+                "next_action": {
+                    "choice": "click:[id=7]",
+                    "confidence": 0.90,
+                    "probabilities": {"scroll": 0.10, "click:[id=7]": 0.90},
+                }
+            },
+        }
+        with patch(
+            "monkeylm.models.v1m.decide_v1m",
+            return_value=payload,
+        ):
+            result = await evaluate_v1m_shadow_decision(
+                Settings(
+                    v1m_rerank_enabled=True,
+                    v1m_api_key="test-key",
+                    v1m_model="v1m-decision-engine",
+                    v1m_model_pin_required=True,
+                ),
+                page_state="page",
+                snapshot=snapshot,
+                primary_plan={"action": "scroll", "target": "", "value": ""},
+                loop_context=True,
+                repeat_count=3,
+            )
+
+        assert result["outcome"] == "model_drift"
+        assert result["rerank_blocked_reason"] == "model_drift"
+        assert result["model_changed"] is True
+
+    asyncio.run(_run())
+
+
+def test_v1m_permutation_check_rejects_candidate_order_flip() -> None:
+    async def _run():
+        snapshot = SimpleNamespace(
+            elements=[
+                "[id=6] <BUTTON text=\"Repeated\" />",
+                "[id=7] <BUTTON text=\"Alternative\" />",
+            ],
+            form_controls=[],
+            forms=[],
+            modal_count=0,
+        )
+        original = {
+            "model": "v1m-decision-engine",
+            "answers": {
+                "next_action": {
+                    "choice": "click:[id=7]",
+                    "confidence": 0.90,
+                    "probabilities": {"click:[id=6]": 0.20, "click:[id=7]": 0.80},
+                }
+            },
+        }
+        reversed_payload = {
+            "model": "v1m-decision-engine",
+            "answers": {
+                "next_action": {
+                    "choice": "click:[id=6]",
+                    "confidence": 0.90,
+                    "probabilities": {"click:[id=6]": 0.80, "click:[id=7]": 0.20},
+                }
+            },
+        }
+        with patch(
+            "monkeylm.models.v1m.decide_v1m",
+            side_effect=[original, reversed_payload],
+        ):
+            result = await evaluate_v1m_shadow_decision(
+                Settings(
+                    v1m_rerank_enabled=True,
+                    v1m_api_key="test-key",
+                    v1m_model="v1m-decision-engine",
+                    v1m_model_pin_required=True,
+                    v1m_permutation_check_enabled=True,
+                ),
+                page_state="page",
+                snapshot=snapshot,
+                primary_plan={"action": "click", "target": "[id=6]", "value": ""},
+                loop_context=True,
+                seen_click_targets={"[id=6]"},
+                repeat_count=3,
+            )
+
+        assert result["outcome"] == "weak_rerank"
+        assert result["rerank_blocked_reason"] == "candidate_order_flip"
+        assert result["permutation_check"]["flip"] is True
+
+    asyncio.run(_run())
