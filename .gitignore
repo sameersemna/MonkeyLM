@@ -9,3 +9,4 @@ screenshots/*
 reports/*.*d*
 prs/
 firebase-debug.log
+logs/

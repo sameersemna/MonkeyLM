@@ -212,6 +212,7 @@ def generate_markdown_report(
 | Setting | Value |
 |---------|-------|
 | **Mode** | `{v1m_mode}` |
+| **Call Logs** | `{"enabled" if getattr(settings, 'v1m_logs', False) else "disabled"} (logs/systemone/)` |
 | **Model** | `{getattr(settings, 'v1m_model', 'v1m-decision-engine')}` |
 | **Model Pin Required** | `{"enabled" if getattr(settings, 'v1m_model_pin_required', True) else "disabled"}` |
 | **Timeout** | `{float(getattr(settings, 'v1m_timeout_seconds', 3.0)):.2f}s` |

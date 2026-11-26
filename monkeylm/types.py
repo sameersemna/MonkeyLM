@@ -66,6 +66,7 @@ class Settings:
     openai_base_url: str = "http://localhost:11434"
     openai_api_key: str = ""
     v1m_shadow_enabled: bool = False
+    v1m_logs: bool = False
     v1m_api_key: str = ""
     v1m_base_url: str = "https://v1m.ir"
     v1m_model: str = "v1m-decision-engine"

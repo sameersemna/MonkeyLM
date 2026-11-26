@@ -67,6 +67,20 @@ def parse_cli_args() -> argparse.Namespace:
         help="Disable V1M System One shadow decisions",
     )
     parser.set_defaults(v1m_shadow_enabled=None)
+    v1m_logs_group = parser.add_mutually_exclusive_group()
+    v1m_logs_group.add_argument(
+        "--v1m-logs",
+        dest="v1m_logs",
+        action="store_true",
+        help="Write JSON call records to logs/systemone",
+    )
+    v1m_logs_group.add_argument(
+        "--no-v1m-logs",
+        dest="v1m_logs",
+        action="store_false",
+        help="Disable V1M System One call JSON logging",
+    )
+    parser.set_defaults(v1m_logs=None)
 
     v1m_rerank_group = parser.add_mutually_exclusive_group()
     v1m_rerank_group.add_argument(

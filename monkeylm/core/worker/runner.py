@@ -192,9 +192,10 @@ async def run_worker(
     print(
         f"   └─ 🧭 V1M shadow "
         f"{'enabled' if v1m_shadow_enabled else 'disabled'} "
-        f"(api_key={'configured' if v1m_key_configured else 'missing'}, "
+        f"(logs={'enabled' if getattr(settings, 'v1m_logs', False) else 'disabled'}, "
+        f"api_key={'configured' if v1m_key_configured else 'missing'}, "
         f"endpoint={getattr(settings, 'v1m_base_url', 'https://v1m.ir').rstrip('/')}/v1/systemone, "
-        f"model={getattr(settings, 'v1m_model', 'rev-latest')}, "
+        f"model={getattr(settings, 'v1m_model', 'v1m-decision-engine')}, "
         f"model_pin={'required' if getattr(settings, 'v1m_model_pin_required', True) else 'disabled'}, "
         f"attempts={int(getattr(settings, 'v1m_max_attempts', 3))}, "
         f"retry={float(getattr(settings, 'v1m_retry_base_seconds', 0.25)):.2f}-"

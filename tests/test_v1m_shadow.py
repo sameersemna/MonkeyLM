@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import re
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
+from monkeylm.config import load_settings
 from monkeylm.models.v1m import (
     V1MDecisionError,
     build_v1m_candidates,
@@ -17,6 +21,7 @@ from monkeylm.models.v1m import (
     parse_v1m_choice,
     v1m_candidate_to_action_plan,
     reset_v1m_circuit_breaker,
+    write_v1m_call_log,
 )
 from monkeylm.reporting.telemetry import summarize_v1m_shadow_telemetry
 from monkeylm.types import Settings
@@ -749,3 +754,133 @@ def test_v1m_permutation_check_rejects_candidate_order_flip() -> None:
         assert result["permutation_check"]["flip"] is True
 
     asyncio.run(_run())
+
+
+def test_write_v1m_call_log_shape_filename_and_redaction(tmp_path) -> None:
+    settings = Settings(v1m_logs=True)
+    fixed = datetime(2026, 11, 26, 7, 13, 5, tzinfo=timezone.utc)
+
+    path = write_v1m_call_log(
+        settings,
+        url="https://v1m.ir/v1/systemone",
+        request_payload={
+            "model": "v1m-decision-engine",
+            "authorization": "Bearer v1m_secret",
+            "questions": {"next_action": {"type": "choice"}},
+        },
+        response_payload={
+            "status_code": 200,
+            "body": {"answers": {"next_action": {"choice": "scroll"}}},
+            "api_key": "v1m_secret",
+        },
+        now=fixed,
+        log_dir=tmp_path,
+    )
+
+    assert path is not None
+    assert path.name == "20261126_071305.json"
+    record = json.loads(path.read_text(encoding="utf-8"))
+    assert set(record) == {"url", "timestamp", "request", "response"}
+    assert record["url"] == "https://v1m.ir/v1/systemone"
+    assert record["request"]["method"] == "POST"
+    assert record["request"]["payload"]["authorization"] == "[REDACTED]"
+    assert record["response"]["body"]["api_key"] == "[REDACTED]"
+    assert "v1m_secret" not in path.read_text(encoding="utf-8")
+
+
+def test_write_v1m_call_log_disabled_creates_no_file(tmp_path) -> None:
+    settings = Settings(v1m_logs=False)
+    path = write_v1m_call_log(
+        settings,
+        url="https://v1m.ir/v1/systemone",
+        request_payload={"model": "v1m-decision-engine"},
+        response_payload={"status_code": 200, "body": {}},
+        now=datetime(2026, 11, 26, 7, 13, 5, tzinfo=timezone.utc),
+        log_dir=tmp_path,
+    )
+
+    assert path is None
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_write_v1m_call_log_same_second_collides_safely(tmp_path) -> None:
+    settings = Settings(v1m_logs=True)
+    fixed = datetime(2026, 11, 26, 7, 13, 5, tzinfo=timezone.utc)
+
+    first = write_v1m_call_log(
+        settings,
+        url="https://v1m.ir/v1/systemone",
+        request_payload={"model": "v1m-decision-engine"},
+        response_payload={"status_code": 200},
+        now=fixed,
+        log_dir=tmp_path,
+    )
+    second = write_v1m_call_log(
+        settings,
+        url="https://v1m.ir/v1/systemone",
+        request_payload={"model": "v1m-decision-engine"},
+        response_payload={"status_code": 200},
+        now=fixed,
+        log_dir=tmp_path,
+    )
+
+    assert first is not None
+    assert second is not None
+    assert first.name == "20261126_071305.json"
+    assert second.name == "20261126_071305_001.json"
+    assert re.fullmatch(r"\d{8}_\d{6}(?:_\d{3})?\.json", first.name)
+    assert re.fullmatch(r"\d{8}_\d{6}(?:_\d{3})?\.json", second.name)
+
+
+def test_v1m_logs_environment_toggle(monkeypatch) -> None:
+    monkeypatch.setenv("V1M_LOGS", "true")
+    with patch("dotenv.dotenv_values", return_value={}):
+        enabled = load_settings()
+    assert enabled.v1m_logs is True
+
+    monkeypatch.setenv("V1M_LOGS", "false")
+    with patch("dotenv.dotenv_values", return_value={}):
+        disabled = load_settings()
+    assert disabled.v1m_logs is False
+
+
+def test_decide_v1m_logs_success_when_enabled(tmp_path) -> None:
+    import monkeylm.models.v1m as v1m_module
+
+    reset_v1m_circuit_breaker()
+
+    class _Client:
+        def post(self, url, **kwargs):
+            return _FakeResponse(
+                payload={
+                    "model": "v1m-decision-engine",
+                    "answers": {
+                        "next_action": {
+                            "choice": "scroll",
+                            "confidence": 0.9,
+                            "probabilities": {"scroll": 0.9, "back": 0.1},
+                        }
+                    },
+                },
+                status_code=200,
+            )
+
+    settings = Settings(
+        v1m_logs=True,
+        v1m_api_key="test-key",
+        v1m_model="v1m-decision-engine",
+    )
+    with patch.object(v1m_module, "_V1M_LOG_DIR", tmp_path):
+        with patch.object(v1m_module, "httpx", SimpleNamespace(post=_Client().post)):
+            payload = decide_v1m(
+                settings,
+                state={"url": "https://example.test"},
+                questions={"next_action": {"type": "choice", "instructions": "Choose"}},
+            )
+
+    assert payload["answers"]["next_action"]["choice"] == "scroll"
+    files = list(tmp_path.glob("*.json"))
+    assert len(files) == 1
+    record = json.loads(files[0].read_text(encoding="utf-8"))
+    assert set(record) == {"url", "timestamp", "request", "response"}
+    assert record["response"]["body"]["body"]["model"] == "v1m-decision-engine"

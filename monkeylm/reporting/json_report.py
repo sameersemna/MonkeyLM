@@ -61,6 +61,8 @@ def generate_json_summary(
                 else "disabled"
             ),
             "shadow_enabled": getattr(settings, "v1m_shadow_enabled", False),
+            "logs_enabled": getattr(settings, "v1m_logs", False),
+            "log_directory": "logs/systemone",
             "rerank_enabled": getattr(settings, "v1m_rerank_enabled", False),
             "loop_rerank_only": getattr(settings, "v1m_loop_rerank_only", True),
             "model": getattr(settings, "v1m_model", "v1m-decision-engine"),

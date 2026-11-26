@@ -88,6 +88,7 @@ The advanced runner now supports both environment-variable configuration and CLI
 | `OPENAI_API_KEY` | unset | Optional bearer token sent to the configured endpoint. |
 | `OLLAMA_TIMEOUT_SECONDS` | `15` | Hard timeout in seconds for each LLM inference call. |
 | `V1M_SHADOW_ENABLED` | `false` | Enable the V1M native System One shadow reranker. It records comparisons but never changes the executed plan. |
+| `V1M_LOGS` | `false` | Write one sanitized JSON record per V1M HTTP attempt to `logs/systemone/`; set to `false` to disable. |
 | `V1M_API_KEY` | unset | Bearer token for the native V1M `/v1/systemone` endpoint. Keep it only in `.env`. |
 | `V1M_BASE_URL` | `https://v1m.ir` | V1M API origin. The native `/v1/systemone` endpoint is appended automatically. |
 | `V1M_MODEL` | `v1m-decision-engine` | Exact model ID; aliases should be rejected by default and recalibrate after a model-ID change. |
@@ -198,6 +199,12 @@ The CLI prints the V1M endpoint and model at worker startup, then each step
 prints the primary choice, finite candidates, V1M choice/probability,
 confidence, outcome, and latency. Shadow mode never executes V1M's alternative
 plan.
+
+When `V1M_LOGS=true`, each V1M HTTP attempt is written as a JSON file under
+`logs/systemone/`. Filenames use `YYYYMMDD_HHMMSS.json`; same-second collisions
+become `_001`, `_002`, and so on. Every file contains `url`, `timestamp`,
+`request`, and `response`. Bearer tokens and API-key-shaped fields are redacted.
+Set `V1M_LOGS=false` or use `--no-v1m-logs` to disable them.
 
 For a 20-step guarded rerank run:
 

@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import random
 import re
 import threading
+import tempfile
 import time
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 from monkeylm.config import Settings, _local_service_log, httpx
@@ -185,6 +189,137 @@ def _is_model_alias(model_id: str) -> bool:
     )
 
 
+_V1M_LOG_DIR = Path(__file__).resolve().parents[2] / "logs" / "systemone"
+_V1M_LOG_LOCK = threading.Lock()
+_SECRET_KEY_RE = re.compile(
+    r"(authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|"
+    r"bearer|password|credential|cookie|set[_-]?cookie|secret)",
+    re.IGNORECASE,
+)
+_BEARER_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+")
+_API_KEY_RE = re.compile(r"(?i)\b(?:sk|v1m_live)[-_][A-Za-z0-9._~-]+")
+
+
+def _sanitize_v1m_log_value(value: Any) -> Any:
+    """Redact credential-shaped keys and text from V1M call logs."""
+    if isinstance(value, dict):
+        sanitized = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if _SECRET_KEY_RE.search(key_text):
+                sanitized[key_text] = "[REDACTED]"
+            else:
+                sanitized[key_text] = _sanitize_v1m_log_value(item)
+        return sanitized
+    if isinstance(value, list):
+        return [_sanitize_v1m_log_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [_sanitize_v1m_log_value(item) for item in value]
+    if isinstance(value, str):
+        text = _BEARER_RE.sub("Bearer [REDACTED]", value)
+        text = _API_KEY_RE.sub("[REDACTED]", text)
+        return text
+    return value
+
+
+def _safe_v1m_response_headers(response: Any) -> Dict[str, str]:
+    headers = {}
+    for name in (
+        "content-type",
+        "retry-after",
+        "x-should-retry",
+        "x-request-id",
+        "request-id",
+        "content-length",
+    ):
+        value = _response_header(response, name).strip()
+        if value:
+            headers[name] = value
+    return headers
+
+
+def write_v1m_call_log(
+    settings: Settings,
+    *,
+    url: str,
+    request_payload: Any,
+    response_payload: Any = None,
+    error_payload: Any = None,
+    attempt: int = 1,
+    now: Optional[datetime] = None,
+    log_dir: Optional[Any] = None,
+) -> Optional[Path]:
+    """Write one sanitized V1M HTTP attempt to logs/systemone."""
+    if not getattr(settings, "v1m_logs", False):
+        return None
+
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    timestamp = now.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    filename_time = now.strftime("%Y%m%d_%H%M%S")
+    directory = Path(log_dir) if log_dir is not None else _V1M_LOG_DIR
+
+    request_record = {
+        "method": "POST",
+        "attempt": max(1, int(attempt)),
+        "timeout_seconds": float(getattr(settings, "v1m_timeout_seconds", 3.0)),
+        "payload": request_payload,
+    }
+    response_record: Dict[str, Any] = {}
+    if response_payload is not None:
+        response_record["body"] = response_payload
+    if error_payload is not None:
+        response_record["error"] = error_payload
+
+    record = {
+        "url": str(url),
+        "timestamp": timestamp,
+        "request": _sanitize_v1m_log_value(request_record),
+        "response": _sanitize_v1m_log_value(response_record),
+    }
+
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        try:
+            directory.chmod(0o700)
+        except (AttributeError, OSError):
+            pass
+
+        with _V1M_LOG_LOCK:
+            candidate = directory / f"{filename_time}.json"
+            collision = 1
+            while candidate.exists():
+                candidate = directory / f"{filename_time}_{collision:03d}.json"
+                collision += 1
+
+            fd, temporary_name = tempfile.mkstemp(
+                dir=str(directory),
+                prefix=".v1m_",
+                suffix=".json",
+            )
+            temporary_path = Path(temporary_name)
+            try:
+                os.fchmod(fd, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    json.dump(record, handle, ensure_ascii=False, indent=2)
+                    handle.write("\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary_path, candidate)
+                candidate.chmod(0o600)
+            finally:
+                if temporary_path.exists():
+                    temporary_path.unlink(missing_ok=True)
+        return candidate
+    except Exception as exc:
+        _local_service_log(
+            f"Failed to write V1M call log: {type(exc).__name__}",
+            getattr(settings, "output_dir", ""),
+        )
+        return None
+
+
 def decide_v1m(
     settings: Settings,
     *,
@@ -192,17 +327,45 @@ def decide_v1m(
     questions: Dict[str, Dict[str, Any]],
 ) -> Dict[str, Any]:
     """Send one native V1M System One request and return its decoded payload."""
-    http = _require_httpx()
     url = normalize_v1m_base_url(settings.v1m_base_url)
-    api_key = (settings.v1m_api_key or "").strip()
-    if not api_key:
-        raise V1MDecisionError("V1M API key is not configured", kind="missing_api_key")
-
     payload = {
         "state": state,
         "model": settings.v1m_model,
         "questions": questions,
     }
+    try:
+        http = _require_httpx()
+    except V1MDecisionError as exc:
+        write_v1m_call_log(
+            settings,
+            url=url,
+            request_payload=payload,
+            response_payload={
+                "status_code": None,
+                "headers": {},
+                "body": None,
+            },
+            error_payload={
+                "kind": exc.kind,
+                "message": str(exc),
+            },
+            attempt=0,
+        )
+        raise
+    api_key = (settings.v1m_api_key or "").strip()
+    if not api_key:
+        write_v1m_call_log(
+            settings,
+            url=url,
+            request_payload=payload,
+            response_payload=None,
+            error_payload={
+                "kind": "missing_api_key",
+                "message": "V1M API key is not configured",
+            },
+            attempt=0,
+        )
+        raise V1MDecisionError("V1M API key is not configured", kind="missing_api_key")
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -228,6 +391,21 @@ def decide_v1m(
         )
         error.circuit_state = circuit_state
         error.requested_model = str(settings.v1m_model)
+        write_v1m_call_log(
+            settings,
+            url=url,
+            request_payload=payload,
+            response_payload={
+                "status_code": None,
+                "headers": {},
+                "body": None,
+            },
+            error_payload={
+                "kind": "circuit_open",
+                "message": "V1M circuit breaker is open",
+            },
+            attempt=0,
+        )
         raise error
 
     retry_count = 0
@@ -248,6 +426,22 @@ def decide_v1m(
             name = type(exc).__name__.lower()
             text = str(exc).lower()
             kind = "timeout" if "timeout" in name or "timeout" in text else "transport_error"
+            write_v1m_call_log(
+                settings,
+                url=url,
+                request_payload=payload,
+                response_payload={
+                    "status_code": None,
+                    "headers": {},
+                    "body": None,
+                },
+                error_payload={
+                    "kind": kind,
+                    "message": str(exc),
+                    "attempt": attempt_count,
+                },
+                attempt=attempt_count,
+            )
             if attempt < max_attempts - 1:
                 retry_count += 1
                 delay = _full_jitter_delay(attempt, retry_base, retry_max)
@@ -276,6 +470,22 @@ def decide_v1m(
             try:
                 decoded = response.json()
             except Exception as exc:
+                write_v1m_call_log(
+                    settings,
+                    url=url,
+                    request_payload=payload,
+                    response_payload={
+                        "status_code": status_code,
+                        "headers": _safe_v1m_response_headers(response),
+                        "body": None,
+                    },
+                    error_payload={
+                        "kind": "malformed_response",
+                        "message": "V1M decision endpoint returned invalid JSON",
+                        "attempt": attempt_count,
+                    },
+                    attempt=attempt_count,
+                )
                 circuit_state = _circuit_record_failure(
                     url,
                     breaker_threshold,
@@ -294,6 +504,22 @@ def decide_v1m(
                 error.circuit_state = circuit_state
                 raise error from exc
             if not isinstance(decoded, dict):
+                write_v1m_call_log(
+                    settings,
+                    url=url,
+                    request_payload=payload,
+                    response_payload={
+                        "status_code": status_code,
+                        "headers": _safe_v1m_response_headers(response),
+                        "body": None,
+                    },
+                    error_payload={
+                        "kind": "malformed_response",
+                        "message": "V1M decision endpoint returned an unexpected payload",
+                        "attempt": attempt_count,
+                    },
+                    attempt=attempt_count,
+                )
                 circuit_state = _circuit_record_failure(
                     url,
                     breaker_threshold,
@@ -334,6 +560,18 @@ def decide_v1m(
                 "model_gate": model_gate,
                 "circuit_state": "closed",
             }
+            write_v1m_call_log(
+                settings,
+                url=url,
+                request_payload=payload,
+                response_payload={
+                    "status_code": status_code,
+                    "headers": _safe_v1m_response_headers(response),
+                    "body": decoded,
+                    "attempt": attempt_count,
+                },
+                attempt=attempt_count,
+            )
             _circuit_record_success(url)
             return decoded
 
@@ -345,6 +583,25 @@ def decide_v1m(
             and should_retry_header is not False
             and not quota_or_spend
             and attempt < max_attempts - 1
+        )
+        write_v1m_call_log(
+            settings,
+            url=url,
+            request_payload=payload,
+            response_payload={
+                "status_code": status_code,
+                "headers": _safe_v1m_response_headers(response),
+                "body": getattr(response, "text", ""),
+                "attempt": attempt_count,
+                "retryable": should_retry,
+                "quota_or_spend": quota_or_spend,
+            },
+            error_payload=None if should_retry else {
+                "kind": "http_error",
+                "message": f"V1M decision endpoint returned HTTP {status_code}",
+                "attempt": attempt_count,
+            },
+            attempt=attempt_count,
         )
         if should_retry:
             retry_count += 1

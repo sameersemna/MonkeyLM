@@ -357,6 +357,22 @@ def load_settings(cli_args: Optional[argparse.Namespace] = None) -> Settings:
         "V1M_SHADOW_ENABLED",
         default=_env_to_bool(ev_v1m_shadow, s.v1m_shadow_enabled),
     )
+    ev_v1m_logs = env_vars.get("V1M_LOGS")
+    if ev_v1m_logs is not None:
+        from monkeylm.config.defaults import _dotenv_overrides_shell
+
+        if _dotenv_overrides_shell():
+            s.v1m_logs = _env_to_bool(ev_v1m_logs, s.v1m_logs)
+        else:
+            s.v1m_logs = _env_to_bool(
+                os.getenv("V1M_LOGS"),
+                default=_env_to_bool(ev_v1m_logs, s.v1m_logs),
+            )
+    else:
+        s.v1m_logs = _env_to_bool(
+            os.getenv("V1M_LOGS"),
+            default=s.v1m_logs,
+        )
     s.v1m_api_key = _env_str(
         "V1M_API_KEY",
         env_vars.get("V1M_API_KEY") or os.getenv("V1M_API_KEY") or s.v1m_api_key,
@@ -588,6 +604,8 @@ def load_settings(cli_args: Optional[argparse.Namespace] = None) -> Settings:
             s.ollama_timeout_seconds = max(1.0, float(cli_args.ollama_timeout_seconds))
         if getattr(cli_args, "v1m_shadow_enabled", None) is not None:
             s.v1m_shadow_enabled = bool(cli_args.v1m_shadow_enabled)
+        if getattr(cli_args, "v1m_logs", None) is not None:
+            s.v1m_logs = bool(cli_args.v1m_logs)
         if getattr(cli_args, "v1m_rerank_enabled", None) is not None:
             s.v1m_rerank_enabled = bool(cli_args.v1m_rerank_enabled)
         if getattr(cli_args, "v1m_loop_rerank_only", None) is not None:

@@ -38,6 +38,7 @@ from monkeylm.models.v1m import (
     get_v1m_action_risk,
     get_v1m_probability_threshold,
     reset_v1m_circuit_breaker,
+    write_v1m_call_log,
 )
 
 __all__ = [
@@ -72,4 +73,5 @@ __all__ = [
     "get_v1m_action_risk",
     "get_v1m_probability_threshold",
     "reset_v1m_circuit_breaker",
+    "write_v1m_call_log",
 ]
