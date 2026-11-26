@@ -254,6 +254,16 @@ class FormRecord:
 
 
 @dataclass
+class SemanticElementRecord:
+    """Bounded semantic metadata for one visible interactive DOM element."""
+
+    id: int
+    tag: str
+    text: str = ""
+    attrs: List[str] = field(default_factory=list)
+
+
+@dataclass
 class PageSnapshot:
     """Normalized, lightweight representation of page state for diffing and planning."""
 
@@ -262,6 +272,7 @@ class PageSnapshot:
     dom_hash: str
     structure_hash: str
     elements: List[str] = field(default_factory=list)
+    semantic_elements: List[SemanticElementRecord] = field(default_factory=list)
     layout_anchors: Dict[str, Dict[str, float]] = field(default_factory=dict)
     modal_count: int = 0
     spinner_count: int = 0
@@ -304,6 +315,7 @@ __all__ = [
     "Settings",
     "FormControlRecord",
     "FormRecord",
+    "SemanticElementRecord",
     "PageSnapshot",
     "WorkerRunResult",
     "DefectTicket",

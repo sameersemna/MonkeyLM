@@ -125,6 +125,85 @@ def test_build_candidates_is_bounded_and_context_valid() -> None:
     assert all(candidate["action"] in {"scroll", "back", "type", "submit_form", "click"} for candidate in candidates)
 
 
+def test_build_candidates_include_rich_dom_semantics() -> None:
+    controls = [
+        SimpleNamespace(
+            control_id=3,
+            visible=True,
+            disabled=False,
+            readonly=False,
+            tag_name="input",
+            input_type="email",
+            name_attr="email",
+            id_attr="account-email",
+            placeholder="you@example.com",
+            aria_label="",
+            resolved_label="Email address",
+            required=True,
+            semantic_kind="email",
+            min_value="",
+            max_value="",
+            options=[],
+        ),
+    ]
+    snapshot = SimpleNamespace(
+        url="https://example.test/signup",
+        elements=[
+            "[id=3] <INPUT[type=email] text=\"Email address\" />",
+            "[id=4] <BUTTON text=\"Create account\" />",
+        ],
+        semantic_elements=[
+            SimpleNamespace(
+                id=3,
+                tag="input",
+                text="Email address",
+                attrs=[
+                    'role="textbox"',
+                    'aria-label="Email address"',
+                    'name="email"',
+                    'type="email"',
+                    'data-testid="signup-email"',
+                    "required",
+                ],
+            ),
+            SimpleNamespace(
+                id=4,
+                tag="button",
+                text="Create account",
+                attrs=[
+                    'class="primary submit"',
+                    'data-action="create-account"',
+                    "interactive-control",
+                ],
+            ),
+        ],
+        form_controls=controls,
+        forms=[],
+        modal_count=0,
+    )
+
+    candidates = build_v1m_candidates(
+        {"action": "scroll", "target": "", "value": ""},
+        snapshot,
+        max_candidates=6,
+    )
+    descriptions = {
+        candidate["id"]: candidate["description"]
+        for candidate in candidates
+    }
+
+    assert 'type:[id=3]' in descriptions
+    assert "EMAIL" in descriptions["type:[id=3]"].upper()
+    assert "Email address" in descriptions["type:[id=3]"]
+    assert 'name="email"' in descriptions["type:[id=3]"]
+    assert "required" in descriptions["type:[id=3]"]
+    assert "[id=3]" in descriptions["type:[id=3]"]
+    assert "click:[id=4]" in descriptions
+    assert "Create account" in descriptions["click:[id=4]"]
+    assert "BUTTON" in descriptions["click:[id=4]"].upper()
+    assert "[id=4]" in descriptions["click:[id=4]"]
+
+
 def test_shadow_disabled_never_calls_v1m() -> None:
     async def _run():
         with patch("monkeylm.models.v1m.decide_v1m") as decide:

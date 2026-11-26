@@ -750,6 +750,15 @@ def _snapshot_target_ids(snapshot: Any) -> set:
     for element in getattr(snapshot, "elements", []) or []:
         for match in re.finditer(r"\[id=(\d+)\]", str(element), re.IGNORECASE):
             ids.add(int(match.group(1)))
+    for element in getattr(snapshot, "semantic_elements", []) or []:
+        try:
+            ids.add(int(
+                getattr(element, "id")
+                if not isinstance(element, dict)
+                else element.get("id")
+            ))
+        except (TypeError, ValueError):
+            pass
     return ids
 
 
@@ -766,6 +775,185 @@ def _typeable_control_ids(snapshot: Any) -> set:
             continue
         ids.add(int(getattr(control, "control_id")))
     return ids
+
+
+def _bounded_description_text(value: Any, limit: int = 120) -> str:
+    text = str(value or "")
+    text = "".join(
+        char
+        for char in text
+        if char in "\t\n\r" or ord(char) >= 32
+    )
+    text = re.sub(r"\s+", " ", text).strip()
+    text = text.replace("<<<", "<< <").replace(">>>", "> >")
+    if len(text) > limit:
+        text = text[:limit].rstrip() + "..."
+    return text
+
+
+def _safe_description_value(value: Any, limit: int = 120) -> str:
+    text = _bounded_description_text(value, limit)
+    return text.replace("\\", "\\\\").replace('"', "'")
+
+
+def _parse_element_line(element: Any) -> Dict[str, Any]:
+    text = str(element or "")
+    id_match = re.search(r"\[id=(\d+)\]", text)
+    tag_match = re.search(r"<([A-Za-z][A-Za-z0-9:-]*)", text)
+    text_match = re.search(r'text="((?:[^"\\]|\\.)*)"', text)
+    parsed_text = text_match.group(1) if text_match else ""
+    parsed_text = parsed_text.replace('\\"', '"').replace("\\\\", "\\")
+    return {
+        "id": int(id_match.group(1)) if id_match else None,
+        "tag": tag_match.group(1).lower() if tag_match else "",
+        "text": _bounded_description_text(parsed_text, 120),
+    }
+
+
+def _semantic_element(
+    snapshot: Any,
+    target_id: Optional[int],
+) -> Optional[Dict[str, Any]]:
+    if target_id is None:
+        return None
+    for element in getattr(snapshot, "semantic_elements", []) or []:
+        if isinstance(element, dict):
+            element_id = element.get("id")
+            tag = element.get("tag", "")
+            text = element.get("text", "")
+            attrs = element.get("attrs", [])
+        else:
+            element_id = getattr(element, "id", None)
+            tag = getattr(element, "tag", "")
+            text = getattr(element, "text", "")
+            attrs = getattr(element, "attrs", [])
+        try:
+            if int(element_id) != int(target_id):
+                continue
+        except (TypeError, ValueError):
+            continue
+        safe_attrs = []
+        if isinstance(attrs, (list, tuple)):
+            for attr in attrs[:12]:
+                attr_text = _bounded_description_text(attr, 160)
+                if attr_text:
+                    safe_attrs.append(attr_text)
+        return {
+            "id": int(target_id),
+            "tag": _bounded_description_text(tag, 32).lower(),
+            "text": _bounded_description_text(text, 120),
+            "attrs": safe_attrs,
+        }
+
+    for element in getattr(snapshot, "elements", []) or []:
+        parsed = _parse_element_line(element)
+        if parsed["id"] == target_id:
+            return parsed
+    return None
+
+
+def _form_control(snapshot: Any, target_id: Optional[int]) -> Optional[Any]:
+    if target_id is None:
+        return None
+    for control in getattr(snapshot, "form_controls", []) or []:
+        try:
+            if int(getattr(control, "control_id", -1)) == int(target_id):
+                return control
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _candidate_description(
+    action: str,
+    target: str,
+    snapshot: Any,
+) -> str:
+    target_id = _extract_target_id(target)
+    semantic = _semantic_element(snapshot, target_id)
+    control = _form_control(snapshot, target_id)
+
+    parts: List[str] = []
+    tag = str((semantic or {}).get("tag", "") or "")
+    text = str((semantic or {}).get("text", "") or "")
+    attrs = list((semantic or {}).get("attrs", []) or [])
+
+    if control is not None:
+        control_tag = str(getattr(control, "tag_name", "") or "").strip().lower()
+        if control_tag:
+            tag = control_tag
+
+        label = _safe_description_value(
+            getattr(control, "resolved_label", "")
+            or getattr(control, "aria_label", "")
+            or getattr(control, "placeholder", ""),
+            80,
+        )
+        input_type = _safe_description_value(getattr(control, "input_type", ""), 32)
+        name_attr = _safe_description_value(getattr(control, "name_attr", ""), 80)
+        id_attr = _safe_description_value(getattr(control, "id_attr", ""), 80)
+        placeholder = _safe_description_value(getattr(control, "placeholder", ""), 80)
+        semantic_kind = _safe_description_value(getattr(control, "semantic_kind", ""), 32)
+
+        if tag:
+            parts.append(tag.upper())
+        if text:
+            parts.append(f'text="{_safe_description_value(text, 120)}"')
+        if label:
+            parts.append(f'label="{label}"')
+        if semantic_kind:
+            parts.append(f"kind={semantic_kind}")
+        if input_type:
+            parts.append(f'type="{input_type}"')
+        if name_attr:
+            parts.append(f'name="{name_attr}"')
+        if id_attr:
+            parts.append(f'id="{id_attr}"')
+        if placeholder:
+            parts.append(f'placeholder="{placeholder}"')
+        if getattr(control, "required", False):
+            parts.append("required")
+        if getattr(control, "disabled", False):
+            parts.append("disabled")
+        if getattr(control, "readonly", False):
+            parts.append("readonly")
+        min_value = getattr(control, "min_value", "")
+        max_value = getattr(control, "max_value", "")
+        if min_value:
+            parts.append(f'min="{_safe_description_value(min_value, 32)}"')
+        if max_value:
+            parts.append(f'max="{_safe_description_value(max_value, 32)}"')
+        options = getattr(control, "options", []) or []
+        if options:
+            safe_options = [
+                _safe_description_value(option, 40)
+                for option in options[:5]
+                if str(option).strip()
+            ]
+            if safe_options:
+                parts.append(f'options="{",".join(safe_options)}"')
+    else:
+        if tag:
+            parts.append(tag.upper())
+        if text:
+            parts.append(f'text="{_safe_description_value(text, 120)}"')
+
+    for attr in attrs:
+        attr_text = str(attr).strip()
+        if attr_text and attr_text not in parts:
+            parts.append(attr_text)
+
+    if not parts:
+        parts.append("visible interactive control")
+
+    parts.append(target)
+    verb = {
+        "click": "Click",
+        "type": "Enter a bounded test value into",
+        "submit_form": "Submit the form using",
+    }.get(action, "Use")
+    description = f"{verb} {' '.join(parts)}"
+    return _bounded_description_text(description, 420)
 
 
 def _candidate(
@@ -871,7 +1059,7 @@ def build_v1m_candidates(
                     candidate_id,
                     action,
                     target,
-                    f"Use {action} on the visible target {target}",
+                    _candidate_description(action, target, snapshot),
                 )
             )
 
@@ -900,7 +1088,7 @@ def build_v1m_candidates(
                 f"type:{target}",
                 "type",
                 target,
-                f"Enter a bounded test value into visible form control {target}",
+                _candidate_description("type", target, snapshot),
             )
         )
 
@@ -918,7 +1106,7 @@ def build_v1m_candidates(
                 f"submit_form:{target}",
                 "submit_form",
                 target,
-                f"Submit the visible form using submit target {target}",
+                _candidate_description("submit_form", target, snapshot),
             )
         )
 
@@ -937,7 +1125,7 @@ def build_v1m_candidates(
                 f"click:{target}",
                 "click",
                 target,
-                f"Click visible control {target}",
+                _candidate_description("click", target, snapshot),
             )
         )
 

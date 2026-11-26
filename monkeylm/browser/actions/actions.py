@@ -234,32 +234,44 @@ async def _action_submit_form(page: Page, settings: Any, target: str, input_payl
             submit_btn = form_locator.locator("button[type='submit'], input[type='submit']").first
             submit_btn_count = await _safe_count(submit_btn)
             if submit_btn_count > 0:
-                clicked = await _click_element_resilient(page, submit_btn, target=target, timeout_ms=2200)
-                if not clicked:
-                    _local_service_log(f"Step {step_num}: submit button for '{target}' could not be clicked reliably")
-                    try:
-                        await asyncio.wait_for(
-                            form_locator.evaluate(
-                                """
-                                (form) => {
-                                    if (!form) return false;
-                                    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
-                                    if (typeof form.requestSubmit === 'function') {
-                                        form.requestSubmit();
+                try:
+                    submit_enabled = await submit_btn.is_enabled(timeout=2000)
+                except Exception:
+                    submit_enabled = False
+                if not submit_enabled:
+                    _local_service_log(
+                        f"Step {step_num}: submit button for '{target}' is disabled; "
+                        "skipping click and preserving form state",
+                    )
+                    log_entry["status"] = "PARTIAL_SUCCESS"
+                    log_entry["error"] = "submit_button_disabled"
+                else:
+                    clicked = await _click_element_resilient(page, submit_btn, target=target, timeout_ms=2200)
+                    if not clicked:
+                        _local_service_log(f"Step {step_num}: submit button for '{target}' could not be clicked reliably")
+                        try:
+                            await asyncio.wait_for(
+                                form_locator.evaluate(
+                                    """
+                                    (form) => {
+                                        if (!form) return false;
+                                        form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+                                        if (typeof form.requestSubmit === 'function') {
+                                            form.requestSubmit();
+                                        }
+                                        return true;
                                     }
-                                    return true;
-                                }
-                                """,
-                                timeout=2000,
-                            ),
-                            timeout=2.0,
-                        )
-                        log_entry["status"] = "PARTIAL_SUCCESS"
-                        log_entry["error"] = "submit_fallback_dispatched"
-                    except Exception as fallback_exc:
-                        _local_service_log(f"Step {step_num}: submit fallback failed: {fallback_exc}")
-                        log_entry["status"] = "PARTIAL_SUCCESS"
-                        log_entry["error"] = f"submit_fallback_failed:{fallback_exc}"
+                                    """,
+                                    timeout=2000,
+                                ),
+                                timeout=2.0,
+                            )
+                            log_entry["status"] = "PARTIAL_SUCCESS"
+                            log_entry["error"] = "submit_fallback_dispatched"
+                        except Exception as fallback_exc:
+                            _local_service_log(f"Step {step_num}: submit fallback failed: {fallback_exc}")
+                            log_entry["status"] = "PARTIAL_SUCCESS"
+                            log_entry["error"] = f"submit_fallback_failed:{fallback_exc}"
             else:
                 inputs = form_locator.locator("input:visible, textarea:visible")
                 inputs_count = await _safe_count(inputs)

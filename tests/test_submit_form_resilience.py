@@ -11,6 +11,53 @@ from monkeylm.browser.actions.actions import _action_submit_form
 
 
 class SubmitFormResilienceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_disabled_submit_button_is_skipped_without_click(self) -> None:
+        class DisabledSubmitButton:
+            @property
+            def first(self) -> "DisabledSubmitButton":
+                return self
+
+            async def count(self, *args: object, **kwargs: object) -> int:
+                return 1
+
+            async def is_enabled(self, *args: object, **kwargs: object) -> bool:
+                return False
+
+        class FakeFormLocator:
+            def locator(self, selector: str) -> object:
+                return DisabledSubmitButton()
+
+        async def fake_resolve_form_boundary(page: object, target: str) -> tuple[object, str]:
+            return FakeFormLocator(), "resolved"
+
+        page = SimpleNamespace()
+        log_entry: dict[str, object] = {}
+
+        with patch(
+            "monkeylm.browser.actions.actions._resolve_form_boundary",
+            side_effect=fake_resolve_form_boundary,
+        ), patch(
+            "monkeylm.browser.actions.actions._locator_for_target_id",
+            new=AsyncMock(return_value=None),
+        ):
+            await asyncio.wait_for(
+                _action_submit_form(
+                    page,
+                    SimpleNamespace(),
+                    "[id=16]",
+                    [],
+                    "default",
+                    18,
+                    SimpleNamespace(form_controls=[]),
+                    None,
+                    log_entry,
+                ),
+                timeout=1.0,
+            )
+
+        self.assertEqual(log_entry.get("status"), "PARTIAL_SUCCESS")
+        self.assertEqual(log_entry.get("error"), "submit_button_disabled")
+
     async def test_submit_form_bails_out_on_slow_payload_fill(self) -> None:
         async def slow_fill(*args: object, **kwargs: object) -> bool:
             await asyncio.sleep(0.3)

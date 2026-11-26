@@ -12,7 +12,12 @@ except Exception:  # pragma: no cover - optional dependency path
     Page = Any  # type: ignore[misc]
 
 from .dom import capture_dom_and_layout
-from monkeylm.types import PageSnapshot, FormControlRecord, FormRecord
+from monkeylm.types import (
+    FormControlRecord,
+    FormRecord,
+    PageSnapshot,
+    SemanticElementRecord,
+)
 
 EMPTY_CONTENT_HASH = hashlib.sha256(b"").hexdigest()
 
@@ -149,12 +154,33 @@ async def get_page_state(page: Page, step_num: int, phase: str = "before", outpu
     except Exception:
         screenshot_path = ""
 
+    semantic_elements = []
+    for raw_element in raw.get("semanticElements", []) or []:
+        if not isinstance(raw_element, dict):
+            continue
+        try:
+            element_id = int(raw_element.get("id"))
+        except (TypeError, ValueError):
+            continue
+        attrs = raw_element.get("attrs", [])
+        if not isinstance(attrs, list):
+            attrs = []
+        semantic_elements.append(
+            SemanticElementRecord(
+                id=element_id,
+                tag=str(raw_element.get("tag", "") or "").strip().lower()[:32],
+                text=str(raw_element.get("text", "") or "").strip()[:120],
+                attrs=[str(attr)[:160] for attr in attrs[:12] if str(attr).strip()],
+            )
+        )
+
     return PageSnapshot(
         url=raw.get("url", page.url),
         title=raw.get("title", ""),
         dom_hash=dom_hash,
         structure_hash=structure_hash,
         elements=elements,
+        semantic_elements=semantic_elements,
         layout_anchors=raw.get("layoutAnchors", {}),
         modal_count=raw.get("modalCount", 0),
         spinner_count=raw.get("spinnerCount", 0),

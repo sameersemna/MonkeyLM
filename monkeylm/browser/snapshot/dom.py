@@ -30,6 +30,26 @@ async def capture_dom_and_layout(page: Page) -> Dict[str, Any]:
                 return (v === null || v === undefined) ? '' : String(v).trim();
             };
 
+            const normalizeHref = (el) => {
+                const raw = normalizeAttr(el, 'href');
+                if (!raw) return '';
+                try {
+                    const url = new URL(raw, document.baseURI);
+                    if (url.protocol === 'javascript:' || url.protocol === 'data:' || url.protocol === 'blob:') {
+                        return '';
+                    }
+                    if (url.protocol === 'mailto:' || url.protocol === 'tel:' || url.protocol === 'sms:') {
+                        return `scheme=${url.protocol.replace(':', '')}`;
+                    }
+                    if (url.origin === window.location.origin) {
+                        return url.pathname || '/';
+                    }
+                    return `${url.origin}${url.pathname || '/'}`;
+                } catch (_err) {
+                    return '';
+                }
+            };
+
             const isVisible = (el) => {
                 const rect = el.getBoundingClientRect();
                 return rect.width > 0 && rect.height > 0;
@@ -121,6 +141,7 @@ async def capture_dom_and_layout(page: Page) -> Dict[str, Any]:
 
             const interactives = Array.from(document.querySelectorAll(interactiveSelector));
             const tags = [];
+            const semanticElements = [];
             const anchors = {};
             let visibleIndex = 0;
 
@@ -134,6 +155,69 @@ async def capture_dom_and_layout(page: Page) -> Dict[str, Any]:
                 let typeInfo = el.tagName;
                 if (el.tagName === 'INPUT') typeInfo = `INPUT[type=${el.type}]`;
                 tags.push(`[id=${itemId}] <${typeInfo} text="${text}" />`);
+
+                const safeText = String(text || '').replace(/[\r\n]+/g, ' ').trim();
+                const attrs = [];
+                const role = normalizeAttr(el, 'role');
+                const name = normalizeAttr(el, 'name');
+                const idAttr = normalizeAttr(el, 'id');
+                const ariaLabel = normalizeAttr(el, 'aria-label');
+                const title = normalizeAttr(el, 'title');
+                const placeholder = normalizeAttr(el, 'placeholder');
+                const href = normalizeHref(el);
+                const typeAttr = normalizeAttr(el, 'type');
+                const testId = normalizeAttr(el, 'data-testid') || normalizeAttr(el, 'data-test');
+                if (role) attrs.push(`role="${role.slice(0, 80)}"`);
+                if (ariaLabel) attrs.push(`aria-label="${ariaLabel.slice(0, 80)}"`);
+                if (title) attrs.push(`title="${title.slice(0, 80)}"`);
+                if (placeholder) attrs.push(`placeholder="${placeholder.slice(0, 80)}"`);
+                if (name) attrs.push(`name="${name.slice(0, 80)}"`);
+                if (idAttr) attrs.push(`id="${idAttr.slice(0, 80)}"`);
+                if (href) attrs.push(`href="${href.slice(0, 160)}"`);
+                if (typeAttr) attrs.push(`type="${typeAttr.slice(0, 80)}"`);
+                if (testId) attrs.push(`data-testid="${testId.slice(0, 80)}"`);
+                for (const attrName of [
+                    'data-action',
+                    'data-role',
+                    'data-id',
+                    'data-name',
+                    'data-state',
+                    'data-kind',
+                    'data-qa',
+                ]) {
+                    const attrValue = normalizeAttr(el, attrName);
+                    if (attrValue) attrs.push(`${attrName}="${attrValue.slice(0, 80)}"`);
+                }
+                const labelInfo = (el.tagName === 'INPUT' || el.tagName === 'SELECT' || el.tagName === 'TEXTAREA')
+                    ? resolveLabel(el)
+                    : null;
+                if (labelInfo && labelInfo.text) {
+                    attrs.push(`label="${labelInfo.text.slice(0, 80)}"`);
+                }
+                if (el.disabled) attrs.push('disabled');
+                if (el.required) attrs.push('required');
+                if (el.readOnly) attrs.push('readonly');
+                if ('checked' in el && el.checked) attrs.push('checked');
+                if (el.tagName === 'SELECT') {
+                    const selected = Array.from(el.selectedOptions || [])
+                        .map(option => option.value || option.textContent.trim())
+                        .filter(Boolean)
+                        .slice(0, 5);
+                    if (selected.length) attrs.push(`selected="${selected.join(',').slice(0, 120)}"`);
+                }
+                if (el.tagName === 'BUTTON' || el.tagName === 'A' || el.tagName === 'INPUT') {
+                    attrs.push(el.getAttribute('href') ? 'interactive-link' : 'interactive-control');
+                }
+                const className = typeof el.className === 'string'
+                    ? el.className.split(/\\s+/).filter(Boolean).slice(0, 4).join(' ')
+                    : '';
+                if (className) attrs.push(`class="${className.slice(0, 160)}"`);
+                semanticElements.push({
+                    id: itemId,
+                    tag: el.tagName.toLowerCase(),
+                    text: safeText.slice(0, 120),
+                    attrs,
+                });
 
                 const idPart = el.id ? `#${el.id}` : '';
                 const clsPart = (el.className && typeof el.className === 'string')
@@ -244,6 +328,7 @@ async def capture_dom_and_layout(page: Page) -> Dict[str, Any]:
                 url: window.location.href,
                 title: document.title,
                 elements: tags,
+                semanticElements,
                 structure,
                 layoutAnchors: anchors,
                 modalCount: modals.length,
