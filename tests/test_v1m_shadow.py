@@ -10,6 +10,7 @@ from unittest.mock import patch
 import pytest
 
 from monkeylm.config import load_settings
+from monkeylm.browser.snapshot.dom import capture_dom_and_layout
 from monkeylm.models.v1m import (
     V1MDecisionError,
     build_v1m_candidates,
@@ -44,6 +45,23 @@ def test_normalize_v1m_base_url() -> None:
     assert normalize_v1m_base_url("https://v1m.ir") == "https://v1m.ir/v1/systemone"
     assert normalize_v1m_base_url("https://v1m.ir/v1") == "https://v1m.ir/v1/systemone"
     assert normalize_v1m_base_url("https://v1m.ir/v1/systemone") == "https://v1m.ir/v1/systemone"
+
+
+def test_dom_capture_javascript_contains_no_unescaped_newlines_in_regex() -> None:
+    source = __import__("inspect").getsource(capture_dom_and_layout)
+    tree = __import__("ast").parse(source)
+    evaluator_text = ""
+    for node in __import__("ast").walk(tree):
+        if isinstance(node, __import__("ast").Call):
+            func = node.func
+            if isinstance(func, __import__("ast").Attribute) and func.attr == "evaluate":
+                if node.args and isinstance(node.args[0], __import__("ast").Constant):
+                    evaluator_text = node.args[0].value
+                    break
+
+    assert evaluator_text
+    assert "[\\r\\n]" in evaluator_text
+    assert "\n.replace(/[\\r\n]/" not in evaluator_text
 
 
 def test_parse_v1m_choice_accepts_live_shape() -> None:

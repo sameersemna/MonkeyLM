@@ -156,7 +156,7 @@ async def capture_dom_and_layout(page: Page) -> Dict[str, Any]:
                 if (el.tagName === 'INPUT') typeInfo = `INPUT[type=${el.type}]`;
                 tags.push(`[id=${itemId}] <${typeInfo} text="${text}" />`);
 
-                const safeText = String(text || '').replace(/[\r\n]+/g, ' ').trim();
+                const safeText = String(text || '').replace(/[\\r\\n]+/g, ' ').trim();
                 const attrs = [];
                 const role = normalizeAttr(el, 'role');
                 const name = normalizeAttr(el, 'name');
